@@ -18,7 +18,7 @@ use std::process::ExitCode;
 use anyhow::Result;
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
-use llama_matrix_core::{build, cache, config as ls_config, matrix, policy::Policy, ui};
+use llama_matrix_core::{build, cache, config as ls_config, matrix, policy::Policy, settings, ui};
 
 mod completions;
 
@@ -187,7 +187,73 @@ fn run(cli: Cli) -> Result<()> {
             apply,
             out,
         }) => cmd_build(config, budget, margin, apply, out, json)?,
+        Some(Cmd::Configure { action }) => cmd_configure(action, json)?,
         Some(other) => not_yet(&verb_name(&other))?,
+    }
+    Ok(())
+}
+
+/// `configure` — the validated scalar-settings surface over llama-matrix.toml.
+fn cmd_configure(action: ConfigureAction, json: bool) -> Result<()> {
+    let file = PathBuf::from("llama-matrix.toml");
+    match action {
+        ConfigureAction::Set { key, value } => {
+            let display = settings::set(&file, &key, &value)?;
+            if json {
+                println!("{}", serde_json::json!({ "key": key, "value": display }));
+            } else {
+                ui::ok(&format!("{key} = {display}"));
+            }
+        }
+        ConfigureAction::Unset { key } => {
+            settings::unset(&file, &key)?;
+            if json {
+                println!("{}", serde_json::json!({ "unset": key }));
+            } else {
+                ui::ok(&format!("unset {key} (reverted to default)"));
+            }
+        }
+        ConfigureAction::Get { key } => {
+            let value = settings::get(&file, &key)?;
+            if json {
+                println!("{}", serde_json::json!({ "key": key, "value": value }));
+            } else {
+                println!("{value}");
+            }
+        }
+        ConfigureAction::List => {
+            let effective = settings::list(&file);
+            if json {
+                let map: serde_json::Map<String, serde_json::Value> = effective
+                    .iter()
+                    .map(|(key, value)| ((*key).to_string(), serde_json::Value::String(value.clone())))
+                    .collect();
+                println!("{}", serde_json::Value::Object(map));
+            } else {
+                for (key, value) in effective {
+                    println!("{key} = {value}");
+                }
+            }
+        }
+        ConfigureAction::Keys => {
+            if json {
+                let entries: Vec<serde_json::Value> = settings::SETTINGS
+                    .iter()
+                    .map(|setting| {
+                        serde_json::json!({
+                            "key": setting.key,
+                            "desc": setting.desc,
+                            "default": setting.default,
+                        })
+                    })
+                    .collect();
+                println!("{}", serde_json::Value::Array(entries));
+            } else {
+                for setting in settings::SETTINGS {
+                    println!("{:<12} {}  (default: {})", setting.key, setting.desc, setting.default);
+                }
+            }
+        }
     }
     Ok(())
 }

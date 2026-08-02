@@ -23,9 +23,9 @@ pub mod model; // per-model record: id, cmd, type, primary_file, param_hash
 pub mod param_hash; // the footprint key: a hash of only the memory-affecting flags
 pub mod platform; // GpuMemory trait + AMD sysfs / NVIDIA backends
 pub mod policy; // llama-matrix.toml: budget/margin/strategy/roles/groups/paths
+pub mod settings; // the `configure` get/set/unset/list/keys surface (scalars)
 pub mod ui; // stdout/stderr discipline + colour
 
 // Implemented in later milestones (kept out of the module tree until they land):
-//   settings    the `configure` get/set/unset/list/keys surface
 //   measure     phase 1: trigger -> ready -> stabilize; lockfile; failure classes
 //   apply       backup -> splice -> reload wait -> verify -> rollback
