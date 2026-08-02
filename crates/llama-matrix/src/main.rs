@@ -89,9 +89,13 @@ enum Cmd {
         /// Safety margin in GB (overrides the configured margin).
         #[arg(long)]
         margin: Option<f64>,
-        /// Splice the generated block into config.yaml (backup + verify + rollback).
+        /// Splice the generated block into config.yaml (backup + liveness check + rollback).
         #[arg(long)]
         apply: bool,
+        /// With --apply, skip the post-write liveness check (pure backup + splice;
+        /// no network round-trip). llama-swap hot-reloads on its own.
+        #[arg(long)]
+        no_verify: bool,
         /// Write the generated block to a file instead of stdout.
         #[arg(long)]
         out: Option<String>,
@@ -186,8 +190,9 @@ fn run(cli: Cli) -> Result<()> {
             budget,
             margin,
             apply,
+            no_verify,
             out,
-        }) => cmd_build(config, budget, margin, apply, out, json)?,
+        }) => cmd_build(config, budget, margin, apply, no_verify, out, json)?,
         Some(Cmd::Configure { action }) => cmd_configure(action, json)?,
         Some(Cmd::Measure {
             config,
@@ -590,6 +595,7 @@ fn cmd_build(
     budget: Option<f64>,
     margin: Option<f64>,
     apply: bool,
+    no_verify: bool,
     out: Option<String>,
     json: bool,
 ) -> Result<()> {
@@ -623,7 +629,7 @@ fn cmd_build(
     }
 
     if apply {
-        let result = apply::apply(Path::new(&config_path), &block, &policy.endpoint)?;
+        let result = apply::apply(Path::new(&config_path), &block, &policy.endpoint, !no_verify)?;
         if json {
             println!(
                 "{}",

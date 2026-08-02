@@ -70,9 +70,13 @@ pub fn splice(config_text: &str, block: &str) -> String {
     }
 }
 
-/// Back up the config, splice in the block, and check llama-swap stays live. On a
-/// dead endpoint after the write, roll back to the backup.
-pub fn apply(config_path: &Path, block: &str, endpoint: &str) -> Result<ApplyResult> {
+/// Back up the config and splice in the block. With `verify`, also confirm
+/// llama-swap stays live after the write — a **liveness check only**: it does NOT
+/// load any model or touch the GPU (it just pings `/v1/models`), and it rolls back
+/// if the service dies. With `verify == false`, back up + splice and return without
+/// any network round-trip — llama-swap hot-reloads on its own and safely keeps the
+/// old config if the new one is invalid.
+pub fn apply(config_path: &Path, block: &str, endpoint: &str, verify: bool) -> Result<ApplyResult> {
     let original = std::fs::read_to_string(config_path)
         .with_context(|| format!("reading {}", config_path.display()))?;
     let backup = PathBuf::from(format!("{}.pre-matrix.bak", config_path.display()));
@@ -82,6 +86,14 @@ pub fn apply(config_path: &Path, block: &str, endpoint: &str) -> Result<ApplyRes
     let spliced = splice(&original, block);
     std::fs::write(config_path, &spliced)
         .with_context(|| format!("writing {}", config_path.display()))?;
+
+    if !verify {
+        return Ok(ApplyResult {
+            backup,
+            verified: false,
+            note: "spliced (verify skipped) — llama-swap hot-reloads on its own".to_string(),
+        });
+    }
 
     let agent = ureq::builder().timeout(Duration::from_secs(8)).build();
     let models_url = format!("{endpoint}/v1/models");
@@ -101,7 +113,8 @@ pub fn apply(config_path: &Path, block: &str, endpoint: &str) -> Result<ApplyRes
         Ok(response) if response.status() == 200 => Ok(ApplyResult {
             backup,
             verified: true,
-            note: "spliced; llama-swap reloaded and is serving".to_string(),
+            note: "spliced; llama-swap still serving (liveness check — confirm the reload in its logs)"
+                .to_string(),
         }),
         _ => {
             std::fs::write(config_path, &original).with_context(|| {

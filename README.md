@@ -68,9 +68,10 @@ llama-matrix build --apply    # …or splice it into config.yaml, wait for reloa
 ```
 
 > `measure` talks to your **running** llama-swap and loads each model in turn — it
-> evicts your warm models, and a first full sweep can take minutes. On success,
-> `build --apply` splices the block, waits for llama-swap's hot-reload, and verifies
-> that a pack co-resides.
+> evicts your warm models, and a first full sweep can take minutes. `build --apply`
+> itself only writes the config and does a **liveness check** (it never loads models
+> or touches the GPU); add `--no-verify` for a pure backup-and-splice with no network
+> round-trip.
 
 Reserve part of the GPU for other apps, permanently or per-run:
 

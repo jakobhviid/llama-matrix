@@ -243,11 +243,17 @@ The apply step (invoked by `build --apply` — there is no standalone `apply` ve
    new block. Anchoring on the marker (not on `\nmatrix:`) makes the first cutover
    and every regeneration one code path and avoids duplicating the comment header.
    The `matrix:` block must be the last top-level block.
-3. **Wait** for llama-swap's hot-reload (`-watch-config`) and confirm a clean
-   reload with no error/invalid-key.
-4. **Verify** functionally where possible (request models from a pack, confirm
-   co-residency and that eviction stays under budget).
-5. **Roll back** to the backup on any anomaly.
+3. **Liveness-check** — ping `/v1/models` before and after the write to confirm
+   llama-swap is still serving. This does **not** load any model or touch the GPU;
+   and since llama-swap keeps the old config when the new one is invalid, a pass
+   means "the service survived", not "the new block parsed" — check the logs for
+   certainty. `build --apply --no-verify` skips this step entirely (pure backup +
+   splice, no network round-trip).
+4. **Roll back** to the backup if the service stops serving after the write.
+
+A *functional* check — loading a `pack`'s models to confirm co-residency and
+eviction — costs GPU time, so it's an **optional manual step** (see WORKFLOWS
+Loop 6), not part of `apply`.
 
 `matrix:` and llama-swap's older `groups:` engine are mutually exclusive; the
 generated block replaces `groups:` on first cutover.

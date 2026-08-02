@@ -137,6 +137,27 @@ fn build_apply_splices_the_block_and_backs_up() {
 }
 
 #[test]
+fn build_apply_no_verify_splices_without_a_network_round_trip() {
+    let dir = tempfile::tempdir().unwrap();
+    write_working_dir(dir.path());
+    fs::write(
+        dir.path().join("llama-matrix.toml"),
+        "budget = 100.0\nendpoint = \"http://127.0.0.1:59999\"\n",
+    )
+    .unwrap();
+    // --no-verify: pure backup + splice, no liveness check (so an unreachable
+    // endpoint is irrelevant); still succeeds and writes the block + backup.
+    Command::cargo_bin("llama-matrix")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["build", "--apply", "--no-verify"])
+        .assert()
+        .success();
+    assert!(fs::read_to_string(dir.path().join("config.yaml")).unwrap().contains("matrix:"));
+    assert!(dir.path().join("config.yaml.pre-matrix.bak").exists());
+}
+
+#[test]
 fn setup_writes_a_starter_config() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(

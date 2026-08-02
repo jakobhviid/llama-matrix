@@ -55,6 +55,12 @@ Roughly in order of value-to-effort:
 11. **Multi-GPU / multi-node.** A single unified pool today; discrete or multi-GPU
     makes the knapsack multi-dimensional (per-device budgets) — the Multi-Choice
     Multi-Dimensional Knapsack. A larger change to the fit predicate and emission.
+12. **Readable output (short vars / set names).** Mint the reserved `vars` aliases
+    (and/or shorter set names) so the block reads `+g_gemma` rather than
+    `+g_gemma_4_26b_a4b_q4qat`. Cosmetic — full ids work as-is on llama-swap v243+.
+13. **Per-pool VRAM/GTT split.** The `GpuMemory` trait reports summed occupancy, so
+    `d_vram`/`d_gtt` are recorded as 0. Expose the split (the AMD sysfs backend
+    already reads both pools) for per-pool insight — `build` uses only `d_total`.
 
 ## Premise risk (track this)
 

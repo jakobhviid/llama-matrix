@@ -57,7 +57,8 @@ The loop you run whenever the roster or a model's memory settings change:
 llama-matrix measure                 # sweep: load each changed model, record footprint
 llama-matrix build                   # preview the generated matrix block (prints; no writes)
 llama-matrix build --out matrix.yaml # …or write it to a file instead of stdout
-llama-matrix build --apply           # …or splice it into config.yaml, wait for reload, verify
+llama-matrix build --apply           # …or splice into config.yaml (backup + liveness check + rollback)
+llama-matrix build --apply --no-verify   # …or a pure backup-and-splice (no network round-trip)
 ```
 
 - `measure` is **incremental** — a model whose footprint-affecting flags are
@@ -144,7 +145,10 @@ All read-only and safe to run anytime.
 
 ## Loop 6 — Verify & roll back
 
-`build --apply` verifies automatically, but to check by hand after any change:
+`build --apply` does a **liveness check** automatically — it pings `/v1/models` to
+confirm llama-swap is still serving, and rolls back if not. It does **not** load
+models or touch the GPU. For a *functional* check (or after a `--no-verify` splice),
+do this by hand:
 
 1. Confirm a clean reload (llama-swap accepted the config; no `error`/`invalid`).
 2. **Co-residency:** request the models of one `pack` in turn; confirm they all
