@@ -1,0 +1,8 @@
+/target
+.claude/
+.DS_Store
+*.swp
+
+# Internal spec/reference kit — private box details (hostnames, IPs, real model
+# roster). Kept locally to build from; never published.
+/specdocs
