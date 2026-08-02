@@ -68,8 +68,8 @@ file — the pure half never needs a sensor.
    read stabilized footprint    ──▶  footprint, knapsack the fitting
               │                       combinations, emit the block
               ▼                                 │
-        measurements.json  ◀────────────────────┘
-        (multi-measurement cache)                ▼
+        measurements/  ◀────────────────────────┘
+        (per-model, per-box store)               ▼
                                           matrix: block  ──apply──▶  config.yaml
 ```
 
@@ -100,7 +100,7 @@ vs premature-exit) so a broken model is recorded, not retried forever.
 
 ### 2.2 Phase 2 — build
 
-Pure. Reads `measurements.json` + the config + policy, computes the matrix, and
+Pure. Reads the `measurements/` store + the config + policy, computes the matrix, and
 either prints it or splices it. No GPU, safe to run anytime. See §4.
 
 ---
@@ -123,7 +123,7 @@ reference `mlib`) is the single source of truth:
   container paths; a configurable `[paths]` map resolves them to host paths (an
   identity map when llama-swap runs natively).
 
-### 3.1 The param-hash & the multi-measurement cache
+### 3.1 The param-hash & the multi-measurement store
 
 A model can have several footprints over its life (a re-quant, a context or
 parallelism change). Each is stored under a **param-hash** = a hash of the launch
@@ -137,9 +137,20 @@ knobs, etc. — is stripped; everything else is hashed). Consequences:
 - The strip-list is deliberately conservative: an unlisted-but-irrelevant flag
   causes a harmless extra measure, never a wrong reuse (Principle #6).
 
-Entries are pruned **only** when the weight file is gone from disk — a model
-removed from the config but whose file remains is archived, so re-adding it hits
-the cache.
+**Storage.** The cache is a `measurements/` directory beside `llama-matrix.toml` —
+**one JSON file per model** (`<model-id>.json`, holding that model's param-hash-keyed
+measurement map) plus a reserved `_box.json` for the box-level values (baseline,
+detected total, additivity check) that have no per-model home. Per-model files
+avoid a single hand-edited blob, are cheap, and are **retained indefinitely** — a
+model removed from the config keeps its file, so re-adding it hits the cache.
+Pruning is **explicit only** (`llama-matrix prune`).
+
+**Why here, not beside the weights.** A footprint is a property of *(model, box)*,
+not of the model alone — the same weights on a different GPU measure differently. A
+sidecar next to the weights would carry a box-specific number across box boundaries
+(and often the weights dir is a read-only mount). Keeping the store in the
+config folder scopes it correctly to the box that measured it, alongside the
+box-level baseline/budget it belongs with.
 
 ---
 
@@ -245,7 +256,7 @@ crates/llama-matrix-core/
   src/param_hash.rs             # strip-list → hash
   src/platform.rs               # GpuMemory trait + AMD sysfs / NVIDIA backends
   src/measure.rs                # phase 1: trigger→ready→stabilize; lockfile; failures
-  src/cache.rs                  # measurements.json (multi-measurement) + prune + migrate
+  src/cache.rs                  # measurements/ per-model store + retention + migrate
   src/build.rs                  # variant-collapse, roles, knapsack, heavy classification
   src/matrix.rs                 # DSL emission + 1000-combo guard + evict_costs
   src/apply.rs                  # backup → splice → reload wait → verify → rollback

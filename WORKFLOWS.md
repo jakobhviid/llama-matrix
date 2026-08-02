@@ -15,8 +15,9 @@ Compiled into `--llm`.
 - **Two phases.** `measure` loads each model alone and records its footprint
   (GPU-touching, slow, cached). `build` is pure math over those footprints and
   emits/splices the block (fast, safe anytime).
-- **Three files.** Your llama-swap `config.yaml` (the roster — llama-matrix reads
-  it, and only ever rewrites the generated block). `measurements.json` (the cache
+- **What llama-matrix touches.** Your llama-swap `config.yaml` (the roster —
+  llama-matrix reads it, and only ever rewrites the generated block). A
+  `measurements/` directory (one small JSON per model, the per-box cache
   llama-matrix owns). `llama-matrix.toml` (your policy — budget, margin, strategy).
 - **Golden rule.** Under-declaring a fitting combo is safe; over-declaring OOMs. So
   after any change to a model's *memory* settings (`-c`, `-np`, quant, add/remove),
@@ -83,8 +84,9 @@ feed to the next.
 A non-memory edit (port, reasoning toggle, comments, TTL) doesn't change the
 param-hash → no re-measure and the matrix is identical, so no regeneration needed.
 
-Removing a model: drop it from `config.yaml`; its measurement is archived until the
-weight file is deleted from disk (then it's pruned).
+Removing a model: drop it from `config.yaml`; its `measurements/<id>.json` is
+**kept** (cheap, and re-adding is then an instant hit). Nothing is auto-deleted —
+run `llama-matrix prune` if you want to clear entries whose weights are gone.
 
 ---
 

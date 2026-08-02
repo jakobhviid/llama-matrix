@@ -76,8 +76,8 @@ LLM/agent can drive the whole lifecycle. See **`WORKFLOWS.md`**.
 ## How it works
 
 `measure` loads each model alone and reads live GPU occupancy after allocation
-settles, caching the delta over an empty baseline in `measurements.json` (keyed so
-that flipping a non-memory flag never re-measures). `build` collapses each model's
+settles, caching the delta over an empty baseline in a per-model measurement store
+(keyed so that flipping a non-memory flag never re-measures). `build` collapses each model's
 interchangeable quant/`-nothink` variants into one unit, then finds every *maximal*
 combination that fits under `ceiling = budget − margin` — because llama-swap treats
 any subset of a declared set as valid, declaring the maximal groups licenses all the
@@ -89,7 +89,7 @@ any anomaly.
 ## Documentation
 
 - **`ARCHITECTURE.md`** — the memory model, the two phases, the crate/module map.
-- **`SPEC.md`** — schemas of record: `llama-matrix.toml`, `measurements.json`, the
+- **`SPEC.md`** — schemas of record: `llama-matrix.toml`, the measurement store, the
   matrix DSL, the param-hash, config parsing.
 - **`WORKFLOWS.md`** — the operating loops (setup → measure → build → apply),
   written to be driven by a human or an agent.
@@ -105,7 +105,7 @@ All of the above are compiled into `llama-matrix --llm`.
 - A family/logical model is sized by its largest quant (safe but slightly
   pessimistic) — see the roadmap for actual-quant sizing.
 - `measure` needs a supported GPU sensor (AMD sysfs or NVIDIA); `build` works
-  anywhere from an existing `measurements.json` and a supplied `--budget`.
+  anywhere from an existing measurement store and a supplied `--budget`.
 
 ## AI disclosure
 

@@ -2,7 +2,7 @@
 
 The authoritative definitions. When this file and the code disagree, the **code
 wins and this doc is the bug** — fix the doc (Principle #10). Covers: the
-`llama-matrix.toml` policy schema, the `measurements.json` cache schema, the
+`llama-matrix.toml` policy schema, the per-model measurement-store schema, the
 llama-swap config parsing contract, the param-hash, model-type derivation, load
 triggers, and the matrix DSL. Compiled into `--llm`.
 
@@ -68,50 +68,74 @@ directly.
 
 ---
 
-## 2. `measurements.json` — the measure↔build contract
+## 2. The measurement store — the measure↔build contract
 
-Multi-measurement per model, keyed by the param-hash (§4). A model carries its
-`type`, its primary weight `file` (for prune), and a `measurements` map — one entry
-per distinct footprint it has been measured at.
+Measurements live in a **`measurements/` directory** beside `llama-matrix.toml`,
+**one JSON file per model** plus one reserved box-level file. Not a single blob:
+per-model files are small, never hand-edited, retained indefinitely (even after a
+model leaves the config), and cheap to keep — so old footprints stay cached and a
+re-added model is an instant hit. The store is **per box** (footprints are a
+property of `(model, box)`, so they must not travel with the weights).
+
+```
+<config-dir>/measurements/
+  _box.json            # box-level values (no per-model home)
+  <model-id>.json      # one per model; footprints stack here, keyed by param-hash
+```
+
+**`_box.json`:**
 
 ```json
 {
   "baseline": 0.16,           // GB, empty pool occupancy
-  "budget": 111.5,            // GB, detected total at sweep time (build may override)
-  "date": "2026-01-01",
-  "models": {
-    "coder-70b-q4km": {
-      "type": "llm",          // llm | embed | rerank | stt | image | tts-proxy
-      "file": "/models/Coder-70B/Coder-70B-Q4_K_M.gguf",  // in-container path; drives prune
-      "measurements": {
-        "b7e718dc3aac": {     // param-hash of the footprint-affecting flags
-          "status": "ok",     // ok | FAILED
-          "d_total": 49.05,   // GB delta over baseline — the primary number
-          "d_vram": 48.77, "d_gtt": 0.27,
-          "abs_total": 49.21, "abs_vram": 48.92, "abs_gtt": 0.29,
-          "load_s": 42.0,     // seconds to ready → feeds evict_costs
-          "params": "…the hashed (memory) cmd, human-readable…",
-          "measured_at": "2026-01-01"
-        }
-      }
+  "detected_total": 111.5,    // GB physical pool at sweep time (build may override via budget)
+  "date": "2026-01-01",       // last sweep
+  "additivity_check": { "combo": ["a","b","c"], "predicted": 73.15, "measured": 73.15, "error": 0.0 }
+}
+```
+
+**`<model-id>.json`** — multi-measurement per model, keyed by the param-hash (§4).
+Carries the model's `type`, its primary weight `file`, and a `measurements` map,
+one entry per distinct footprint it has been measured at:
+
+```json
+{
+  "type": "llm",              // llm | embed | rerank | stt | image | tts-proxy
+  "file": "/models/Coder-70B/Coder-70B-Q4_K_M.gguf",  // in-container path
+  "measurements": {
+    "b7e718dc3aac": {         // param-hash of the footprint-affecting flags
+      "status": "ok",         // ok | FAILED
+      "d_total": 49.05,       // GB delta over baseline — the primary number
+      "d_vram": 48.77, "d_gtt": 0.27,
+      "abs_total": 49.21, "abs_vram": 48.92, "abs_gtt": 0.29,
+      "load_s": 42.0,         // seconds to ready → feeds evict_costs
+      "params": "…the hashed (memory) cmd, human-readable…",
+      "measured_at": "2026-01-01"
     }
-  },
-  "additivity_check": {
-    "combo": ["a", "b", "c"],
-    "predicted": 73.15, "measured": 73.15, "error": 0.0
   }
 }
 ```
 
-**Consumer rule (build):** for each model, compute its param-hash from the *current*
-config and select `models[id].measurements[hash]`. Hand-set proxy entries not in the
-config worklist fall back to their sole `ok` measurement. Use `d_total` for fit
-math, `load_s` for eviction cost. `FAILED` entries carry no footprint and are
-excluded. A model with no `ok` measurement at the current hash is skipped with a
-warning — the build runs on partial data; **missing is never treated as fits.**
+The filename is the model id (a legible 1:1 with config entries). Lookup is by
+param-hash regardless of filename, so a model whose id was renamed can be recovered
+by scanning the directory for a matching param-hash before re-measuring.
 
-**Prune:** a model's entry is dropped only when its weight file is gone from disk.
-Removed-from-config-but-file-present is archived (re-adding hits the cache).
+**Consumer rule (build):** for each model, compute its param-hash from the *current*
+config, read `measurements/<id>.json`, and select `measurements[hash]`. Hand-set
+proxy entries not in the config worklist fall back to their sole `ok` measurement.
+Use `d_total` for fit math, `load_s` for eviction cost. `FAILED` entries carry no
+footprint and are excluded. A model with no `ok` measurement at the current hash is
+skipped with a warning — the build runs on partial data; **missing is never treated
+as fits.**
+
+**Retention & prune:** nothing is auto-deleted — a model removed from the config
+keeps its file (re-adding hits the cache). Pruning is **explicit only**
+(`llama-matrix prune`), which may drop entries whose weight file is gone from disk.
+
+**Migration:** a legacy single `measurements.json` (one blob, `models`/`baseline`/
+`additivity_check` at top level) is read and split into the per-model layout on
+first write; a legacy flat (one-measurement-per-model) entry is re-keyed under the
+model's current param-hash.
 
 **Migration:** a legacy flat (one-measurement-per-model) file is upgraded by
 re-keying each entry under the model's current param-hash.
@@ -224,7 +248,7 @@ llama-matrix reads a standard llama-swap `config.yaml`:
 
 Hand-set proxy entries (e.g. a fronted TTS service with a placeholder `cmd`) are
 typed `tts-proxy` and excluded from the measure worklist; their footprint is set in
-`measurements.json` by hand (often ~0 GPU).
+their `measurements/<id>.json` by hand (often ~0 GPU).
 
 ## 7. Load triggers (how `measure` forces a load)
 
@@ -256,7 +280,7 @@ type-agnostic; only the load trigger differs.
 ## 9. Not in the schema (explicitly)
 
 - No per-model hand-written footprints in `llama-matrix.toml` — footprints live
-  only in `measurements.json`, only from a real measurement.
+  only in the `measurements/` store, only from a real measurement.
 - No `groups:` output — llama-matrix emits `matrix:` only (the memory-aware engine).
 - No idle-TTL policy management — residency is demand-driven via the matrix; TTLs
   are the operator's concern in `config.yaml`.
