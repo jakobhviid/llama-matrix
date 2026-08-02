@@ -188,7 +188,84 @@ fn run(cli: Cli) -> Result<()> {
             out,
         }) => cmd_build(config, budget, margin, apply, out, json)?,
         Some(Cmd::Configure { action }) => cmd_configure(action, json)?,
+        Some(Cmd::Measure {
+            config,
+            endpoint,
+            force,
+            only,
+        }) => cmd_measure(config, endpoint, force, only, json)?,
         Some(other) => not_yet(&verb_name(&other))?,
+    }
+    Ok(())
+}
+
+/// `measure` — the GPU-touching solo-footprint sweep.
+fn cmd_measure(
+    config: Option<String>,
+    endpoint: Option<String>,
+    force: bool,
+    only: Option<String>,
+    json: bool,
+) -> Result<()> {
+    use llama_matrix_core::measure::{sweep, MeasureOptions};
+    use std::time::Duration;
+
+    let policy = Policy::load(PathBuf::from("llama-matrix.toml"))?;
+    let config_dir = std::env::current_dir()?;
+    let config_path = config
+        .or_else(|| policy.config.clone())
+        .unwrap_or_else(|| "config.yaml".to_string());
+    let parsed = ls_config::parse_file(&config_path)?;
+    let store = cache::Store::new(config_dir.join("measurements"));
+
+    let endpoint = endpoint.unwrap_or_else(|| policy.endpoint.clone());
+    let only = only.map(|list| list.split(',').map(|id| id.trim().to_string()).collect::<Vec<_>>());
+    let options = MeasureOptions {
+        endpoint,
+        force,
+        only,
+        load_timeout: Duration::from_secs(300),
+    };
+
+    if !json {
+        ui::info(&format!(
+            "measuring {} models against {} — this loads each model in turn",
+            parsed.models.len(),
+            options.endpoint
+        ));
+    }
+    let summary = sweep(&parsed.models, &store, &policy, &options)?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "baseline": summary.baseline,
+                "detected_total": summary.detected_total,
+                "measured": summary.measured,
+                "cached": summary.cached,
+                "failed": summary.failed.iter()
+                    .map(|(id, reason)| serde_json::json!({ "id": id, "reason": reason }))
+                    .collect::<Vec<_>>(),
+                "skipped_missing": summary.skipped_missing,
+            })
+        );
+    } else {
+        ui::ok(&format!(
+            "baseline {:.2} GB · pool {:.1} GB · measured {} · cached {} · failed {} · missing {}",
+            summary.baseline,
+            summary.detected_total,
+            summary.measured.len(),
+            summary.cached.len(),
+            summary.failed.len(),
+            summary.skipped_missing.len()
+        ));
+        for (id, reason) in &summary.failed {
+            ui::warn(&format!("{id}: {reason}"));
+        }
+        for id in &summary.skipped_missing {
+            ui::warn(&format!("{id}: weight file missing — skipped"));
+        }
     }
     Ok(())
 }

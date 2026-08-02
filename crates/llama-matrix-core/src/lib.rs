@@ -19,6 +19,7 @@ pub mod build; // variant-collapse, roles, the knapsack, heavy classification ->
 pub mod cache; // the per-model measurement store (measurements/<id>.json + _box.json)
 pub mod config; // parse llama-swap config.yaml (+ macro expansion) into model records
 pub mod matrix; // render a plan to the `matrix:` DSL block (+ the generated marker)
+pub mod measure; // phase 1: trigger -> ready -> stabilize; lockfile; failure classes
 pub mod model; // per-model record: id, cmd, type, primary_file, param_hash
 pub mod param_hash; // the footprint key: a hash of only the memory-affecting flags
 pub mod platform; // GpuMemory trait + AMD sysfs / NVIDIA backends
@@ -26,6 +27,5 @@ pub mod policy; // llama-matrix.toml: budget/margin/strategy/roles/groups/paths
 pub mod settings; // the `configure` get/set/unset/list/keys surface (scalars)
 pub mod ui; // stdout/stderr discipline + colour
 
-// Implemented in later milestones (kept out of the module tree until they land):
-//   measure     phase 1: trigger -> ready -> stabilize; lockfile; failure classes
+// Implemented in a later milestone (kept out of the module tree until it lands):
 //   apply       backup -> splice -> reload wait -> verify -> rollback
