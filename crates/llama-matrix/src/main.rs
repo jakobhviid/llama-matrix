@@ -207,7 +207,7 @@ fn run(cli: Cli) -> Result<()> {
 fn cmd_prune(yes: bool, json: bool) -> Result<()> {
     let policy = Policy::load(PathBuf::from("llama-matrix.toml"))?;
     let config_dir = std::env::current_dir()?;
-    let store = cache::Store::new(config_dir.join("measurements"));
+    let store = open_store(&config_dir, json)?;
 
     let mut removable = Vec::new();
     for id in store.list_ids() {
@@ -253,6 +253,17 @@ fn cmd_prune(yes: bool, json: bool) -> Result<()> {
         ui::ok(&format!("pruned {} measurement file(s)", removable.len()));
     }
     Ok(())
+}
+
+/// Open the measurement store, first migrating a legacy single-file
+/// `measurements.json` in the config dir if the per-model store is still empty.
+fn open_store(config_dir: &Path, json: bool) -> Result<cache::Store> {
+    let store = cache::Store::new(config_dir.join("measurements"));
+    let migrated = store.migrate_legacy(&config_dir.join("measurements.json"))?;
+    if migrated > 0 && !json {
+        ui::info(&format!("migrated {migrated} model(s) from a legacy measurements.json"));
+    }
+    Ok(store)
 }
 
 /// Load the config + measurement store and compute the matrix plan. Shared by
@@ -306,7 +317,7 @@ fn cmd_drift(json: bool) -> Result<()> {
     let policy = Policy::load(PathBuf::from("llama-matrix.toml"))?;
     let config_dir = std::env::current_dir()?;
     let config_path = policy.config.clone().unwrap_or_else(|| "config.yaml".to_string());
-    let store = cache::Store::new(config_dir.join("measurements"));
+    let store = open_store(&config_dir, json)?;
 
     if store.list_ids().is_empty() {
         if json {
@@ -454,7 +465,7 @@ fn cmd_measure(
         .or_else(|| policy.config.clone())
         .unwrap_or_else(|| "config.yaml".to_string());
     let parsed = ls_config::parse_file(&config_path)?;
-    let store = cache::Store::new(config_dir.join("measurements"));
+    let store = open_store(&config_dir, json)?;
 
     let endpoint = endpoint.unwrap_or_else(|| policy.endpoint.clone());
     let only = only.map(|list| list.split(',').map(|id| id.trim().to_string()).collect::<Vec<_>>());
@@ -594,7 +605,7 @@ fn cmd_build(
         .or_else(|| policy.config.clone())
         .unwrap_or_else(|| "config.yaml".to_string());
 
-    let store = cache::Store::new(config_dir.join("measurements"));
+    let store = open_store(&config_dir, json)?;
     if store.list_ids().is_empty() {
         anyhow::bail!(
             "no measurements in {} — run `llama-matrix measure` first",

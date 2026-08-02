@@ -81,6 +81,24 @@ pub struct ModelStore {
     pub measurements: IndexMap<String, Measurement>,
 }
 
+/// The legacy single-file schema (the reference tooling's `measurements.json`):
+/// box-level values at the top level plus a `models` map whose values already
+/// match [`ModelStore`]. Read only for migration.
+#[derive(Debug, Deserialize)]
+struct LegacyFile {
+    #[serde(default)]
+    baseline: f64,
+    /// The legacy `budget` becomes our detected-total.
+    #[serde(default)]
+    budget: Option<f64>,
+    #[serde(default)]
+    date: Option<String>,
+    #[serde(default)]
+    models: IndexMap<String, ModelStore>,
+    #[serde(default)]
+    additivity_check: Option<AdditivityCheck>,
+}
+
 /// A handle to a `measurements/` directory.
 pub struct Store {
     dir: PathBuf,
@@ -147,6 +165,31 @@ impl Store {
             std::fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
         }
         Ok(())
+    }
+
+    /// Migrate a legacy single-file `measurements.json` (the reference tooling's
+    /// one-blob format) into this per-model store. A no-op if the store already
+    /// has models or the legacy file is absent. Returns the number of models
+    /// migrated.
+    pub fn migrate_legacy(&self, legacy_path: &Path) -> Result<usize> {
+        if !self.list_ids().is_empty() || !legacy_path.exists() {
+            return Ok(0);
+        }
+        let text = std::fs::read_to_string(legacy_path)
+            .with_context(|| format!("reading {}", legacy_path.display()))?;
+        let legacy: LegacyFile = serde_json::from_str(&text)
+            .with_context(|| format!("parsing legacy {}", legacy_path.display()))?;
+
+        self.write_box(&BoxMeta {
+            baseline: legacy.baseline,
+            detected_total: legacy.budget,
+            date: legacy.date,
+            additivity_check: legacy.additivity_check,
+        })?;
+        for (id, model_store) in &legacy.models {
+            self.write_model(id, model_store)?;
+        }
+        Ok(legacy.models.len())
     }
 
     /// The `ok` measurement for `(id, param_hash)`. Falls back to a model's sole
@@ -235,5 +278,38 @@ mod tests {
         // sole-ok fallback on a hash miss
         assert_eq!(store.select("coder-70b", "other").unwrap().unwrap().d_total, 49.0);
         assert_eq!(store.list_ids(), vec!["coder-70b".to_string()]);
+    }
+
+    #[test]
+    fn migrates_a_legacy_single_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy = dir.path().join("measurements.json");
+        std::fs::write(
+            &legacy,
+            r#"{
+              "baseline": 0.16,
+              "budget": 111.5,
+              "date": "2026-01-01",
+              "models": {
+                "embed": {"type":"embed","file":"/e.gguf","measurements":{"h":{"status":"ok","d_total":7.0,"load_s":6.0}}},
+                "chat":  {"type":"llm","file":"/c.gguf","measurements":{"g":{"status":"ok","d_total":30.0,"load_s":20.0}}}
+              },
+              "additivity_check": {"combo":["embed","chat"],"predicted":37.16,"measured":37.16,"error":0.0}
+            }"#,
+        )
+        .unwrap();
+
+        let store = Store::new(dir.path().join("measurements"));
+        let migrated = store.migrate_legacy(&legacy).unwrap();
+        assert_eq!(migrated, 2);
+
+        let box_meta = store.read_box().unwrap();
+        assert_eq!(box_meta.baseline, 0.16);
+        assert_eq!(box_meta.detected_total, Some(111.5));
+        assert_eq!(store.select("embed", "h").unwrap().unwrap().d_total, 7.0);
+        assert_eq!(store.select("chat", "g").unwrap().unwrap().d_total, 30.0);
+
+        // idempotent: a second call is a no-op (store already populated)
+        assert_eq!(store.migrate_legacy(&legacy).unwrap(), 0);
     }
 }
