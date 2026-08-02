@@ -34,4 +34,12 @@ computes and stamps it.
 either fails, the push does **not** publish. `cargo build`/`cargo test` alone is
 not enough — **clippy is the gate** (warnings are errors), so run
 `cargo clippy --workspace --all-targets -- -D warnings` locally before every
-push. (There is deliberately **no** `cargo fmt` gate — don't add one.)
+push.
+
+There is deliberately **no** `cargo fmt` gate. The reason, so it isn't
+re-litigated: the tree is already rustfmt-shaped (the clippy gate keeps it tidy),
+so a gate would catch drift that isn't happening — while forcing a `rust-toolchain.toml`
+pin, since a fmt check against the floating `stable` channel breaks whenever
+rustfmt's output shifts. Near-zero benefit for real ongoing cost. If you ever *do*
+want it, add the toolchain pin in the same change and run it as a separate lint
+workflow (never in `release.yml`, where a whitespace diff would block a release).

@@ -22,7 +22,7 @@ budget      = 50.0                       # GB llama-matrix may plan against.
                                          #   Omit → auto-detect the physical total.
 margin      = 4.0                        # GB safety slack inside the budget.
 strategy    = "flat"                     # flat | family
-on_overflow = "group"                    # group | error  (1000-combo cap handling)
+on_overflow = "group"                    # group | error  (over-cap / too-many-combos handling)
 
 # ---- structured tables (hand-edited) ----
 
@@ -48,7 +48,7 @@ gemma = ["gemma-27b-q4", "gemma-27b-q4-nothink", "gemma-27b-abliterated-q5"]
 | `budget` | float (GB) | *auto-detected total* | hard cap; resolution: `--budget` > this > detected total > **error** |
 | `margin` | float (GB) | `4.0` | `ceiling = budget − margin` |
 | `strategy` | enum | `flat` | `flat` = no grouping (max flexibility); `family` = collapse `[groups]` |
-| `on_overflow` | enum | `group` | `group` = omit any over-cap set + warn (a safe under-declaration); `error` = refuse |
+| `on_overflow` | enum | `group` | applies to **both** the 1000-combination cap and an intractably large maximal-pack enumeration. `group` = drop the over-cap set / keep the bounded packs + warn (a safe under-declaration); `error` = refuse |
 
 ### 1.2 The `configure` surface
 

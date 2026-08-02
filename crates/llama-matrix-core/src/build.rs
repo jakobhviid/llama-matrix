@@ -16,6 +16,20 @@ use anyhow::{bail, Result};
 use crate::model::ModelType;
 use crate::policy::{OnOverflow, Policy, Strategy};
 
+/// Work budget for maximal-pack enumeration. Enumerating maximal fitting packs is
+/// worst-case exponential in the light-unit count, so the recursion runs under a
+/// node ceiling; past this many visited nodes we stop and fail over (never hang).
+/// Sized so any physically plausible single-box roster completes with headroom
+/// (a ~20-unit powerset is ~1M nodes) while a pathological roster stops in ~a
+/// second. The "whole roster fits" common case is short-circuited before we ever
+/// recurse, so this only bites the genuinely combinatorial regime.
+const ENUM_NODE_BUDGET: usize = 5_000_000;
+
+/// Ceiling on emitted maximal packs. A real matrix has tens; a roster of many
+/// distinct pairwise-fitting units can yield C(n,k) maximal packs (thousands+),
+/// which is an unusable block regardless. Past this many we stop and fail over.
+const MAX_PACKS: usize = 1024;
+
 /// A measured model handed to the builder.
 #[derive(Debug, Clone)]
 pub struct ModelFootprint {
@@ -177,26 +191,61 @@ fn apply_groups(units: Vec<Unit>, policy: &Policy) -> Vec<Unit> {
     grouped
 }
 
-/// Enumerate every subset of `sizes` whose total ≤ `limit` (indices strictly
-/// increasing, so each combination appears once).
-fn enumerate_fitting_subsets(
+/// Enumerate the **maximal** fitting packs of `sizes` directly: every subset whose
+/// total ≤ `limit` that no further unit can be added to without exceeding it.
+/// Emitting only maximal packs is sufficient — llama-swap treats any subset of a
+/// declared set as valid (ARCHITECTURE §4.3) — and recording maximality inline (an
+/// O(n) test per node) avoids the previous enumerate-all-subsets-then-filter pass,
+/// whose maximal filter was O(subsets²) and hung on a large light-unit roster.
+///
+/// `node_budget` bounds the recursion and `results` is capped at `MAX_PACKS`:
+/// enumerating maximal packs is worst-case exponential, so if either limit is hit
+/// the walk stops and returns `false` (truncated). The packs collected so far are
+/// still valid and safe — a smaller declaration never OOMs (Principle #1) — and the
+/// caller warns and applies `on_overflow`. Returns `true` iff the walk completed.
+fn enumerate_maximal_packs(
     start: usize,
     chosen: &mut Vec<usize>,
     running_total: f64,
     sizes: &[f64],
     limit: f64,
+    node_budget: &mut usize,
     results: &mut Vec<Vec<usize>>,
-) {
+) -> bool {
+    if *node_budget == 0 || results.len() >= MAX_PACKS {
+        return false;
+    }
+    *node_budget -= 1;
+
+    // Maximal ⟺ no unit outside `chosen` still fits in the headroom. (A fitting
+    // superset would add exactly such a unit, so "nothing addable" is precisely
+    // "no fitting superset" — the predicate the old O(subsets²) filter computed.)
+    let nothing_addable = (0..sizes.len())
+        .filter(|index| !chosen.contains(index))
+        .all(|index| running_total + sizes[index] > limit);
+    if nothing_addable && !chosen.is_empty() {
+        results.push(chosen.clone());
+    }
+
     for index in start..sizes.len() {
         if running_total + sizes[index] <= limit {
             chosen.push(index);
-            enumerate_fitting_subsets(index + 1, chosen, running_total + sizes[index], sizes, limit, results);
+            let completed = enumerate_maximal_packs(
+                index + 1,
+                chosen,
+                running_total + sizes[index],
+                sizes,
+                limit,
+                node_budget,
+                results,
+            );
             chosen.pop();
+            if !completed {
+                return false;
+            }
         }
     }
-    if !chosen.is_empty() {
-        results.push(chosen.clone());
-    }
+    true
 }
 
 /// Build the plan. Returns an error only if the fit invariant is violated (a bug)
@@ -258,23 +307,28 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
         (0..units.len()).partition(|&index| is_heavy(index, &units[index]));
 
     // ---- knapsack over light units → maximal fitting packs ----
+    // Enumerate maximal fitting packs directly (each comes out maximal, so no
+    // O(subsets²) superset-filter pass). Two shapes are handled cheaply:
+    //   • whole light roster fits at once → the single maximal pack is all of it
+    //     (short-circuits the powerset for the common "everything co-resides" case);
+    //   • otherwise a bounded recursive walk, which fails over (below) if a roster
+    //     of many pairwise-fitting distinct units would produce too many packs.
     let light_sizes: Vec<f64> = light_indices.iter().map(|&index| units[index].size).collect();
     let members_limit = ceiling - baseline - aux_cost;
-    let mut raw_subsets: Vec<Vec<usize>> = Vec::new();
-    enumerate_fitting_subsets(0, &mut Vec::new(), 0.0, &light_sizes, members_limit, &mut raw_subsets);
-    let subsets: Vec<BTreeSet<usize>> = raw_subsets
-        .iter()
-        .map(|subset| subset.iter().copied().collect())
-        .collect();
-    let mut packs: Vec<BTreeSet<usize>> = subsets
-        .iter()
-        .filter(|candidate| {
-            !subsets
-                .iter()
-                .any(|other| other.len() > candidate.len() && candidate.is_subset(other))
-        })
-        .cloned()
-        .collect();
+    let mut raw_packs: Vec<Vec<usize>> = Vec::new();
+    let completed = if light_sizes.iter().sum::<f64>() <= members_limit {
+        if !light_sizes.is_empty() {
+            raw_packs.push((0..light_sizes.len()).collect());
+        }
+        true
+    } else {
+        let mut node_budget = ENUM_NODE_BUDGET;
+        enumerate_maximal_packs(0, &mut Vec::new(), 0.0, &light_sizes, members_limit, &mut node_budget, &mut raw_packs)
+    };
+    let enumeration_truncated = !completed || raw_packs.len() > MAX_PACKS;
+    raw_packs.truncate(MAX_PACKS);
+    let mut packs: Vec<BTreeSet<usize>> =
+        raw_packs.iter().map(|pack| pack.iter().copied().collect()).collect();
     // Deterministic order: larger packs first, then by total size.
     packs.sort_by(|left, right| {
         let left_size: f64 = left.iter().map(|&position| light_sizes[position]).sum();
@@ -304,6 +358,29 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
     // ---- emit ----
     let mut sets: Vec<EmittedSet> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
+
+    // Enumeration overflow → fail over via the SAME `on_overflow` knob as the
+    // 1000-combination cap: `group` (default) keeps the bounded packs and warns
+    // loudly to group the roster (a safe under-declaration — a smaller matrix never
+    // OOMs, Principle #1); `error` refuses. Symmetric with guard 2 below.
+    if enumeration_truncated {
+        match policy.on_overflow {
+            OnOverflow::Group => warnings.push(format!(
+                "the light-unit roster ({} units) produces too many co-residency combinations to \
+                 enumerate exhaustively — emitted {} maximal packs and stopped (a safe \
+                 under-declaration; a smaller matrix never OOMs). Reduce it with \
+                 `strategy = \"family\"` + `[groups]`, or set `on_overflow = \"error\"` to refuse.",
+                light_indices.len(),
+                packs.len()
+            )),
+            OnOverflow::Error => bail!(
+                "the light-unit roster ({} units) produces too many co-residency combinations to \
+                 enumerate; reduce it with `strategy = \"family\"` + `[groups]` (or allow a \
+                 truncated matrix with `on_overflow = \"group\"`)",
+                light_indices.len()
+            ),
+        }
+    }
 
     // aux ride-along pool
     if !aux_models.is_empty() {
@@ -780,6 +857,103 @@ mod tests {
         for set in &tight.sets {
             assert!(!set.expr.contains("+aux"), "dangling +aux in {}: {}", set.name, set.expr);
         }
+    }
+
+    #[test]
+    fn whole_light_roster_that_fits_is_one_maximal_pack() {
+        // Many small models that ALL co-reside: the single maximal pack is all of
+        // them. This is the roster the old enumerate-all-then-filter pass hung on
+        // (2^n subsets + O(subsets²) filter); it must now resolve to exactly one
+        // pack, instantly, via the short-circuit.
+        let mut models = Vec::new();
+        for index in 0..20 {
+            models.push(footprint(
+                &format!("m{index}"),
+                ModelType::Llm,
+                Some(&format!("/m{index}.gguf")),
+                4.0, // 20 × 4 = 80 GB, all fit under a 96 GB ceiling
+                5.0,
+            ));
+        }
+        let plan = build(&BuildInput {
+            models: &models,
+            policy: &Policy::default(),
+            baseline: 0.16,
+            budget: 100.0,
+        })
+        .unwrap();
+        let packs: Vec<_> = plan.sets.iter().filter(|set| set.name.starts_with("pack")).collect();
+        assert_eq!(packs.len(), 1, "the all-fit roster must yield exactly one maximal pack");
+        for index in 0..20 {
+            assert!(packs[0].expr.contains(&format!("m{index}")), "pack must contain every unit");
+        }
+        assert!(plan.warnings.is_empty(), "an all-fit roster is not an overflow");
+        for set in &plan.sets {
+            assert!(set.footprint <= plan.ceiling + 1e-6);
+        }
+    }
+
+    #[test]
+    fn enumeration_overflow_truncates_and_warns_under_group() {
+        // Many DISTINCT units that pairwise fit but can't all co-reside → the
+        // maximal-pack count explodes (≈ C(n,k)). Under `group` (default) the build
+        // must still terminate: keep a bounded, valid set of packs and warn.
+        let mut models = Vec::new();
+        for index in 0..40 {
+            models.push(footprint(
+                &format!("m{index}"),
+                ModelType::Llm,
+                Some(&format!("/m{index}.gguf")),
+                8.0, // 40 × 8 = 320 GB ≫ ceiling, but any ~11 co-reside → huge C(40,11)
+                5.0,
+            ));
+        }
+        let plan = build(&BuildInput {
+            models: &models,
+            policy: &Policy::default(),
+            baseline: 0.16,
+            budget: 100.0,
+        })
+        .unwrap();
+        let packs = plan.sets.iter().filter(|set| set.name.starts_with("pack")).count();
+        assert!(packs <= MAX_PACKS, "packs must be bounded by MAX_PACKS");
+        assert!(
+            plan.warnings.iter().any(|warning| warning.contains("too many co-residency combinations")),
+            "expected an enumeration-overflow warning"
+        );
+        // every emitted pack still fits — truncation never emits an unsafe set
+        for set in &plan.sets {
+            assert!(set.footprint <= plan.ceiling + 1e-6, "{} exceeds ceiling", set.name);
+        }
+    }
+
+    #[test]
+    fn enumeration_overflow_refuses_under_error() {
+        use crate::policy::OnOverflow;
+        let mut models = Vec::new();
+        for index in 0..40 {
+            models.push(footprint(
+                &format!("m{index}"),
+                ModelType::Llm,
+                Some(&format!("/m{index}.gguf")),
+                8.0,
+                5.0,
+            ));
+        }
+        let policy = Policy {
+            on_overflow: OnOverflow::Error,
+            ..Policy::default()
+        };
+        assert!(
+            build(&BuildInput {
+                models: &models,
+                policy: &policy,
+                baseline: 0.16,
+                budget: 100.0,
+            })
+            .is_err(),
+            "an enumeration overflow under `error` must refuse the build"
+        );
     }
 
     #[test]

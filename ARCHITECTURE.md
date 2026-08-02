@@ -202,6 +202,16 @@ knapsack). Because llama-swap treats *any subset of a declared set as valid*,
 emitting only maximal groups is sufficient — a declared `{a,b}` also licenses `{a}`
 and `{b}` alone. This keeps the set count and the DSL fan-out small.
 
+Maximal packs are recorded **inline** during the walk (a pack is maximal iff no
+unit outside it still fits) rather than enumerating every fitting subset and
+filtering — the filter was quadratic in the subset count and could hang on a large
+light-unit roster. The common "whole light roster co-resides" case short-circuits
+to a single pack without recursing. Enumerating maximal packs is nonetheless
+worst-case exponential (many distinct pairwise-fitting units yield ~C(n,k) packs),
+so the walk runs under a work budget; if it overruns, the packs found so far are
+kept (a safe under-declaration — a smaller matrix never OOMs) and the build fails
+over via `on_overflow` exactly as the 1000-combination cap does (§4.4).
+
 ### 4.4 Emission & the 1000-combination guard
 
 The block is a set of named DSL expressions (see `SPEC.md` §3 for the grammar):
@@ -225,6 +235,11 @@ invalid block** — it warns (a `# WARNING:` in the block and a structured `--js
 warning) and applies the configured `on_overflow` strategy: `group` (default)
 **omits** the over-cap set (a safe under-declaration — dropping a combination never
 OOMs), `error` refuses the build. See `PRINCIPLES.md` #7.
+
+The **same `on_overflow` knob** governs the other way a roster can be too large: a
+maximal-pack enumeration that overruns its work budget (§4.3). There `group` keeps
+the bounded packs found so far and warns; `error` refuses. Both are the identical
+"the roster is too big — group it or accept less" decision, so they share one knob.
 
 ### 4.5 The invariant every build asserts
 
