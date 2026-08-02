@@ -1,0 +1,13 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+license = "MIT"
+homepage = "https://github.com/jakobhviid/llama-matrix"
+
+[profile.release]
+opt-level = 3
+lto = true
