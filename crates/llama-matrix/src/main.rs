@@ -15,14 +15,13 @@ use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
 use llama_matrix_core::{apply, build, cache, config as ls_config, matrix, policy::Policy, settings, ui};
 
 mod completions;
 
-const REPO_URL: &str = "https://github.com/jakobhviid/llama-matrix";
 const AFTER_HELP: &str = concat!(
     "Repository: https://github.com/jakobhviid/llama-matrix\n",
     "LLM guide: `llama-matrix --llm` prints the full machine-readable reference ",
@@ -194,7 +193,244 @@ fn run(cli: Cli) -> Result<()> {
             force,
             only,
         }) => cmd_measure(config, endpoint, force, only, json)?,
-        Some(other) => not_yet(&verb_name(&other))?,
+        Some(Cmd::Setup { config, endpoint }) => cmd_setup(config, endpoint, json)?,
+        Some(Cmd::Drift) => cmd_drift(json)?,
+        Some(Cmd::Prune { yes }) => cmd_prune(yes, json)?,
+    }
+    Ok(())
+}
+
+/// `prune` — remove measurement files whose weight file is gone from disk
+/// (explicit only; the store is otherwise retained indefinitely).
+fn cmd_prune(yes: bool, json: bool) -> Result<()> {
+    let policy = Policy::load(PathBuf::from("llama-matrix.toml"))?;
+    let config_dir = std::env::current_dir()?;
+    let store = cache::Store::new(config_dir.join("measurements"));
+
+    let mut removable = Vec::new();
+    for id in store.list_ids() {
+        if let Some(model_store) = store.read_model(&id)? {
+            if let Some(container_file) = &model_store.file {
+                let host_path = policy.to_host(container_file);
+                if !Path::new(&host_path).exists() {
+                    removable.push(id);
+                }
+            }
+        }
+    }
+
+    if removable.is_empty() {
+        if json {
+            println!("{}", serde_json::json!({ "removed": [], "status": "nothing-to-prune" }));
+        } else {
+            ui::ok("nothing to prune — every measured model's weight file is still present");
+        }
+        return Ok(());
+    }
+
+    if !yes {
+        if json {
+            println!("{}", serde_json::json!({ "would_remove": removable }));
+        } else {
+            ui::warn(&format!(
+                "would remove {} measurement file(s) (weights gone): {}",
+                removable.len(),
+                removable.join(", ")
+            ));
+            ui::info("re-run with --yes to remove them");
+        }
+        return Ok(());
+    }
+
+    for id in &removable {
+        store.remove_model(id)?;
+    }
+    if json {
+        println!("{}", serde_json::json!({ "removed": removable }));
+    } else {
+        ui::ok(&format!("pruned {} measurement file(s)", removable.len()));
+    }
+    Ok(())
+}
+
+/// Load the config + measurement store and compute the matrix plan. Shared by
+/// `build` and `drift`. `budget_override` is the `--budget` flag, if any.
+fn resolve_plan(
+    config_path: &str,
+    policy: &Policy,
+    budget_override: Option<f64>,
+    store: &cache::Store,
+) -> Result<build::MatrixPlan> {
+    let parsed = ls_config::parse_file(config_path)?;
+    let box_meta = store.read_box()?;
+    // Budget resolution (never a silent guess): override > policy > detected total.
+    let budget = budget_override
+        .or(policy.budget)
+        .or(box_meta.detected_total)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no budget set — pass --budget <GB>, set `budget` in llama-matrix.toml, or run \
+                 `measure` to detect the pool"
+            )
+        })?;
+
+    let mut footprints = Vec::new();
+    let mut unmeasured = Vec::new();
+    for record in &parsed.models {
+        match store.select(&record.id, &record.param_hash)? {
+            Some(measurement) => footprints.push(build::ModelFootprint {
+                id: record.id.clone(),
+                model_type: record.model_type,
+                primary_file: record.primary_file.clone(),
+                d_total: measurement.d_total,
+                load_s: measurement.load_s,
+            }),
+            None => unmeasured.push(record.id.clone()),
+        }
+    }
+
+    let mut plan = build::build(&build::BuildInput {
+        models: &footprints,
+        policy,
+        baseline: box_meta.baseline,
+        budget,
+    })?;
+    plan.excluded.extend(unmeasured);
+    Ok(plan)
+}
+
+/// `drift` — compare the live config's matrix block to a fresh build (read-only).
+fn cmd_drift(json: bool) -> Result<()> {
+    let policy = Policy::load(PathBuf::from("llama-matrix.toml"))?;
+    let config_dir = std::env::current_dir()?;
+    let config_path = policy.config.clone().unwrap_or_else(|| "config.yaml".to_string());
+    let store = cache::Store::new(config_dir.join("measurements"));
+
+    if store.list_ids().is_empty() {
+        if json {
+            println!("{}", serde_json::json!({ "status": "no-measurements" }));
+        } else {
+            ui::warn("no measurements yet — run `llama-matrix measure`");
+        }
+        return Ok(());
+    }
+
+    let plan = resolve_plan(&config_path, &policy, None, &store)?;
+    let block = matrix::render(&plan);
+    let config_text = std::fs::read_to_string(&config_path)
+        .with_context(|| format!("reading {config_path}"))?;
+    let existing = apply::existing_block(&config_text);
+    let in_sync = existing
+        .as_deref()
+        .map(|current| current.trim() == block.trim())
+        .unwrap_or(false);
+
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "in_sync": in_sync,
+                "has_block": existing.is_some(),
+                "would_generate_sets": plan.sets.len(),
+                "packs": plan.n_packs,
+                "heavies": plan.n_heavies,
+                "excluded": plan.excluded,
+            })
+        );
+        return Ok(());
+    }
+
+    if in_sync {
+        ui::ok("in sync — the live matrix block matches a fresh build");
+    } else if existing.is_none() {
+        ui::warn(&format!(
+            "no matrix block in {config_path} — run `llama-matrix build --apply` to add one ({} sets)",
+            plan.sets.len()
+        ));
+    } else {
+        ui::warn(&format!(
+            "drift — the live block differs from a fresh build ({} sets); run `llama-matrix build --apply`",
+            plan.sets.len()
+        ));
+    }
+    if !plan.excluded.is_empty() {
+        ui::info(&format!("{} model(s) unmeasured/excluded", plan.excluded.len()));
+    }
+    Ok(())
+}
+
+/// `setup` — provision llama-matrix.toml (discover config + endpoint, probe budget).
+fn cmd_setup(config: Option<String>, endpoint: Option<String>, json: bool) -> Result<()> {
+    let file = PathBuf::from("llama-matrix.toml");
+    let config_path = config.or_else(|| {
+        ["config.yaml", "config/config.yaml"]
+            .iter()
+            .find(|candidate| Path::new(candidate).exists())
+            .map(|candidate| (*candidate).to_string())
+    });
+    let endpoint = endpoint.unwrap_or_else(|| "http://localhost:8080".to_string());
+    let (budget, gpu_label) = match llama_matrix_core::platform::detect() {
+        Ok(gpu) => (gpu.total_gb().ok(), Some(gpu.label())),
+        Err(_) => (None, None),
+    };
+
+    let mut lines = Vec::new();
+    lines.push(format!("endpoint = \"{endpoint}\""));
+    if let Some(path) = &config_path {
+        lines.push(format!("config = \"{path}\""));
+    }
+    match budget {
+        Some(total) => {
+            lines.push(format!(
+                "# detected ~{total:.1} GB pool; lower `budget` to reserve room for other apps"
+            ));
+            lines.push(format!("budget = {total:.1}"));
+        }
+        None => {
+            lines.push("# no GPU sensor detected — set the pool to plan against:".to_string());
+            lines.push("# budget = 96.0".to_string());
+        }
+    }
+    lines.push("margin = 4.0".to_string());
+    let content = lines.join("\n") + "\n";
+
+    if file.exists() {
+        if json {
+            println!(
+                "{}",
+                serde_json::json!({ "status": "exists", "path": file.display().to_string() })
+            );
+        } else {
+            ui::warn("llama-matrix.toml already exists — not overwriting; setup would write:");
+            print!("{content}");
+        }
+        return Ok(());
+    }
+
+    std::fs::write(&file, &content).with_context(|| format!("writing {}", file.display()))?;
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "written": file.display().to_string(),
+                "config": config_path,
+                "endpoint": endpoint,
+                "budget": budget,
+                "gpu": gpu_label,
+            })
+        );
+    } else {
+        ui::ok(&format!("wrote {}", file.display()));
+        if let Some(label) = &gpu_label {
+            ui::info(&format!(
+                "detected {label} (~{} GB)",
+                budget.map(|total| format!("{total:.1}")).unwrap_or_default()
+            ));
+        }
+        if config_path.is_none() {
+            ui::warn("no config.yaml found — set `config` in llama-matrix.toml or pass --config");
+        }
+        ui::info("next: `llama-matrix measure`  →  `llama-matrix build`");
     }
     Ok(())
 }
@@ -355,10 +591,8 @@ fn cmd_build(
     let config_path = config
         .or_else(|| policy.config.clone())
         .unwrap_or_else(|| "config.yaml".to_string());
-    let parsed = ls_config::parse_file(&config_path)?;
 
     let store = cache::Store::new(config_dir.join("measurements"));
-    let box_meta = store.read_box()?;
     if store.list_ids().is_empty() {
         anyhow::bail!(
             "no measurements in {} — run `llama-matrix measure` first",
@@ -366,40 +600,7 @@ fn cmd_build(
         );
     }
 
-    // Budget resolution (never a silent guess): --budget > policy > detected total.
-    let budget = budget
-        .or(policy.budget)
-        .or(box_meta.detected_total)
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "no budget set — pass --budget <GB>, set `budget` in llama-matrix.toml, or run \
-                 `measure` to detect the pool"
-            )
-        })?;
-
-    // Build measured footprints (config × store), noting unmeasured models.
-    let mut footprints = Vec::new();
-    let mut unmeasured = Vec::new();
-    for record in &parsed.models {
-        match store.select(&record.id, &record.param_hash)? {
-            Some(measurement) => footprints.push(build::ModelFootprint {
-                id: record.id.clone(),
-                model_type: record.model_type,
-                primary_file: record.primary_file.clone(),
-                d_total: measurement.d_total,
-                load_s: measurement.load_s,
-            }),
-            None => unmeasured.push(record.id.clone()),
-        }
-    }
-
-    let mut plan = build::build(&build::BuildInput {
-        models: &footprints,
-        policy: &policy,
-        baseline: box_meta.baseline,
-        budget,
-    })?;
-    plan.excluded.extend(unmeasured);
+    let plan = resolve_plan(&config_path, &policy, budget, &store)?;
     let block = matrix::render(&plan);
 
     if !json {
@@ -460,29 +661,6 @@ fn cmd_build(
         print!("{block}");
     }
     Ok(())
-}
-
-/// Placeholder for verbs still being implemented, so the CLI surface (and its
-/// help, completions, and `--llm` guide) is complete while the internals land.
-fn not_yet(verb: &str) -> Result<()> {
-    anyhow::bail!(
-        "`{verb}` is not implemented in this build yet — the parsing core and the \
-         emit surface (completions/--man/--llm) are live; see {REPO_URL} and \
-         `llama-matrix --llm` for the design."
-    )
-}
-
-fn verb_name(cmd: &Cmd) -> String {
-    match cmd {
-        Cmd::Measure { .. } => "measure",
-        Cmd::Build { .. } => "build",
-        Cmd::Drift => "drift",
-        Cmd::Setup { .. } => "setup",
-        Cmd::Configure { .. } => "configure",
-        Cmd::Prune { .. } => "prune",
-        Cmd::Completions { .. } => "completions",
-    }
-    .to_string()
 }
 
 /// The `--llm` guide: the design docs, embedded at compile time so they never

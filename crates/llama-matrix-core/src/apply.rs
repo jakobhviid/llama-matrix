@@ -112,6 +112,24 @@ pub fn apply(config_path: &Path, block: &str, endpoint: &str) -> Result<ApplyRes
     }
 }
 
+/// The current generated / `matrix:` block in a config (from the marker or a
+/// top-level `matrix:` line to end-of-file), or None if there is no matrix block
+/// yet. Used by `drift` to compare the live block against a fresh build.
+pub fn existing_block(config_text: &str) -> Option<String> {
+    let has_marker = config_text
+        .lines()
+        .any(|line| line.trim_start().starts_with("# ==== GENERATED matrix block"));
+    let has_matrix = config_text.lines().any(|line| is_top_level_key(line, "matrix"));
+    if !has_marker && !has_matrix {
+        return None;
+    }
+    let anchor = find_anchor(config_text);
+    if anchor >= config_text.len() {
+        return None;
+    }
+    Some(config_text[anchor..].to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

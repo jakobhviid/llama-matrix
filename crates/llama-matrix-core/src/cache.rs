@@ -140,6 +140,15 @@ impl Store {
         Ok(())
     }
 
+    /// Delete a model's file from the store (explicit prune only — never automatic).
+    pub fn remove_model(&self, id: &str) -> Result<()> {
+        let path = self.model_path(id);
+        if path.exists() {
+            std::fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
+        }
+        Ok(())
+    }
+
     /// The `ok` measurement for `(id, param_hash)`. Falls back to a model's sole
     /// `ok` measurement (hand-set proxy entries not tied to a live config hash).
     pub fn select(&self, id: &str, param_hash: &str) -> Result<Option<Measurement>> {
