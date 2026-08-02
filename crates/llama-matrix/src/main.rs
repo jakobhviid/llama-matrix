@@ -12,13 +12,13 @@
 //! implemented (see ../../ROADMAP.md).
 
 use std::io::{self, IsTerminal};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::Result;
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
-use llama_matrix_core::{build, cache, config as ls_config, matrix, policy::Policy, settings, ui};
+use llama_matrix_core::{apply, build, cache, config as ls_config, matrix, policy::Policy, settings, ui};
 
 mod completions;
 
@@ -402,6 +402,47 @@ fn cmd_build(
     plan.excluded.extend(unmeasured);
     let block = matrix::render(&plan);
 
+    if !json {
+        for warning in &plan.warnings {
+            ui::warn(warning);
+        }
+    }
+
+    if apply {
+        let result = apply::apply(Path::new(&config_path), &block, &policy.endpoint)?;
+        if json {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "applied": true,
+                    "backup": result.backup.display().to_string(),
+                    "verified": result.verified,
+                    "note": result.note,
+                    "packs": plan.n_packs,
+                    "heavies": plan.n_heavies,
+                    "sets": plan.sets.len(),
+                })
+            );
+        } else {
+            ui::ok(&format!("applied to {config_path} — {}", result.note));
+            ui::info(&format!("backup: {}", result.backup.display()));
+            if !result.verified {
+                ui::warn("could not fully verify the reload — check llama-swap's logs");
+            }
+        }
+        return Ok(());
+    }
+
+    if let Some(out_path) = out {
+        std::fs::write(&out_path, &block)?;
+        if json {
+            println!("{}", serde_json::json!({ "wrote": out_path, "sets": plan.sets.len() }));
+        } else {
+            ui::ok(&format!("wrote {out_path} ({} sets)", plan.sets.len()));
+        }
+        return Ok(());
+    }
+
     if json {
         println!(
             "{}",
@@ -415,20 +456,6 @@ fn cmd_build(
                 "warnings": plan.warnings,
             })
         );
-        return Ok(());
-    }
-
-    for warning in &plan.warnings {
-        ui::warn(warning);
-    }
-    if apply {
-        anyhow::bail!(
-            "`build --apply` is not implemented yet — write with `--out FILE` and splice manually for now"
-        );
-    }
-    if let Some(out_path) = out {
-        std::fs::write(&out_path, &block)?;
-        ui::ok(&format!("wrote {out_path} ({} sets)", plan.sets.len()));
     } else {
         print!("{block}");
     }

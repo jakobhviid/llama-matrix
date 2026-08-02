@@ -106,3 +106,32 @@ fn help_and_llm_work() {
         .success()
         .stdout(predicates::str::contains("SPEC"));
 }
+
+#[test]
+fn build_apply_splices_the_block_and_backs_up() {
+    let dir = tempfile::tempdir().unwrap();
+    write_working_dir(dir.path());
+    // Point at an unreachable endpoint: apply writes + backs up, skips verify, no
+    // rollback (rollback only fires when the endpoint was reachable then dies).
+    fs::write(
+        dir.path().join("llama-matrix.toml"),
+        "budget = 100.0\nendpoint = \"http://127.0.0.1:59999\"\n",
+    )
+    .unwrap();
+
+    Command::cargo_bin("llama-matrix")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["build", "--apply"])
+        .assert()
+        .success();
+
+    let config = fs::read_to_string(dir.path().join("config.yaml")).unwrap();
+    assert!(config.contains("matrix:"), "config should now contain the matrix block");
+    assert!(config.contains("# ==== GENERATED matrix block"));
+    assert!(config.contains("models:"), "original models must be preserved");
+    assert!(
+        dir.path().join("config.yaml.pre-matrix.bak").exists(),
+        "a backup must be written"
+    );
+}

@@ -15,6 +15,7 @@
 //! - The live config is written in exactly one place (`apply`).
 //! - Fail loud, never silent (undetected budget, failed load, combo-cap overflow).
 
+pub mod apply; // backup -> splice on marker -> hot-reload wait -> verify -> rollback
 pub mod build; // variant-collapse, roles, the knapsack, heavy classification -> a plan
 pub mod cache; // the per-model measurement store (measurements/<id>.json + _box.json)
 pub mod config; // parse llama-swap config.yaml (+ macro expansion) into model records
@@ -26,6 +27,3 @@ pub mod platform; // GpuMemory trait + AMD sysfs / NVIDIA backends
 pub mod policy; // llama-matrix.toml: budget/margin/strategy/roles/groups/paths
 pub mod settings; // the `configure` get/set/unset/list/keys surface (scalars)
 pub mod ui; // stdout/stderr discipline + colour
-
-// Implemented in a later milestone (kept out of the module tree until it lands):
-//   apply       backup -> splice -> reload wait -> verify -> rollback
