@@ -16,7 +16,9 @@ toml_edit = "0.22"
 indexmap = { version = "2", features = ["serde"] }
 regex = "1"
 sha1 = "0.10"
-ureq = { version = "2", features = ["json"] }
+# http-only (llama-swap is local): no TLS, so no ring/rustls — keeps the release
+# cross-build (musl/darwin) clean and the binary small.
+ureq = { version = "2", default-features = false, features = ["json"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 [dev-dependencies]
