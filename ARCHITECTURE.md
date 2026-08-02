@@ -104,7 +104,8 @@ vs premature-exit) so a broken model is recorded, not retried forever.
 ### 2.2 Phase 2 — build
 
 Pure. Reads the `measurements/` store + the config + policy, computes the matrix, and
-either prints it or splices it. No GPU, safe to run anytime. See §4.
+prints it (stdout), writes it (`--out FILE`), or splices it into the config
+(`--apply`). No GPU, safe to run anytime. See §4.
 
 ---
 

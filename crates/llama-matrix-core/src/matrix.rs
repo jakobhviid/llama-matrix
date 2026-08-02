@@ -17,9 +17,11 @@ pub fn render(plan: &MatrixPlan) -> String {
         "# budget {:.1} GB | baseline {:.2} | margin {:.1} | ceiling {:.1}",
         plan.budget, plan.baseline, plan.margin, plan.ceiling
     ));
+    // Normalize a possible negative zero so an aux-less roster reads "0.0", not "-0.0".
+    let aux_cost = if plan.aux_cost == 0.0 { 0.0 } else { plan.aux_cost };
     lines.push(format!(
-        "# policy: max flexibility, never OOM. {} packs, {} heavies, aux rides along ({:.1} GB).",
-        plan.n_packs, plan.n_heavies, plan.aux_cost
+        "# policy: max flexibility, never OOM. {} packs, {} heavies, aux rides along ({aux_cost:.1} GB).",
+        plan.n_packs, plan.n_heavies
     ));
     for warning in &plan.warnings {
         lines.push(format!("# WARNING: {warning}"));

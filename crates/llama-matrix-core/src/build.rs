@@ -233,6 +233,11 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
         .collect();
 
     let aux_cost: f64 = aux_models.iter().map(|model| model.d_total).sum();
+    let has_aux = !aux_models.is_empty();
+    // The ` & +aux` suffix is only valid when an `aux` set is actually emitted;
+    // with no aux models it must be omitted, or the block would reference an
+    // undefined `+aux` — an invalid config (Principle #7).
+    let aux_ref = if has_aux { " & +aux" } else { "" };
 
     // ---- logical units + heavy classification ----
     let units = collapse_units(&llm_models, policy);
@@ -332,14 +337,12 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
 
     // images pool
     if !image_models.is_empty() {
-        let expr = format!(
-            "{} & +aux",
-            image_models
-                .iter()
-                .map(|model| model.id.clone())
-                .collect::<Vec<_>>()
-                .join(" & ")
-        );
+        let images_joined = image_models
+            .iter()
+            .map(|model| model.id.clone())
+            .collect::<Vec<_>>()
+            .join(" & ");
+        let expr = format!("{images_joined}{aux_ref}");
         let footprint: f64 =
             baseline + aux_cost + image_models.iter().map(|model| model.d_total).sum::<f64>();
         sets.push(EmittedSet {
@@ -365,7 +368,7 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
     for (position, pack) in packs.iter().enumerate() {
         let unit_indices: Vec<usize> = pack.iter().map(|&light_position| light_indices[light_position]).collect();
         let references: Vec<String> = unit_indices.iter().map(|&index| unit_reference(index)).collect();
-        let expr = format!("{} & +aux", references.join(" & "));
+        let expr = format!("{}{aux_ref}", references.join(" & "));
         let members_total: f64 = unit_indices.iter().map(|&index| units[index].size).sum();
         let fanout: usize = unit_indices.iter().map(|&index| units[index].fanout()).product();
         let names: Vec<&str> = unit_indices.iter().map(|&index| units[index].key.as_str()).collect();
@@ -389,7 +392,7 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
                 .map(|model| model.id.clone())
                 .collect::<Vec<_>>()
                 .join(" & ");
-            let expr = format!("{} & {} & +aux", unit_reference(index), images_expr);
+            let expr = format!("{} & {}{aux_ref}", unit_reference(index), images_expr);
             let footprint =
                 baseline + unit.size + aux_cost + fitting.iter().map(|model| model.d_total).sum::<f64>();
             sets.push(EmittedSet {
@@ -415,7 +418,7 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
             ));
             continue;
         }
-        let with_aux = baseline + unit.size + aux_cost <= ceiling;
+        let with_aux = has_aux && baseline + unit.size + aux_cost <= ceiling;
         let reserved = if with_aux { aux_cost } else { 0.0 };
         let fitting = images_fitting(ceiling - baseline - unit.size - reserved);
         let images_suffix = if fitting.is_empty() {
@@ -616,6 +619,39 @@ mod tests {
             set.name.starts_with("pack") && set.expr.contains("small-a") && set.expr.contains("small-b")
         });
         assert!(covers_pair, "expected a pack co-locating small-a + small-b");
+    }
+
+    #[test]
+    fn no_aux_models_means_no_dangling_aux_reference() {
+        // A roster with no embed/rerank/stt/tts must never emit a `+aux` reference
+        // (there's no `aux` set to point at) — that would be an invalid block.
+        let models = vec![
+            footprint("model-a", ModelType::Llm, Some("/a.gguf"), 20.0, 10.0),
+            footprint("model-b", ModelType::Llm, Some("/b.gguf"), 25.0, 12.0),
+        ];
+        // roomy budget: both are light, packs get emitted
+        let plan = build(&BuildInput {
+            models: &models,
+            policy: &Policy::default(),
+            baseline: 0.16,
+            budget: 100.0,
+        })
+        .unwrap();
+        assert!(!plan.sets.iter().any(|set| set.name == "aux"));
+        for set in &plan.sets {
+            assert!(!set.expr.contains("+aux"), "dangling +aux in {}: {}", set.name, set.expr);
+        }
+        // tight budget: both become heavies (also must not reference +aux)
+        let tight = build(&BuildInput {
+            models: &models,
+            policy: &Policy::default(),
+            baseline: 0.16,
+            budget: 30.0,
+        })
+        .unwrap();
+        for set in &tight.sets {
+            assert!(!set.expr.contains("+aux"), "dangling +aux in {}: {}", set.name, set.expr);
+        }
     }
 
     #[test]

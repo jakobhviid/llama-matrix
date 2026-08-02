@@ -31,9 +31,10 @@ Compiled into `--llm`.
 llama-matrix setup
 ```
 
-Discovers/confirms your llama-swap `config.yaml`, confirms the `endpoint`, probes
-the GPU to auto-detect the total pool, offers to reserve some of it for other apps
-(sets `budget`), and writes a starter `llama-matrix.toml`. Non-interactive forms:
+Discovers your llama-swap `config.yaml`, sets the `endpoint`, probes the GPU to
+auto-detect the total pool, and writes a starter `llama-matrix.toml` with `budget`
+set to the full detected pool (plus a comment on reserving some). To reserve room
+for other apps, lower it: `llama-matrix configure set budget <GB>`. Forms:
 
 ```
 llama-matrix setup --config /path/config.yaml --endpoint http://host:8080   # scriptable
@@ -55,7 +56,8 @@ The loop you run whenever the roster or a model's memory settings change:
 ```
 llama-matrix measure                 # sweep: load each changed model, record footprint
 llama-matrix build                   # preview the generated matrix block (prints; no writes)
-llama-matrix build --apply           # splice it into config.yaml, wait for reload, verify
+llama-matrix build --out matrix.yaml # …or write it to a file instead of stdout
+llama-matrix build --apply           # …or splice it into config.yaml, wait for reload, verify
 ```
 
 - `measure` is **incremental** — a model whose footprint-affecting flags are
@@ -86,7 +88,8 @@ param-hash → no re-measure and the matrix is identical, so no regeneration nee
 
 Removing a model: drop it from `config.yaml`; its `measurements/<id>.json` is
 **kept** (cheap, and re-adding is then an instant hit). Nothing is auto-deleted —
-run `llama-matrix prune` if you want to clear entries whose weights are gone.
+run `llama-matrix prune --yes` to clear entries whose weights are gone (a bare
+`prune` only previews).
 
 ---
 

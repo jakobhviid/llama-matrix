@@ -16,6 +16,7 @@ optional; omission takes the documented default. Scalars are managed by
 
 ```toml
 # ---- scalars (managed by `llama-matrix configure set …`) ----
+config      = "config.yaml"              # path to the llama-swap config.yaml
 endpoint    = "http://localhost:8080"  # llama-swap base URL
 budget      = 50.0                       # GB llama-matrix may plan against.
                                          #   Omit → auto-detect the physical total.
@@ -42,7 +43,8 @@ gemma = ["gemma-27b-q4", "gemma-27b-q4-nothink", "gemma-27b-abliterated-q5"]
 
 | key | type | default | notes |
 |---|---|---|---|
-| `endpoint` | string (URL) | `http://localhost:8080` | llama-swap address; also `--endpoint`, env `LLAMA_MATRIX_ENDPOINT` |
+| `config` | string (path) | `./config.yaml` | the llama-swap config.yaml; written by `setup`, overridable per-run with `--config` |
+| `endpoint` | string (URL) | `http://localhost:8080` | llama-swap address; also `--endpoint` per run |
 | `budget` | float (GB) | *auto-detected total* | hard cap; resolution: `--budget` > this > detected total > **error** |
 | `margin` | float (GB) | `4.0` | `ceiling = budget − margin` |
 | `strategy` | enum | `flat` | `flat` = no grouping (max flexibility); `family` = collapse `[groups]` |
@@ -120,6 +122,10 @@ The filename is the model id (a legible 1:1 with config entries). Lookup is by
 param-hash regardless of filename, so a model whose id was renamed can be recovered
 by scanning the directory for a matching param-hash before re-measuring.
 
+> The VRAM/GTT split fields (`d_vram`/`d_gtt`/`abs_vram`/`abs_gtt`) are recorded as
+> `0` in the current build — the platform layer reports summed occupancy, and
+> `build` consumes only `d_total`. They are reserved for a future per-pool sensor.
+
 **Consumer rule (build):** for each model, compute its param-hash from the *current*
 config, read `measurements/<id>.json`, and select `measurements[hash]`. Hand-set
 proxy entries not in the config worklist fall back to their sole `ok` measurement.
@@ -136,9 +142,6 @@ keeps its file (re-adding hits the cache). Pruning is **explicit only**
 `additivity_check` at top level) is read and split into the per-model layout on
 first write; a legacy flat (one-measurement-per-model) entry is re-keyed under the
 model's current param-hash.
-
-**Migration:** a legacy flat (one-measurement-per-model) file is upgraded by
-re-keying each entry under the model's current param-hash.
 
 ---
 

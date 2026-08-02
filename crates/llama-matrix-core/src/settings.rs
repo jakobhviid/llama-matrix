@@ -33,6 +33,12 @@ pub struct Setting {
 /// Every key `llama-matrix configure` knows.
 pub const SETTINGS: &[Setting] = &[
     Setting {
+        key: "config",
+        kind: Kind::Str,
+        desc: "path to the llama-swap config.yaml (also written by `setup`)",
+        default: "(./config.yaml)",
+    },
+    Setting {
         key: "endpoint",
         kind: Kind::Str,
         desc: "llama-swap base URL",

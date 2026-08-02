@@ -113,8 +113,10 @@ enum Cmd {
         action: ConfigureAction,
     },
     /// Remove measurement entries whose weight files are gone from disk.
+    ///
+    /// A bare `prune` only previews what would be removed; pass `--yes` to delete.
     Prune {
-        /// Skip the confirmation prompt.
+        /// Actually delete the entries (a bare `prune` only previews).
         #[arg(long)]
         yes: bool,
     },

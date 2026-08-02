@@ -58,8 +58,9 @@ brew install jakobhviid/tap/llama-matrix
 ```sh
 llama-matrix setup            # find your config.yaml + endpoint, detect the GPU budget
 llama-matrix measure          # load each model, record its real footprint
-llama-matrix build            # preview the generated matrix block
-llama-matrix build --apply    # splice it into config.yaml, wait for reload, verify
+llama-matrix build            # preview the generated matrix block (stdout)
+llama-matrix build --out m.yaml   # …or write it to a file
+llama-matrix build --apply    # …or splice it into config.yaml, wait for reload, verify
 ```
 
 Reserve part of the GPU for other apps, permanently or per-run:
