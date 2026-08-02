@@ -49,12 +49,12 @@ pub fn type_from_cmd(cmd: &str) -> ModelType {
 /// path until the `[paths]` map resolves it), for existence/prune checks. Flags
 /// are tried in priority order so a diffusion model wins over a stray `-m`.
 pub fn primary_file(cmd: &str) -> Option<String> {
-    let toks: Vec<&str> = cmd.split_whitespace().collect();
+    let tokens: Vec<&str> = cmd.split_whitespace().collect();
     for flag in ["--diffusion-model", "-m", "--model", "--llm"] {
-        for (i, t) in toks.iter().enumerate() {
-            if *t == flag {
-                if let Some(v) = toks.get(i + 1) {
-                    return Some((*v).to_string());
+        for (index, token) in tokens.iter().enumerate() {
+            if *token == flag {
+                if let Some(value) = tokens.get(index + 1) {
+                    return Some((*value).to_string());
                 }
             }
         }

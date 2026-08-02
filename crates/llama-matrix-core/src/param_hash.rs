@@ -38,34 +38,34 @@ const STRIP_BARE: &[&str] = &["--jinja"];
 
 /// Reduce a launch command to only its footprint-affecting tokens.
 pub fn memory_cmd(cmd: &str) -> String {
-    let toks: Vec<&str> = cmd.split_whitespace().collect();
-    let mut out: Vec<&str> = Vec::with_capacity(toks.len());
-    let mut i = 0;
-    while i < toks.len() {
-        let t = toks[i];
-        if STRIP_WITH_VALUE.contains(&t) {
-            i += 2; // flag consumes its value
+    let tokens: Vec<&str> = cmd.split_whitespace().collect();
+    let mut kept: Vec<&str> = Vec::with_capacity(tokens.len());
+    let mut index = 0;
+    while index < tokens.len() {
+        let token = tokens[index];
+        if STRIP_WITH_VALUE.contains(&token) {
+            index += 2; // flag consumes its value
             continue;
         }
-        if STRIP_BARE.contains(&t) {
-            i += 1;
+        if STRIP_BARE.contains(&token) {
+            index += 1;
             continue;
         }
-        out.push(t);
-        i += 1;
+        kept.push(token);
+        index += 1;
     }
-    out.join(" ")
+    kept.join(" ")
 }
 
 /// A 12-hex key identifying a distinct memory footprint (sha1 of `memory_cmd`,
 /// truncated to 12 hex chars — matches the reference tooling's key format).
 pub fn param_hash(cmd: &str) -> String {
-    let mut h = Sha1::new();
-    h.update(memory_cmd(cmd).as_bytes());
-    let digest = h.finalize();
+    let mut hasher = Sha1::new();
+    hasher.update(memory_cmd(cmd).as_bytes());
+    let digest = hasher.finalize();
     let mut hex = String::with_capacity(12);
-    for b in digest.iter().take(6) {
-        hex.push_str(&format!("{b:02x}"));
+    for byte in digest.iter().take(6) {
+        hex.push_str(&format!("{byte:02x}"));
     }
     hex
 }

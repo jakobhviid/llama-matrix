@@ -42,13 +42,13 @@ pub struct ParsedConfig {
 pub fn parse_str(yaml: &str) -> Result<ParsedConfig> {
     let raw: RawConfig = serde_yaml::from_str(yaml).context("parsing llama-swap config YAML")?;
     let mut models = Vec::new();
-    for (id, m) in &raw.models {
-        let cmd = match &m.cmd {
-            Some(c) if !c.trim().is_empty() => c,
+    for (id, entry) in &raw.models {
+        let command = match &entry.cmd {
+            Some(command) if !command.trim().is_empty() => command,
             // No runnable command → a selector / virtual id → not in the worklist.
             _ => continue,
         };
-        let normalized = normalize_ws(cmd);
+        let normalized = normalize_ws(command);
         let expanded = expand_macros(&normalized, &raw.macros, id);
         models.push(ModelRecord::from_expanded(id.clone(), expanded));
     }
@@ -79,36 +79,37 @@ fn normalize_ws(s: &str) -> String {
 /// assigned `${PORT}`/`${PID}` are left as-is — they only ever appear in
 /// footprint-irrelevant positions (stripped by the param-hash) and their real
 /// values aren't known outside a live launch.
-fn expand_macros(s: &str, macros: &IndexMap<String, String>, model_id: &str) -> String {
-    let mut cur = s.to_string();
+fn expand_macros(input: &str, macros: &IndexMap<String, String>, model_id: &str) -> String {
+    let mut current = input.to_string();
     // Multi-pass so a macro whose value contains another macro resolves; bounded
     // to avoid an infinite loop on a self-referential macro.
     for _ in 0..16 {
-        let next = substitute_once(&cur, macros, model_id);
-        if next == cur {
+        let expanded = substitute_once(&current, macros, model_id);
+        if expanded == current {
             break;
         }
-        cur = next;
+        current = expanded;
     }
-    cur
+    current
 }
 
-fn substitute_once(s: &str, macros: &IndexMap<String, String>, model_id: &str) -> String {
-    let re = Regex::new(r"\$\{([^}]+)\}").expect("static regex");
-    re.replace_all(s, |caps: &regex::Captures| {
-        let key = &caps[1];
-        if let Some(var) = key.strip_prefix("env.") {
-            std::env::var(var).unwrap_or_default()
-        } else if key == "MODEL_ID" {
-            model_id.to_string()
-        } else if let Some(v) = macros.get(key) {
-            v.clone()
-        } else {
-            // PORT / PID / unknown — leave the placeholder untouched.
-            caps[0].to_string()
-        }
-    })
-    .into_owned()
+fn substitute_once(input: &str, macros: &IndexMap<String, String>, model_id: &str) -> String {
+    let placeholder = Regex::new(r"\$\{([^}]+)\}").expect("static regex");
+    placeholder
+        .replace_all(input, |captures: &regex::Captures| {
+            let key = &captures[1];
+            if let Some(env_var) = key.strip_prefix("env.") {
+                std::env::var(env_var).unwrap_or_default()
+            } else if key == "MODEL_ID" {
+                model_id.to_string()
+            } else if let Some(value) = macros.get(key) {
+                value.clone()
+            } else {
+                // PORT / PID / unknown — leave the placeholder untouched.
+                captures[0].to_string()
+            }
+        })
+        .into_owned()
 }
 
 #[cfg(test)]
