@@ -605,6 +605,64 @@ mod tests {
     }
 
     #[test]
+    fn family_strategy_collapses_declared_groups() {
+        use crate::policy::Strategy;
+        // Two DISTINCT gemma models (different files) that `flat` would keep
+        // separate. Under `family` with a [groups] declaration they collapse into
+        // one mutually-exclusive unit, sized by the larger (23).
+        let models = vec![
+            footprint("embed", ModelType::Embed, Some("/e.gguf"), 5.0, 6.0),
+            footprint("gemma-q4", ModelType::Llm, Some("/g4.gguf"), 20.0, 10.0),
+            footprint("gemma-abliterated", ModelType::Llm, Some("/gab.gguf"), 23.0, 12.0),
+            footprint("other", ModelType::Llm, Some("/o.gguf"), 25.0, 15.0),
+        ];
+        let mut policy = Policy {
+            strategy: Strategy::Family,
+            ..Policy::default()
+        };
+        policy.groups.insert(
+            "gemma".to_string(),
+            vec!["gemma-q4".to_string(), "gemma-abliterated".to_string()],
+        );
+
+        let plan = build(&BuildInput {
+            models: &models,
+            policy: &policy,
+            baseline: 0.16,
+            budget: 100.0,
+        })
+        .unwrap();
+
+        // one helper for the collapsed group: (gemma-q4 | gemma-abliterated)
+        let helper = plan.sets.iter().find(|set| set.name == "g_gemma").expect("g_gemma helper");
+        assert!(
+            helper.expr.contains("gemma-q4")
+                && helper.expr.contains("gemma-abliterated")
+                && helper.expr.contains('|')
+        );
+
+        // Both variants appear together only in the `g_gemma` helper, as `|`
+        // alternatives (exactly one loads). No OTHER set may name both — they must
+        // be referenced via `+g_gemma`, never co-resident.
+        for set in plan.sets.iter().filter(|set| set.name != "g_gemma") {
+            assert!(
+                !(set.expr.contains("gemma-q4") && set.expr.contains("gemma-abliterated")),
+                "set {} co-locates both gemma variants: {}",
+                set.name,
+                set.expr
+            );
+        }
+
+        // the group pairs with `other` via its +g_gemma reference
+        assert!(
+            plan.sets
+                .iter()
+                .any(|set| set.name.starts_with("pack") && set.expr.contains("+g_gemma") && set.expr.contains("other")),
+            "expected a pack pairing the gemma group with `other`"
+        );
+    }
+
+    #[test]
     fn a_fitting_pair_is_declared_and_a_too_big_one_is_not() {
         let models = scenario();
         let plan = build(&BuildInput {
