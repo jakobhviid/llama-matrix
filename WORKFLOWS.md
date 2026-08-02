@@ -122,9 +122,11 @@ A group of distinct models becomes one mutually-exclusive slot — smaller matri
 less flexibility.
 
 **If a build would exceed llama-swap's 1000-combination cap**, llama-matrix never
-emits an invalid block. By default (`on_overflow = "group"`) it auto-reduces by
-nearest footprint and warns (a `# NOTE:` in the block and a `--json` warning); set
-`on_overflow = "error"` to make it refuse instead so you can group by hand.
+emits an invalid block. By default (`on_overflow = "group"`) it **omits** the
+over-cap set and warns (a `# WARNING:` in the block and a `--json` warning) —
+omitting a combination is safe (it just declares less, never OOMs). To cover those
+combinations, split the offending family in `[groups]`. Set `on_overflow = "error"`
+to make it refuse the whole build instead.
 
 ---
 

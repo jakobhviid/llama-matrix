@@ -218,10 +218,11 @@ The block is a set of named DSL expressions (see `SPEC.md` §3 for the grammar):
 
 llama-swap caps expansion at **1000 combinations per expression** (the product of a
 set's `|`-group sizes). After generation the tool counts every expression's fan-out
-and the total set count; if anything would exceed the cap it **never emits an
-invalid block** — it warns (a `# NOTE:` in the block and a structured `--json`
-warning) and applies the configured `on_overflow` strategy (`group` = auto-reduce
-by nearest footprint; `error` = refuse). See `PRINCIPLES.md` #7.
+and the total set count; if any expression would exceed the cap it **never emits an
+invalid block** — it warns (a `# WARNING:` in the block and a structured `--json`
+warning) and applies the configured `on_overflow` strategy: `group` (default)
+**omits** the over-cap set (a safe under-declaration — dropping a combination never
+OOMs), `error` refuses the build. See `PRINCIPLES.md` #7.
 
 ### 4.5 The invariant every build asserts
 

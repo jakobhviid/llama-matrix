@@ -48,7 +48,7 @@ gemma = ["gemma-27b-q4", "gemma-27b-q4-nothink", "gemma-27b-abliterated-q5"]
 | `budget` | float (GB) | *auto-detected total* | hard cap; resolution: `--budget` > this > detected total > **error** |
 | `margin` | float (GB) | `4.0` | `ceiling = budget − margin` |
 | `strategy` | enum | `flat` | `flat` = no grouping (max flexibility); `family` = collapse `[groups]` |
-| `on_overflow` | enum | `group` | `group` = auto-reduce past the 1000-cap + warn; `error` = refuse |
+| `on_overflow` | enum | `group` | `group` = omit any over-cap set + warn (a safe under-declaration); `error` = refuse |
 
 ### 1.2 The `configure` surface
 
@@ -150,11 +150,12 @@ model's current param-hash.
 A `matrix:` block has three sub-keys:
 
 - **`vars`** — short alias → model id, for readable expressions. A var name wins
-  over an identical model id. Keep aliases to the **schema-safe bound: ≤8
-  characters, alphanumeric** (the JSON schema enforces this; the prose docs say up
-  to 32, but the two disagree — stay within ≤8 so any build accepts it). Vars are
-  optional as of llama-swap v243 (sets may use full model ids directly); llama-matrix
-  still mints short vars for the frequently-referenced aux ids.
+  over an identical model id. If minted, keep aliases to the **schema-safe bound:
+  ≤8 characters, alphanumeric** (the JSON schema enforces this; the prose docs say
+  up to 32, but the two disagree — stay within ≤8 so any build accepts it). Vars
+  are optional as of llama-swap v243, and **llama-matrix currently emits none** —
+  sets reference full model ids directly (valid on v243+). The `vars:` sub-key is
+  reserved for a future readability pass.
 - **`evict_costs`** — positive integers, default 1. Higher = costlier to evict =
   prefer to keep.
 - **`sets`** — named **DSL strings** (not lists).

@@ -430,7 +430,8 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
             )
         };
         let aux_suffix = if with_aux { " & +aux" } else { "" };
-        if !with_aux {
+        // Only blame aux when aux actually exists but this heavy can't fit with it.
+        if has_aux && !with_aux {
             warnings.push(format!(
                 "heavy `{}` is too large to co-reside with aux ({aux_cost:.1} GB) — it runs alone",
                 unit.key
@@ -438,7 +439,7 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
         }
         let footprint =
             baseline + unit.size + reserved + fitting.iter().map(|model| model.d_total).sum::<f64>();
-        let aux_note = if with_aux { "" } else { ", no aux" };
+        let aux_note = if has_aux && !with_aux { ", no aux" } else { "" };
         sets.push(EmittedSet {
             name: format!("heavy_{}", unit.key),
             expr: format!("{}{}{}", unit.expr(), images_suffix, aux_suffix),
@@ -463,7 +464,7 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
         }
     }
 
-    // ---- guards: the fit invariant (Principle #1) and the 1000-combo cap ----
+    // ---- guard 1: the fit invariant (Principle #1) — always fatal ----
     for set in &sets {
         if set.footprint > ceiling + 1e-6 {
             bail!(
@@ -474,24 +475,36 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
                 ceiling
             );
         }
+    }
+
+    // ---- guard 2: the 1000-combination cap (Principle #7 — never emit invalid) ----
+    // `error` refuses; `group` OMITS the over-cap set (a safe under-declaration —
+    // dropping a combo never OOMs, it just declares less) and warns. Either way the
+    // emitted block is always valid.
+    let mut over_cap: Vec<String> = Vec::new();
+    for set in &sets {
         if set.fanout > 1000 {
             match policy.on_overflow {
                 OnOverflow::Error => bail!(
-                    "set `{}` expands to {} combinations (> 1000 cap); set `on_overflow` or add \
-                     `[groups]` to reduce it",
+                    "set `{}` expands to {} combinations (> the 1000 cap); reduce it via `[groups]`, \
+                     or set `on_overflow = \"group\"` to omit it",
                     set.name,
                     set.fanout
                 ),
-                OnOverflow::Group => warnings.push(format!(
-                    "set `{}` expands to {} combinations (> 1000 cap); auto-reduction is not yet \
-                     implemented — group it in `[groups]`",
-                    set.name, set.fanout
-                )),
+                OnOverflow::Group => {
+                    warnings.push(format!(
+                        "set `{}` expands to {} combinations (> the 1000 cap) — omitted (a safe \
+                         under-declaration); split it via `[groups]` to cover those combinations",
+                        set.name, set.fanout
+                    ));
+                    over_cap.push(set.name.clone());
+                }
             }
         }
     }
+    sets.retain(|set| !over_cap.contains(&set.name));
 
-    let n_packs = packs.len();
+    let n_packs = sets.iter().filter(|set| set.name.starts_with("pack")).count();
     let n_heavies = sets.iter().filter(|set| set.name.starts_with("heavy_")).count();
     Ok(MatrixPlan {
         vars: Vec::new(),
@@ -660,6 +673,63 @@ mod tests {
                 .any(|set| set.name.starts_with("pack") && set.expr.contains("+g_gemma") && set.expr.contains("other")),
             "expected a pack pairing the gemma group with `other`"
         );
+    }
+
+    #[test]
+    fn overflow_group_omits_the_over_cap_set_and_error_refuses() {
+        use crate::policy::{OnOverflow, Strategy};
+        // Two family groups of 32 tiny variants each → a pack pairing them has a
+        // fan-out of 32×32 = 1024 (> the 1000 cap).
+        let mut models = Vec::new();
+        for group in ["gA", "gB"] {
+            for index in 0..32 {
+                models.push(footprint(
+                    &format!("{group}-{index}"),
+                    ModelType::Llm,
+                    Some(&format!("/{group}-{index}.gguf")),
+                    1.0,
+                    5.0,
+                ));
+            }
+        }
+        let mut group_policy = Policy {
+            strategy: Strategy::Family,
+            ..Policy::default()
+        };
+        group_policy
+            .groups
+            .insert("gA".to_string(), (0..32).map(|index| format!("gA-{index}")).collect());
+        group_policy
+            .groups
+            .insert("gB".to_string(), (0..32).map(|index| format!("gB-{index}")).collect());
+
+        // group (default): the 1024-combo pack is omitted, and every surviving set
+        // is within the cap — the emitted block is always valid.
+        let plan = build(&BuildInput {
+            models: &models,
+            policy: &group_policy,
+            baseline: 0.16,
+            budget: 100.0,
+        })
+        .unwrap();
+        assert!(plan.sets.iter().all(|set| set.fanout <= 1000), "an over-cap set survived");
+        assert!(
+            plan.warnings.iter().any(|warning| warning.contains("omitted")),
+            "expected an overflow-omission warning"
+        );
+
+        // error: refuse outright rather than emit
+        let error_policy = Policy {
+            on_overflow: OnOverflow::Error,
+            ..group_policy.clone()
+        };
+        assert!(build(&BuildInput {
+            models: &models,
+            policy: &error_policy,
+            baseline: 0.16,
+            budget: 100.0,
+        })
+        .is_err());
     }
 
     #[test]
