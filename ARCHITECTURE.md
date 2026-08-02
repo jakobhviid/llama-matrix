@@ -206,15 +206,17 @@ and `{b}` alone. This keeps the set count and the DSL fan-out small.
 
 The block is a set of named DSL expressions (see `SPEC.md` §3 for the grammar):
 
-- `aux` — the ride-along pool.
-- one helper per logical model with >1 quant — the quant alternatives (`|`), so the
-  long OR-lists appear once and are referenced by `+name`.
-- `images` — the image pool (`&`).
+- `aux` — the ride-along pool, referenced elsewhere as `+aux` (omitted when there
+  are no aux models).
+- one `g_<name>` helper per logical model with >1 variant — the quant alternatives
+  (`|`), so the long OR-lists appear once and are referenced by `+g_<name>`. A
+  single-variant model is referenced by its bare id (no helper).
+- `images` — the image pool (`&`, + `+aux`).
 - one `pack*` per maximal fitting combination of logical models (`&`, + `+aux`).
 - one `llmimg_*` per logical model with the largest image subset that still fits.
 - one `heavy_*` per heavy unit.
-- `vars` (short aliases) and `evict_costs` (higher = costlier to reload = prefer to
-  keep; derived from load time, tunable).
+- `evict_costs` (higher = costlier to evict = prefer to keep; derived from load
+  time, tunable). No `vars:` are emitted — sets use full model ids (see `SPEC.md` §3).
 
 llama-swap caps expansion at **1000 combinations per expression** (the product of a
 set's `|`-group sizes). After generation the tool counts every expression's fan-out
@@ -234,7 +236,7 @@ emit it.
 
 ## 5. Apply, verify, roll back
 
-`apply` (or `build --apply`):
+The apply step (invoked by `build --apply` — there is no standalone `apply` verb):
 
 1. **Back up** the current `config.yaml`.
 2. **Splice** — replace everything from the generated marker line to EOF with the
@@ -287,13 +289,14 @@ profiles (Principle #8).
 
 `llama-matrix.toml` holds policy, separate from llama-swap's `config.yaml`:
 
-- **Scalars** (`budget`, `margin`, `endpoint`, `strategy`, `on_overflow`) are
-  managed through `llama-matrix configure get/set/unset/list/keys` — a validated,
+- **Scalars** (`config`, `endpoint`, `budget`, `margin`, `strategy`, `on_overflow`)
+  are managed through `llama-matrix configure get/set/unset/list/keys` — a validated,
   shell-completable, comment-preserving surface (never hand-edit guesswork).
 - **Structured tables** (`[paths]`, `[roles]`, `[groups]`) are hand-edited.
 
-`llama-matrix setup` provisions the file on first run: it discovers/confirms the
-llama-swap config, confirms the endpoint, probes the GPU to auto-detect the total,
-offers to reserve some of it (setting `budget`), and writes a starter
-`llama-matrix.toml`. See `SPEC.md` for the full schema and `WORKFLOWS.md` for the
-operating loops.
+`llama-matrix setup` provisions the file on first run: it discovers the llama-swap
+config, sets the endpoint, probes the GPU to auto-detect the total, and writes a
+starter `llama-matrix.toml` with `budget` set to the full detected pool (plus a
+comment on reserving some). To reserve room for other apps, lower it afterward with
+`configure set budget <GB>`. See `SPEC.md` for the full schema and `WORKFLOWS.md`
+for the operating loops.

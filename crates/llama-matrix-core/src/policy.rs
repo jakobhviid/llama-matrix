@@ -24,7 +24,8 @@ pub enum Strategy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum OnOverflow {
-    /// Auto-reduce (group by nearest footprint) and warn loudly.
+    /// Omit any set that exceeds the 1000-combination cap (a safe
+    /// under-declaration — dropping a combo never OOMs) and warn loudly.
     #[default]
     Group,
     /// Refuse to emit; the operator groups by hand.

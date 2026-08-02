@@ -21,36 +21,40 @@ Two phases, two subcommands:
   measured footprints sum under the ceiling, then (with `--apply`) splices the
   `matrix:` block into your `config.yaml`.
 
-> **Status: early development.** The design is settled and a working reference
-> exists; the Rust implementation is being built toward v1.0. Interfaces may change
-> until the first tagged release.
+**v1.0 — released.** Install below, then run `llama-matrix setup`.
 
-## Scope
+## Requirements
 
-llama-matrix is **general-purpose** — for anyone running a llama-swap server with
-more models than fit in memory at once. It reads a standard llama-swap
-`config.yaml`, measures against whatever GPU or unified-memory box you have
-(AMD and NVIDIA in v1), and writes a matrix the running llama-swap consumes. It is
-not tied to any particular model roster, backend mix, or machine.
+- **A running llama-swap with the matrix engine** — upstream calls it Groups V2 /
+  Swap Matrix (merged in llama-swap PR #646). Quick check: load a config with a
+  `matrix:` block; it should hot-reload with no "must use either groups or matrix"
+  error.
+- **A GPU sensor for `measure`** — AMD (`amdgpu` sysfs) or NVIDIA (`nvidia-smi`).
+  `build` needs none: it works from an existing measurement store and a `--budget`.
+- **No** root, no compiler, and no particular process manager or container runtime.
+
+## Works with any llama-swap setup
+
+llama-matrix is **general-purpose and deployment-agnostic** — for anyone running a
+llama-swap server with more models than fit in memory at once. It talks HTTP to your
+llama-swap at a configurable endpoint (default `http://localhost:8080`), reads your
+`config.yaml` wherever it lives, and auto-detects your GPU budget (AMD `amdgpu` or
+NVIDIA; unified-memory APU or discrete card). It does **not** manage your service —
+it writes the config block and lets llama-swap hot-reload — and it assumes nothing
+about your process manager, container runtime, model roster, or backend mix. Nothing
+about any particular machine is baked in.
 
 ## Install
 
-Prebuilt binaries and a Homebrew formula ship with each release. Until then, build
-from source:
-
 ```sh
-cargo build --release
-# binary at target/release/llama-matrix
-```
+# Homebrew (macOS + Linux):
+brew install jakobhviid/tap/llama-matrix
 
-Once released:
-
-```sh
-# prebuilt binary — no compiler, Homebrew, or root required:
+# …or a prebuilt binary — no compiler, Homebrew, or root required:
 curl -fsSL https://raw.githubusercontent.com/jakobhviid/llama-matrix/main/install.sh | sh
 
-# …or via Homebrew:
-brew install jakobhviid/tap/llama-matrix
+# …or from source (needs a Rust toolchain):
+cargo build --release   # binary at target/release/llama-matrix
 ```
 
 ## Quickstart
@@ -63,6 +67,11 @@ llama-matrix build --out m.yaml   # …or write it to a file
 llama-matrix build --apply    # …or splice it into config.yaml, wait for reload, verify
 ```
 
+> `measure` talks to your **running** llama-swap and loads each model in turn — it
+> evicts your warm models, and a first full sweep can take minutes. On success,
+> `build --apply` splices the block, waits for llama-swap's hot-reload, and verifies
+> that a pack co-resides.
+
 Reserve part of the GPU for other apps, permanently or per-run:
 
 ```sh
@@ -70,9 +79,44 @@ llama-matrix configure set budget 50    # 96 GB card? plan against 50, keep the 
 llama-matrix build --budget 96          # or just for this run
 ```
 
-Every command takes `--json`, and `llama-matrix --llm` prints the full
-machine-readable guide (every command plus the design) — so a human *or* an
-LLM/agent can drive the whole lifecycle. See **`WORKFLOWS.md`**.
+## What it produces
+
+A `matrix:` block that llama-swap consumes — the maximal set of model combinations
+that fit under your budget. On a roster where a couple of coders + a general model +
+small aux services fit together, but a 122B model can't:
+
+```yaml
+matrix:
+  sets:
+    aux:    "embed & rerank & whisper"       # small services; ride along with every set
+    pack1:  "gemma & glm-flash & +aux"       # three models co-resident, under budget
+    pack2:  "coder-30b & gemma & +aux"
+    heavy_qwen122: "qwen122 & +aux"          # too big to share — runs alone (+ aux)
+```
+
+**Terms:** an **aux** model is a small always-useful service reserved in every
+combination; a **pack** is a maximal group of models that co-reside safely; a
+**heavy** is a model too large to share with any other. **budget** is the GB
+llama-matrix may plan against and **margin** is safety slack (`ceiling = budget −
+margin`). (Interchangeable quant/`-nothink` variants of one model collapse into a
+`+g_<name>` "pick one" helper.) The payoff: instead of one model at a time,
+llama-swap keeps each declared combination resident and evicts only when an
+incompatible model is requested — never OOMing.
+
+## Commands
+
+| command | what it does |
+|---|---|
+| `setup` | discover your config + endpoint, detect the budget, write `llama-matrix.toml` |
+| `measure` | load each model, record its real footprint (GPU-touching, stateful) |
+| `build` | generate the matrix block; `--out FILE` to write it, `--apply` to splice it |
+| `drift` | show whether the live matrix block matches a fresh build (read-only) |
+| `configure` | get/set the scalar settings (budget, margin, strategy, …) |
+| `prune` | drop measurements whose weight files are gone (`--yes` to delete) |
+
+Every command takes `--json`, and `llama-matrix --llm` prints the full guide (every
+command plus the design) — readable by a human *or* an LLM/agent. See
+**`WORKFLOWS.md`** for the operating loops.
 
 ## How it works
 
@@ -83,9 +127,13 @@ interchangeable quant/`-nothink` variants into one unit, then finds every *maxim
 combination that fits under `ceiling = budget − margin` — because llama-swap treats
 any subset of a declared set as valid, declaring the maximal groups licenses all the
 smaller ones too. The default strategy declares everything that fits (maximum
-flexibility); grouping to shrink the matrix is opt-in. `apply` backs up your config,
-splices on a generated marker, waits for the hot-reload, verifies, and rolls back on
-any anomaly.
+flexibility); grouping to shrink the matrix is opt-in. `build --apply` backs up your
+config, splices on a generated marker, waits for the hot-reload, verifies, and rolls
+back on any anomaly.
+
+This targets llama-swap's `matrix:` engine, which replaces the legacy `groups:` one
+(the two are mutually exclusive). `groups:` has no memory model — it can't know which
+models physically fit together — and that's the gap llama-matrix fills.
 
 ## Documentation
 
@@ -103,10 +151,16 @@ All of the above are compiled into `llama-matrix --llm`.
 
 - v1 optimizes a **single** unified memory pool; multi-GPU / per-device budgets are
   on the roadmap.
-- A family/logical model is sized by its largest quant (safe but slightly
-  pessimistic) — see the roadmap for actual-quant sizing.
+- A logical model (a model's quant variants collapsed into one unit) is sized by its
+  largest quant — safe, but slightly pessimistic; see the roadmap for actual-quant
+  sizing.
 - `measure` needs a supported GPU sensor (AMD sysfs or NVIDIA); `build` works
   anywhere from an existing measurement store and a supplied `--budget`.
+- Model **type** is inferred from the launch command (`sd-server` → image,
+  `whisper-server` → stt, `--embedding`/`--reranking` → embed/rerank, else llm). An
+  unusual backend binary falls back to `llm`; if its load-trigger then doesn't fit
+  it's recorded `FAILED` and excluded — never mis-measured. Overriding type in
+  settings is on the roadmap.
 
 ## AI disclosure
 

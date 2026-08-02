@@ -1,9 +1,9 @@
 # ROADMAP.md — where llama-matrix is going
 
-Scope for v1.0 and the deliberately-deferred work after it. The v1 build is
+What v1.0 ships and the deliberately-deferred work after it. The v1 build is
 intentionally conservative: it never OOMs, at the cost of leaving some headroom on
-the table. Most items below trade that conservatism for tighter packing once the
-core is proven.
+the table. Most items below trade that conservatism for tighter packing. Compiled
+into `--llm`.
 
 ## v1.0 scope
 
@@ -28,25 +28,31 @@ Roughly in order of value-to-effort:
    forbids. Cost: more sets — mind the combo cap.
 2. **Richer combos.** Enumerate maximal groups over the *union* of LLM units and
    images (e.g. "2 LLMs + an image"), not just LLM-packs or single-LLM-plus-images.
-3. **Auto-group detection.** Derive candidate `[groups]` by normalizing ids
+3. **Configurable model-type detection.** Today `type` is inferred from the launch
+   command (binary + flags: `sd-server` → image, `whisper-server` → stt,
+   `--embedding`/`--reranking` → embed/rerank, else llm). Let operators **override
+   it in settings** — a per-id `type` map (and/or custom binary→type rules) — so an
+   unusual image/STT/rerank backend classifies correctly instead of falling back to
+   `llm`. Deferred; not worked on now.
+4. **Auto-group detection.** Derive candidate `[groups]` by normalizing ids
    (strip quant/mode) + a confirmation heuristic, so a reduction strategy needs zero
    hand-declaration for common rosters.
-4. **Context-parametric footprints.** Measure a model at several `-c` values to get
+5. **Context-parametric footprints.** Measure a model at several `-c` values to get
    a KV slope, then re-target the matrix for a different serving context without
    re-measuring, and answer "does pack Y still fit if I bump X to 128k?"
-5. **KV-quant sensitivity.** Record footprint under q8 vs f16 KV so the tool can
+6. **KV-quant sensitivity.** Record footprint under q8 vs f16 KV so the tool can
    advise "switch this model to q8 KV to unlock pack Y."
-6. **evict_cost from telemetry.** Derive keep/evict weights from real llama-swap
+7. **evict_cost from telemetry.** Derive keep/evict weights from real llama-swap
    request frequency/recency instead of load-time heuristics.
-7. **Dynamic margin.** Scale the safety margin per-combo (more co-resident models →
+8. **Dynamic margin.** Scale the safety margin per-combo (more co-resident models →
    more compute-buffer slack) or from measured additivity variance, instead of a
    flat value.
-8. **Generation-peak budgeting.** Image servers transiently allocate more during a
+9. **Generation-peak budgeting.** Image servers transiently allocate more during a
    diffusion step than at idle-load; budget the transient peak when co-running image
    generation near the ceiling.
-9. **More platform backends.** Apple Silicon (unified memory via Metal), and
-   `rocm-smi`/other AMD paths where sysfs isn't available.
-10. **Multi-GPU / multi-node.** A single unified pool today; discrete or multi-GPU
+10. **More platform backends.** Apple Silicon (unified memory via Metal), and
+    `rocm-smi`/other AMD paths where sysfs isn't available.
+11. **Multi-GPU / multi-node.** A single unified pool today; discrete or multi-GPU
     makes the knapsack multi-dimensional (per-device budgets) — the Multi-Choice
     Multi-Dimensional Knapsack. A larger change to the fit predicate and emission.
 

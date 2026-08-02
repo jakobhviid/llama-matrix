@@ -43,7 +43,7 @@ gemma = ["gemma-27b-q4", "gemma-27b-q4-nothink", "gemma-27b-abliterated-q5"]
 
 | key | type | default | notes |
 |---|---|---|---|
-| `config` | string (path) | `./config.yaml` | the llama-swap config.yaml; written by `setup`, overridable per-run with `--config` |
+| `config` | string (path) | `config.yaml` | the llama-swap config.yaml (relative to the working dir); written by `setup`, overridable per-run with `--config` |
 | `endpoint` | string (URL) | `http://localhost:8080` | llama-swap address; also `--endpoint` per run |
 | `budget` | float (GB) | *auto-detected total* | hard cap; resolution: `--budget` > this > detected total > **error** |
 | `margin` | float (GB) | `4.0` | `ceiling = budget − margin` |
@@ -150,12 +150,10 @@ model's current param-hash.
 A `matrix:` block has three sub-keys:
 
 - **`vars`** — short alias → model id, for readable expressions. A var name wins
-  over an identical model id. If minted, keep aliases to the **schema-safe bound:
-  ≤8 characters, alphanumeric** (the JSON schema enforces this; the prose docs say
-  up to 32, but the two disagree — stay within ≤8 so any build accepts it). Vars
-  are optional as of llama-swap v243, and **llama-matrix currently emits none** —
-  sets reference full model ids directly (valid on v243+). The `vars:` sub-key is
-  reserved for a future readability pass.
+  over an identical model id; if minted, keep aliases to **≤8 alphanumeric
+  characters** (the schema-safe bound). Vars are optional as of llama-swap v243, and
+  **llama-matrix currently emits none** — sets reference full model ids directly
+  (valid on v243+). The `vars:` sub-key is reserved for a future readability pass.
 - **`evict_costs`** — positive integers, default 1. Higher = costlier to evict =
   prefer to keep.
 - **`sets`** — named **DSL strings** (not lists).
@@ -185,17 +183,21 @@ capped at 1000 combinations per expression** — the product of that expression'
 
 | set | form | meaning |
 |---|---|---|
-| `aux` | `e & r & w & k` | ride-along pool (`&`) |
-| `<name>` helper | `(q4 \| q6 \| q8)` | one logical model's quant alternatives (`\|`), referenced by `+<name>` |
+| `aux` | `embed & rerank & whisper` | ride-along pool (`&`) |
+| `g_<name>` helper | `(q4 \| q6 \| q8)` | a logical model's quant alternatives (`\|`), referenced by `+g_<name>` — emitted **only** for a model with more than one variant |
 | `images` | `img1 & img2 & +aux` | all image models co-resident (`&`), any subset valid |
-| `pack<N>` | `+a & +b & +aux` | a maximal fitting combination of logical models |
-| `llmimg_<id>` | `+a & img1 & img2 & +aux` | one logical model + the largest fitting image subset |
+| `pack<N>` | `single-a & +g_multi-b & +aux` | a maximal fitting combination of logical models |
+| `llmimg_<id>` | `+g_a & img1 & img2 & +aux` | one logical model + the largest fitting image subset |
 | `heavy_<id>` | `(q4 \| q6) & img1 & +aux` | a heavy unit alone + any images that still fit |
 
-**Emission rules:** quant slots and mutually-exclusive units → `|`. Co-resident
-pools (images, multi-unit packs) → `&`. Every emitted set satisfies `baseline +
-Σ(members at max quant) + aux_cost ≤ ceiling` (Architecture §4.5) or the build
-fails.
+**Reference rules:** a logical model with a single variant is referenced by its
+**bare id** (`chat-a`); one with multiple variants gets a `g_<name>` helper set
+(the `(a | b | …)` alternation) and is referenced by `+g_<name>`. `aux` is
+referenced by `+aux` (omitted entirely when there are no aux models). Quant slots
+and mutually-exclusive units → `|`; co-resident pools (images, multi-unit packs) →
+`&`. Every emitted set satisfies `baseline + Σ(members at max quant) + aux_cost ≤
+ceiling` (Architecture §4.5) or the build fails. (llama-matrix emits no `vars:` — §3
+above; the `<name>` here are the model ids themselves.)
 
 ### 3.2 The generated marker
 

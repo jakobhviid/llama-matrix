@@ -49,7 +49,7 @@ strategy (#3).
 ## 5. The live config is written in exactly one place.
 
 `measure` touches the GPU but never writes `config.yaml`. `build` is pure and
-writes only its output file. Only `apply` (or `build --apply`) mutates the live
+writes only its output file. Only the apply step (via `build --apply`) mutates the live
 llama-swap config — always after a backup, always anchored on a generated marker,
 always followed by a verify with rollback on any anomaly. One writer, one
 audited path.
@@ -91,7 +91,7 @@ built to be driven by a person *and* by an LLM/agent — see `WORKFLOWS.md`.
 
 ## 10. Docs are load-bearing.
 
-`README`, `ARCHITECTURE`, `SPEC`, `WORKFLOWS`, and this file are compiled into
+`README`, `ARCHITECTURE`, `SPEC`, `WORKFLOWS`, `ROADMAP`, and this file are compiled into
 `--llm`. A behaviour change ships with its doc change in the same commit. When the
 code and `SPEC.md` disagree, the code wins and the doc is the bug — fix the doc.
 The test: *could a fresh operator or LLM run this tool correctly from `--llm`
