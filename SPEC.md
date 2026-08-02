@@ -146,8 +146,12 @@ re-keying each entry under the model's current param-hash.
 
 A `matrix:` block has three sub-keys:
 
-- **`vars`** — short alias (1–32 chars) → model id, for readable expressions. A var
-  name wins over an identical model id.
+- **`vars`** — short alias → model id, for readable expressions. A var name wins
+  over an identical model id. Keep aliases to the **schema-safe bound: ≤8
+  characters, alphanumeric** (the JSON schema enforces this; the prose docs say up
+  to 32, but the two disagree — stay within ≤8 so any build accepts it). Vars are
+  optional as of llama-swap v243 (sets may use full model ids directly); llama-matrix
+  still mints short vars for the frequently-referenced aux ids.
 - **`evict_costs`** — positive integers, default 1. Higher = costlier to evict =
   prefer to keep.
 - **`sets`** — named **DSL strings** (not lists).
@@ -226,15 +230,30 @@ to its base → no separate measurement. The same weights at `-np 2 -c 262144` v
 
 llama-matrix reads a standard llama-swap `config.yaml`:
 
-- **Worklist** = the `models:` map keys (minus hand-set proxy entries). The set of
-  ids to measure *is* the config — never a parallel hand-kept list.
+- **Macro expansion — do this FIRST, before anything below.** llama-swap configs
+  may define a global `macros:` map and reference `${macro}` inside `cmd` strings,
+  plus the reserved substitutions `${PORT}`, `${PID}`, `${MODEL_ID}`, and
+  `${env.VAR}` (multi-pass expansion). Every downstream step (binary/type
+  detection, primary-file existence check, param-hash) operates on the **expanded**
+  command — hashing or stat-ing an unexpanded `${…}` placeholder is a bug. A
+  macro-free config expands to itself, so this is always safe to run.
+- **Worklist** = the `models:` map keys, minus (a) hand-set proxy entries and
+  (b) **selectors / virtual model ids** (llama-swap's per-request routing entries
+  with strategies like `warm`/`pin`/`spillover`) — those are not loadable servers,
+  so `measure` must skip them. The set of ids to measure *is* the config — never a
+  parallel hand-kept list.
 - **`cmd`** — the launch command scalar (folded `>` or literal `|`), normalized to
-  one line. First token is the binary.
+  one line, then macro-expanded. First token is the binary.
 - **type** — derived from `cmd` (§6), never a hardcoded id-set.
 - **primary file** — the first match of `--diffusion-model`, `-m`, `--model`,
   `--llm`.
 - **path mapping** — a container path is resolved to a host path via `[paths]`;
   unmapped paths pass through unchanged (native deployments).
+- **Unknown keys are tolerated.** llama-swap has many model-level keys llama-matrix
+  doesn't consume (`cmdStop`, `unloadTimeout`, `concurrencyLimit`, `capabilities`,
+  `filters`, `metadata`, `name`, `description`, …). The parser must ignore
+  unrecognized fields, never fail closed on them — and the marker-anchored splice
+  preserves every non-matrix key untouched.
 
 ## 6. Model-type derivation (from `cmd`)
 
@@ -270,12 +289,35 @@ type-agnostic; only the load trigger differs.
 
 ## 8. Server control endpoints (llama-swap)
 
-- `GET /unload` — unload all models (the clean-slate primitive between
-  measurements). `POST /unload` is not it.
-- `GET /running` → `{"running":[{"model","state",…}]}`; `state=="ready"` means
-  loaded and serving. Poll this to know when a load finished — reading memory right
-  at `ready` is too early (KV/compute buffers still allocating; see stabilize).
-- `GET /v1/models`, `GET /health` — sanity/verify.
+- **Unload** — `POST /api/models/unload` unloads all models (the clean-slate
+  primitive between measurements); `POST /api/models/unload/:model_id` unloads one
+  (useful for tightening incremental sweeps — a baseline reset still needs
+  unload-all). The bare `GET /unload` still works as a **legacy fallback** but is
+  no longer the documented surface; prefer the `POST /api/models/…` forms and fall
+  back to `GET /unload` only if they 404 (older builds).
+- `GET /running` → `{"running":[{"model","state",…}]}`. The state set is
+  `ready`, `starting`, `stopping`, `stopped`, `shutdown`. **Only `ready` is a go
+  signal** — poll until then; treat `starting` as wait and `stopping`/`stopped`/
+  `shutdown` as "do not sample" (a tearing-down model's memory reading is
+  meaningless). Reading memory right at `ready` is still too early (KV/compute
+  buffers allocating; see stabilize).
+- `GET /v1/models`, `GET /health` — sanity/verify. (`unlisted` models are hidden
+  from `/v1/models` but still requestable — which is why the worklist comes from the
+  `models:` map, not from `/v1/models`.)
+
+## 8a. Version & compatibility
+
+- **Requires a llama-swap build with the matrix engine** (Groups V2 / Swap Matrix,
+  merged upstream via PR #646 — not experimental). Probe by loading a config with a
+  `matrix:` block and confirming a clean reload (no "must use either groups or
+  matrix" / unknown-key error).
+- **Full model ids in sets require v243+**; older matrix builds may need `vars`.
+  llama-matrix targets current llama-swap — pin and test against a known version, and
+  re-verify the 1000-combination expansion cap (§3) against the build you pin (the
+  solver became symbolic in v244; the cap still lives in `matrix_dsl.go`).
+- Because upstream iterates quickly on the matrix engine, treat the tested version
+  range as part of the contract and watch releases for memory-awareness landing
+  (which would change the `build` half's value — see `ROADMAP.md`).
 
 ## 9. Not in the schema (explicitly)
 

@@ -50,6 +50,17 @@ Roughly in order of value-to-effort:
     makes the knapsack multi-dimensional (per-device budgets) — the Multi-Choice
     Multi-Dimensional Knapsack. A larger change to the fit predicate and emission.
 
+## Premise risk (track this)
+
+llama-swap is very actively developed — the matrix engine changed across multiple
+releases in a single week around our reference point. The tool's premise is that the
+solver has **no memory awareness**; that holds today (the config schema has no
+memory/budget keys). If upstream ever adds VRAM auto-detection or a memory-aware
+solver, llama-matrix's **build** half could become redundant — but the **measure**
+half (real per-model footprints + a fit-proof) keeps standalone value regardless.
+Mitigation: pin and test against a known llama-swap version range, and watch
+releases + the Groups-V2 discussion for memory-awareness landing.
+
 ## Non-goals
 
 - Managing the llama-swap install, quadlets, image builds, or model downloads.

@@ -77,15 +77,18 @@ file — the pure half never needs a sensor.
 
 For each model in the config worklist:
 
-1. `unload` everything; settle to a clean baseline (read once per sweep).
+1. Unload everything (`POST /api/models/unload`; `GET /unload` is a legacy
+   fallback); settle to a clean baseline (read once per sweep).
 2. Trigger the model to load via its type's endpoint (fire-and-forget; poll for
    ready rather than awaiting the response — an image generation blocks long after
    the model is already resident).
-3. Poll until the server reports the model `ready`.
+3. Poll `/running` until the model's state is `ready` — the only go signal.
+   `starting` means wait; `stopping`/`stopped`/`shutdown` mean do-not-sample (a
+   tearing-down model's reading is meaningless).
 4. **Stabilize**: sample occupancy until two consecutive readings are within a
    small epsilon (KV and compute buffers finish allocating *after* `ready`).
 5. Record the delta over baseline, the VRAM/GTT split, and the load time.
-6. `unload`.
+6. Unload (all, or `POST /api/models/unload/:model_id` for just this one).
 
 Then an **additivity check**: load a real co-resident combo, compare the measured
 total to `baseline + Σ(solo deltas)`. Footprints are additive to within a small
@@ -112,7 +115,12 @@ hand-kept list, which silently drifts. A shared parsing core (mirrors the
 reference `mlib`) is the single source of truth:
 
 - **Parse** the llama-swap `config.yaml` (`models:` map) into per-model records.
-- **`cmd`** — the launch command (folded/literal YAML scalar → one line).
+- **Expand macros first.** llama-swap supports a global `macros:` map, `${macro}`
+  references, and reserved `${PORT}`/`${PID}`/`${MODEL_ID}`/`${env.VAR}`
+  substitutions inside `cmd`. Everything below runs on the **expanded** command —
+  deriving type/file/hash from an unexpanded `${…}` is a bug (a macro-free config
+  expands to itself, so this is always safe).
+- **`cmd`** — the launch command (folded/literal YAML scalar → one line), expanded.
 - **type** — derived from the command, not a hardcoded id-set: an image server
   binary → `image`, a whisper binary → `stt`, `--reranking` → `rerank`,
   `--embedding` → `embed`, else `llm`. (See `SPEC.md` for the exact table.)
@@ -122,6 +130,10 @@ reference `mlib`) is the single source of truth:
 - **path mapping** — when llama-swap runs in a container, the paths in `cmd` are
   container paths; a configurable `[paths]` map resolves them to host paths (an
   identity map when llama-swap runs natively).
+- **Exclusions & tolerance** — skip hand-set proxy entries and llama-swap
+  **selectors / virtual model ids** (per-request routing entries, not loadable
+  servers) from the measure worklist; ignore unknown model-level keys (`cmdStop`,
+  `unloadTimeout`, `capabilities`, …) rather than failing on them.
 
 ### 3.1 The param-hash & the multi-measurement store
 
@@ -249,7 +261,7 @@ crates/llama-matrix/            # thin CLI: clap, --json/--llm/-v, delegates to 
   tests/                        # CLI + fixture-reproduction tests
 crates/llama-matrix-core/
   src/lib.rs
-  src/config.rs                 # parse llama-swap config.yaml (roster + cmds)
+  src/config.rs                 # parse llama-swap config.yaml (roster + cmds); macro expansion
   src/policy.rs                 # llama-matrix.toml: budget/margin/strategy/roles/groups/paths
   src/settings.rs               # `configure` get/set/unset/list/keys (SETTINGS table)
   src/model.rs                  # per-model record: id, cmd, type, file, mem_cmd, param_hash
