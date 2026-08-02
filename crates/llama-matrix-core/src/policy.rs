@@ -45,6 +45,9 @@ pub struct Roles {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct Policy {
+    /// Path to the llama-swap `config.yaml` (default: `config.yaml` beside this
+    /// file). A `--config` flag overrides it.
+    pub config: Option<String>,
     /// llama-swap base URL.
     pub endpoint: String,
     /// GB llama-matrix may plan against; `None` = auto-detect the physical total.
@@ -63,6 +66,7 @@ pub struct Policy {
 impl Default for Policy {
     fn default() -> Self {
         Policy {
+            config: None,
             endpoint: "http://localhost:8080".to_string(),
             budget: None,
             margin: 4.0,

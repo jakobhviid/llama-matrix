@@ -12,11 +12,13 @@
 //! implemented (see ../../ROADMAP.md).
 
 use std::io::{self, IsTerminal};
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use anyhow::Result;
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
+use llama_matrix_core::{build, cache, config as ls_config, matrix, policy::Policy, ui};
 
 mod completions;
 
@@ -79,6 +81,9 @@ enum Cmd {
     /// Collapses variants, runs the co-residency knapsack, and emits the block.
     /// Prints by default; `--apply` splices it into config.yaml and verifies.
     Build {
+        /// llama-swap config.yaml (default: from llama-matrix.toml, else ./config.yaml).
+        #[arg(long)]
+        config: Option<String>,
         /// VRAM+GTT pool to plan against, in GB (overrides the configured budget).
         #[arg(long, visible_alias = "vram")]
         budget: Option<f64>,
@@ -168,14 +173,121 @@ fn run(cli: Cli) -> Result<()> {
         llm: _,
         cmd,
     } = cli;
-    let _ = (json, verbose);
+    let _ = verbose;
     match cmd {
         None => {
             Cli::command().print_help()?;
             println!();
         }
         Some(Cmd::Completions { shell }) => completions::print_completions(shell),
+        Some(Cmd::Build {
+            config,
+            budget,
+            margin,
+            apply,
+            out,
+        }) => cmd_build(config, budget, margin, apply, out, json)?,
         Some(other) => not_yet(&verb_name(&other))?,
+    }
+    Ok(())
+}
+
+/// `build` — generate the matrix block from the measurement store + config.
+fn cmd_build(
+    config: Option<String>,
+    budget: Option<f64>,
+    margin: Option<f64>,
+    apply: bool,
+    out: Option<String>,
+    json: bool,
+) -> Result<()> {
+    // Policy lives in the working directory; measurements/ sits beside it.
+    let mut policy = Policy::load(PathBuf::from("llama-matrix.toml"))?;
+    if let Some(margin) = margin {
+        policy.margin = margin;
+    }
+    let config_dir = std::env::current_dir()?;
+
+    // Resolve the llama-swap config path: --config > policy.config > ./config.yaml.
+    let config_path = config
+        .or_else(|| policy.config.clone())
+        .unwrap_or_else(|| "config.yaml".to_string());
+    let parsed = ls_config::parse_file(&config_path)?;
+
+    let store = cache::Store::new(config_dir.join("measurements"));
+    let box_meta = store.read_box()?;
+    if store.list_ids().is_empty() {
+        anyhow::bail!(
+            "no measurements in {} — run `llama-matrix measure` first",
+            store.dir().display()
+        );
+    }
+
+    // Budget resolution (never a silent guess): --budget > policy > detected total.
+    let budget = budget
+        .or(policy.budget)
+        .or(box_meta.detected_total)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no budget set — pass --budget <GB>, set `budget` in llama-matrix.toml, or run \
+                 `measure` to detect the pool"
+            )
+        })?;
+
+    // Build measured footprints (config × store), noting unmeasured models.
+    let mut footprints = Vec::new();
+    let mut unmeasured = Vec::new();
+    for record in &parsed.models {
+        match store.select(&record.id, &record.param_hash)? {
+            Some(measurement) => footprints.push(build::ModelFootprint {
+                id: record.id.clone(),
+                model_type: record.model_type,
+                primary_file: record.primary_file.clone(),
+                d_total: measurement.d_total,
+                load_s: measurement.load_s,
+            }),
+            None => unmeasured.push(record.id.clone()),
+        }
+    }
+
+    let mut plan = build::build(&build::BuildInput {
+        models: &footprints,
+        policy: &policy,
+        baseline: box_meta.baseline,
+        budget,
+    })?;
+    plan.excluded.extend(unmeasured);
+    let block = matrix::render(&plan);
+
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "budget": plan.budget,
+                "ceiling": plan.ceiling,
+                "packs": plan.n_packs,
+                "heavies": plan.n_heavies,
+                "sets": plan.sets.len(),
+                "excluded": plan.excluded,
+                "warnings": plan.warnings,
+            })
+        );
+        return Ok(());
+    }
+
+    for warning in &plan.warnings {
+        ui::warn(warning);
+    }
+    if apply {
+        anyhow::bail!(
+            "`build --apply` is not implemented yet — write with `--out FILE` and splice manually for now"
+        );
+    }
+    if let Some(out_path) = out {
+        std::fs::write(&out_path, &block)?;
+        ui::ok(&format!("wrote {out_path} ({} sets)", plan.sets.len()));
+    } else {
+        print!("{block}");
     }
     Ok(())
 }

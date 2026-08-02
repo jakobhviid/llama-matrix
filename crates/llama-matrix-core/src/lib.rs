@@ -16,6 +16,7 @@
 //! - Fail loud, never silent (undetected budget, failed load, combo-cap overflow).
 
 pub mod build; // variant-collapse, roles, the knapsack, heavy classification -> a plan
+pub mod cache; // the per-model measurement store (measurements/<id>.json + _box.json)
 pub mod config; // parse llama-swap config.yaml (+ macro expansion) into model records
 pub mod matrix; // render a plan to the `matrix:` DSL block (+ the generated marker)
 pub mod model; // per-model record: id, cmd, type, primary_file, param_hash
