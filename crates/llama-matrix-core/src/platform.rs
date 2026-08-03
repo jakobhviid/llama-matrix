@@ -2,10 +2,11 @@
 //! of the tool is platform-agnostic: it asks for `total_gb()` / `used_gb()` and
 //! doesn't care how they're read.
 //!
-//! v1 backends: AMD `amdgpu` sysfs (unified VRAM + GTT) and NVIDIA via
-//! `nvidia-smi`. When no backend is available, `measure` can't run — but `build`
-//! still works from a supplied `--budget` and an existing measurement store, so
-//! the pure half never needs a sensor.
+//! Backends: AMD `amdgpu` sysfs (unified VRAM + GTT), NVIDIA via `nvidia-smi`, and
+//! Apple Silicon (macOS) unified memory via `ioreg` + `sysctl`. When no backend is
+//! available, `measure` can't run — but `build` still works from a supplied
+//! `--budget` and an existing measurement store, so the pure half never needs a
+//! sensor.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -132,9 +133,111 @@ impl GpuMemory for NvidiaSmi {
     }
 }
 
-/// Auto-select a backend: AMD sysfs first, then NVIDIA. Errors if neither is
-/// present (the caller should fall back to a configured/`--budget` value).
+/// Apple Silicon backend (macOS). CPU and GPU share one unified-memory pool, so a
+/// model - llama.cpp Metal or MLX - allocates from the same pool the sensor reads.
+/// `total` is the physical unified pool (`sysctl hw.memsize`); `used` is the GPU's
+/// in-use system memory read from `ioreg` (the `IOAccelerator` "In use system
+/// memory" counter), which needs no sudo. This is what lets `measure` size MLX and
+/// Metal models on a Mac. The GPU shares the pool with the OS, so reserve headroom
+/// with `budget`/`margin` rather than planning against the full total.
+#[cfg(target_os = "macos")]
+pub struct AppleSilicon {
+    chip: String,
+}
+
+#[cfg(target_os = "macos")]
+impl AppleSilicon {
+    /// Present on every Apple Silicon Mac; the in-use read is the real capability
+    /// probe, so detection succeeds only if that counter can be read.
+    pub fn detect() -> Option<Self> {
+        gpu_in_use_bytes().ok()?;
+        let chip = sysctl_string("machdep.cpu.brand_string")
+            .unwrap_or_else(|| "Apple Silicon".to_string());
+        Some(AppleSilicon { chip })
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl GpuMemory for AppleSilicon {
+    fn label(&self) -> String {
+        format!("{} (Metal unified memory)", self.chip)
+    }
+
+    fn total_gb(&self) -> Result<f64> {
+        Ok(phys_mem_bytes()? as f64 / BYTES_PER_GIB)
+    }
+
+    fn used_gb(&self) -> Result<f64> {
+        Ok(gpu_in_use_bytes()? as f64 / BYTES_PER_GIB)
+    }
+}
+
+/// Extract the GPU's in-use unified memory (bytes) from `ioreg` IOAccelerator text.
+/// Matches the exact `"In use system memory"=<n>` counter, never the sibling
+/// `"In use system memory (driver)"` key (whose name has no `"=` after `memory`).
+#[cfg(target_os = "macos")]
+fn parse_in_use(ioreg_text: &str) -> Option<u64> {
+    let needle = "\"In use system memory\"=";
+    let start = ioreg_text.find(needle)? + needle.len();
+    let digits: String = ioreg_text[start..]
+        .chars()
+        .take_while(|character| character.is_ascii_digit())
+        .collect();
+    digits.parse().ok()
+}
+
+/// The GPU's in-use unified memory in bytes, via `ioreg -r -d 1 -c IOAccelerator`.
+#[cfg(target_os = "macos")]
+fn gpu_in_use_bytes() -> Result<u64> {
+    let output = Command::new("ioreg")
+        .args(["-r", "-d", "1", "-c", "IOAccelerator"])
+        .output()
+        .context("running ioreg")?;
+    if !output.status.success() {
+        bail!("ioreg exited with an error");
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    parse_in_use(&text)
+        .ok_or_else(|| anyhow::anyhow!("no 'In use system memory' counter in ioreg output"))
+}
+
+/// The physical unified-memory pool in bytes, via `sysctl -n hw.memsize`.
+#[cfg(target_os = "macos")]
+fn phys_mem_bytes() -> Result<u64> {
+    let output = Command::new("sysctl")
+        .args(["-n", "hw.memsize"])
+        .output()
+        .context("running sysctl hw.memsize")?;
+    if !output.status.success() {
+        bail!("sysctl hw.memsize failed");
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse::<u64>()
+        .context("parsing hw.memsize")
+}
+
+/// A trimmed `sysctl -n <name>` string, or None if it can't be read.
+#[cfg(target_os = "macos")]
+fn sysctl_string(name: &str) -> Option<String> {
+    let output = Command::new("sysctl").args(["-n", name]).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!value.is_empty()).then_some(value)
+}
+
+/// Auto-select a backend: Apple Silicon (on macOS) first, then AMD sysfs, then
+/// NVIDIA. Errors if none is present (the caller should fall back to a
+/// configured/`--budget` value).
 pub fn detect() -> Result<Box<dyn GpuMemory>> {
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(apple) = AppleSilicon::detect() {
+            return Ok(Box::new(apple));
+        }
+    }
     if let Some(amd) = AmdSysfs::detect() {
         return Ok(Box::new(amd));
     }
@@ -142,8 +245,8 @@ pub fn detect() -> Result<Box<dyn GpuMemory>> {
         return Ok(Box::new(nvidia));
     }
     bail!(
-        "no supported GPU memory sensor found (AMD amdgpu sysfs or NVIDIA nvidia-smi) — \
-         pass --budget or set it in llama-matrix.toml to skip detection"
+        "no supported GPU memory sensor found (Apple Silicon, AMD amdgpu sysfs, or NVIDIA \
+         nvidia-smi) — pass --budget or set it in llama-matrix.toml to skip detection"
     )
 }
 
@@ -163,6 +266,21 @@ mod tests {
         let amd = AmdSysfs::at(device);
         assert!((amd.total_gb().unwrap() - 112.0).abs() < 1e-6);
         assert!((amd.used_gb().unwrap() - 11.0).abs() < 1e-6);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn apple_silicon_parses_in_use_and_reads_the_pool() {
+        // The parser must pick the exact counter, not the sibling "(driver)" key.
+        let sample = r#""In use system memory (driver)"=0,"Alloc system memory"=10098065408,"In use system memory"=5449367552}"#;
+        assert_eq!(parse_in_use(sample), Some(5_449_367_552));
+
+        // A real read on this Mac: a positive pool, and occupancy within it.
+        let apple = AppleSilicon::detect().expect("Apple Silicon backend detects on macOS");
+        let total = apple.total_gb().unwrap();
+        let used = apple.used_gb().unwrap();
+        assert!(total > 1.0, "total {total} GB");
+        assert!(used >= 0.0 && used <= total, "used {used} / total {total}");
     }
 
     #[test]

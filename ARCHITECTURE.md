@@ -30,6 +30,11 @@ A GPU exposes one or more memory pools. Two common shapes:
 - **Unified-memory APU** — a VRAM carve-out plus a GPU-accessible system-RAM pool
   (on AMD `amdgpu`: `mem_info_vram_*` + `mem_info_gtt_*`). Models spill from the
   first into the second, so occupancy is tracked as **one number** (the sum).
+- **Apple Silicon**: one unified-memory pool shared by CPU and GPU (Metal). A model
+  (llama.cpp Metal or MLX) allocates from it, so occupancy is the GPU's in-use
+  unified memory (the `ioreg` `IOAccelerator` "In use system memory" counter) and
+  total is `hw.memsize`. The GPU shares the pool with the OS, so reserve headroom
+  with `budget`/`margin` rather than planning against the full total.
 
 Three distinct quantities drive every fit decision:
 
@@ -49,8 +54,8 @@ apps is simply `budget = 50` → `ceiling = 46`.
 
 A `GpuMemory` trait exposes `total()` and `used()` (in bytes, summed across pools)
 plus a human label. Backends implement it per platform; the rest of the tool is
-platform-agnostic. v1 ships **AMD sysfs** and **NVIDIA** backends, auto-selected by
-probing for each in turn. When no backend is available, `measure` cannot run, but
+platform-agnostic. It ships **AMD sysfs**, **NVIDIA**, and **Apple Silicon** (Metal
+unified memory) backends, auto-selected by probing for each in turn. When no backend is available, `measure` cannot run, but
 `build` still works entirely from a supplied budget + an existing measurements
 file — the pure half never needs a sensor.
 
@@ -291,7 +296,7 @@ crates/llama-matrix-core/
   src/settings.rs               # `configure` get/set/unset/list/keys (SETTINGS table)
   src/model.rs                  # per-model record: id, cmd, type, file, mem_cmd, param_hash
   src/param_hash.rs             # strip-list → hash
-  src/platform.rs               # GpuMemory trait + AMD sysfs / NVIDIA backends
+  src/platform.rs               # GpuMemory trait + AMD sysfs / NVIDIA / Apple Silicon backends
   src/measure.rs                # phase 1: trigger→ready→stabilize; lockfile; failures
   src/cache.rs                  # measurements/ per-model store + retention + migrate
   src/build.rs                  # variant-collapse, roles, knapsack, heavy classification

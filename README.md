@@ -29,8 +29,9 @@ Two phases, two subcommands:
   Swap Matrix (merged in llama-swap PR #646). Quick check: load a config with a
   `matrix:` block; it should hot-reload with no "must use either groups or matrix"
   error.
-- **A GPU sensor for `measure`** — AMD (`amdgpu` sysfs) or NVIDIA (`nvidia-smi`).
-  `build` needs none: it works from an existing measurement store and a `--budget`.
+- **A GPU sensor for `measure`** — AMD (`amdgpu` sysfs), NVIDIA (`nvidia-smi`), or
+  Apple Silicon (Metal unified memory, read via `ioreg`). `build` needs none: it
+  works from an existing measurement store and a `--budget`.
 - **No** root, no compiler, and no particular process manager or container runtime.
 
 ## Works with any llama-swap setup
@@ -38,8 +39,9 @@ Two phases, two subcommands:
 llama-matrix is **general-purpose and deployment-agnostic** — for anyone running a
 llama-swap server with more models than fit in memory at once. It talks HTTP to your
 llama-swap at a configurable endpoint (default `http://localhost:8080`), reads your
-`config.yaml` wherever it lives, and auto-detects your GPU budget (AMD `amdgpu` or
-NVIDIA; unified-memory APU or discrete card). It does **not** manage your service —
+`config.yaml` wherever it lives, and auto-detects your GPU budget (AMD `amdgpu`,
+NVIDIA, or Apple Silicon unified memory; APU, discrete card, or Mac). It does
+**not** manage your service —
 it writes the config block and lets llama-swap hot-reload — and it assumes nothing
 about your process manager, container runtime, model roster, or backend mix. Nothing
 about any particular machine is baked in.
@@ -155,8 +157,9 @@ All of the above are compiled into `llama-matrix --llm`.
 - A logical model (a model's quant variants collapsed into one unit) is sized by its
   largest quant — safe, but slightly pessimistic; see the roadmap for actual-quant
   sizing.
-- `measure` needs a supported GPU sensor (AMD sysfs or NVIDIA); `build` works
-  anywhere from an existing measurement store and a supplied `--budget`.
+- `measure` needs a supported GPU sensor (AMD sysfs, NVIDIA, or Apple Silicon via
+  Metal unified memory); `build` works anywhere from an existing measurement store
+  and a supplied `--budget`.
 - Model **type** is inferred from the launch command (`sd-server` → image,
   `whisper-server` → stt, `--embedding`/`--reranking` → embed/rerank, else llm). An
   unusual backend binary falls back to `llm`; if its load-trigger then doesn't fit

@@ -50,8 +50,9 @@ Roughly in order of value-to-effort:
 9. **Generation-peak budgeting.** Image servers transiently allocate more during a
    diffusion step than at idle-load; budget the transient peak when co-running image
    generation near the ceiling.
-10. **More platform backends.** Apple Silicon (unified memory via Metal), and
-    `rocm-smi`/other AMD paths where sysfs isn't available.
+10. **More platform backends.** `rocm-smi` and other AMD paths where sysfs isn't
+    available. (Apple Silicon via Metal unified memory has shipped: `total` from
+    `hw.memsize`, `used` from the `ioreg` IOAccelerator counter.)
 11. **Multi-GPU / multi-node.** A single unified pool today; discrete or multi-GPU
     makes the knapsack multi-dimensional (per-device budgets) — the Multi-Choice
     Multi-Dimensional Knapsack. A larger change to the fit predicate and emission.
