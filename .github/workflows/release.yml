@@ -45,9 +45,12 @@ jobs:
         run: |
           # Version = Conventional-Commit semver, counted from the 1.0.0 baseline
           # (the commit whose subject carries RELEASE-BASELINE-1.0.0). Commits
-          # before the baseline are ignored; the baseline commit itself is 1.0.0:
-          #   breaking (type!: / BREAKING CHANGE) -> major | feat: -> minor | else -> patch.
-          v=$(git log --reverse --format='%H%x09%s' | awk -F'\t' 'BEGIN{maj=1;min=0;pat=0;started=0}{s=$2;if(s~/RELEASE-BASELINE-1\.0\.0/){maj=1;min=0;pat=0;started=1;next}if(!started)next;if(s~/^[A-Za-z]+(\([^)]*\))?!:/||s~/BREAKING CHANGE/){maj++;min=0;pat=0}else if(s~/^feat(\([^)]*\))?:/){min++;pat=0}else{pat++}}END{print maj"."min"."pat}')
+          # before the baseline are ignored; the baseline commit itself is 1.0.0.
+          # A breaking change is a `!` in the subject (type!:); footers are not
+          # scanned (subjects only, so a BREAKING CHANGE footer never matched -
+          # see the guidelines' DECISIONS.md D9):
+          #   type!: -> major | feat: -> minor | else -> patch.
+          v=$(git log --reverse --format='%H%x09%s' | awk -F'\t' 'BEGIN{maj=1;min=0;pat=0;started=0}{s=$2;if(s~/RELEASE-BASELINE-1\.0\.0/){maj=1;min=0;pat=0;started=1;next}if(!started)next;if(s~/^[A-Za-z]+(\([^)]*\))?!:/){maj++;min=0;pat=0}else if(s~/^feat(\([^)]*\))?:/){min++;pat=0}else{pat++}}END{print maj"."min"."pat}')
           tmp=$(mktemp)
           sed -E "s/^version = \"[^\"]*\"/version = \"$v\"/" Cargo.toml > "$tmp" && mv "$tmp" Cargo.toml
           echo "stamped $v"
@@ -105,10 +108,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # Same Conventional-Commit semver as the stamp step (kept in sync),
-          # counted from the RELEASE-BASELINE-1.0.0 commit:
-          #   breaking -> major | feat: -> minor | else -> patch.
-          VERSION=$(git log --reverse --format='%H%x09%s' | awk -F'\t' 'BEGIN{maj=1;min=0;pat=0;started=0}{s=$2;if(s~/RELEASE-BASELINE-1\.0\.0/){maj=1;min=0;pat=0;started=1;next}if(!started)next;if(s~/^[A-Za-z]+(\([^)]*\))?!:/||s~/BREAKING CHANGE/){maj++;min=0;pat=0}else if(s~/^feat(\([^)]*\))?:/){min++;pat=0}else{pat++}}END{print maj"."min"."pat}')
+          # Same Conventional-Commit semver as the stamp step (kept byte-identical),
+          # counted from the RELEASE-BASELINE-1.0.0 commit. Breaking = `!` in the
+          # subject (type!:); footers are not scanned (DECISIONS.md D9):
+          #   type!: -> major | feat: -> minor | else -> patch.
+          VERSION=$(git log --reverse --format='%H%x09%s' | awk -F'\t' 'BEGIN{maj=1;min=0;pat=0;started=0}{s=$2;if(s~/RELEASE-BASELINE-1\.0\.0/){maj=1;min=0;pat=0;started=1;next}if(!started)next;if(s~/^[A-Za-z]+(\([^)]*\))?!:/){maj++;min=0;pat=0}else if(s~/^feat(\([^)]*\))?:/){min++;pat=0}else{pat++}}END{print maj"."min"."pat}')
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
 
           # Repackage the prebuilt binary as Homebrew bottles so `brew install`

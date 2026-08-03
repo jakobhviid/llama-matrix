@@ -25,5 +25,6 @@ pub mod model; // per-model record: id, cmd, type, primary_file, param_hash
 pub mod param_hash; // the footprint key: a hash of only the memory-affecting flags
 pub mod platform; // GpuMemory trait + AMD sysfs / NVIDIA backends
 pub mod policy; // llama-matrix.toml: budget/margin/strategy/roles/groups/paths
+pub mod report; // typed --json report shapes (one source of truth per verb; D16)
 pub mod settings; // the `configure` get/set/unset/list/keys surface (scalars)
 pub mod ui; // stdout/stderr discipline + colour

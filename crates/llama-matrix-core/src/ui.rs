@@ -59,3 +59,11 @@ pub fn err(msg: &str) {
 pub fn ok(msg: &str) {
     eprintln!("{} {msg}", green("✓"));
 }
+
+/// A result headline flagging a problem (stderr): yellow `⚠` + message. Use this
+/// instead of `ok` for a per-item-outcome command's headline whenever any item
+/// failed, so the failure is salient in the glyph and text (not colour alone) even
+/// though the exit status stays 0 (see ../../PRINCIPLES.md and DECISIONS.md D3).
+pub fn alert(msg: &str) {
+    eprintln!("{} {msg}", yellow("⚠"));
+}

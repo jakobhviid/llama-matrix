@@ -62,6 +62,38 @@ Roughly in order of value-to-effort:
     `d_vram`/`d_gtt` are recorded as 0. Expose the split (the AMD sysfs backend
     already reads both pools) for per-pool insight — `build` uses only `d_total`.
 
+## House-style conformance backlog
+
+Alignment work against the house guidelines (rust-cli-guidelines) that is deferred,
+not skipped. These are style and ops items, separate from the product roadmap
+above; each notes why it is not yet done.
+
+- **Purge em-dashes from the docs and comments.** The "No em-dashes" rule
+  (AGENTS.md, CLAUDE.md) is now stated, but text written before it still carries
+  roughly 260 em-dashes across the docs and Rust comments. Do one careful,
+  judgment-based pass (each em-dash becomes a hyphen, comma, colon, parentheses, or
+  a rewrite, never a blanket replace that harms readability). En-dashes in ranges
+  stay.
+- **Supply-chain gate (`deny.toml` + a CI `deny` job).** Add a cargo-deny check for
+  licenses and sources (crates.io only), following dotsync. Note the difference:
+  llama-matrix does network (HTTP to llama-swap), so it does not ban the TLS/crypto
+  stacks dotsync bans. Advisories deliberately excluded, since a new CVE must never
+  block an unrelated release; review them out of band.
+- **PR-triggered CI + build caching.** The release workflow only runs the green
+  gate on push to main (after merge). Add a `pull_request`-triggered clippy+test
+  workflow with `Swatinem/rust-cache`, so the gate runs before merge and CI is
+  faster. The whole fleet shares this gap.
+- **`regressions.rs`.** Adopt the temper/dotsync bug-to-regression-test discipline:
+  a dedicated integration-test file where every confirmed bug gets a reproducing
+  test before its fix.
+- **`[workspace.lints.clippy]` in `Cargo.toml`.** Declare the clippy policy in the
+  manifest (dotsync does), so a bare local `cargo clippy` enforces the same gate CI
+  runs, not only the `-D warnings` flag in release.yml.
+- **Finish moving CLI orchestration into core (guidelines D6).** `resolve_plan` now
+  lives in core; the remaining provisioning glue in `main.rs` (the legacy-store
+  migration decision in `open_store`, and `prune` / `setup` discovery) could follow,
+  so a second frontend never has to reimplement it.
+
 ## Premise risk (track this)
 
 llama-swap is very actively developed — the matrix engine changed across multiple

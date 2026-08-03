@@ -3,22 +3,19 @@
 //! fit, without exceeding VRAM.
 //!
 //! This is the thin CLI layer; all logic lives in `llama-matrix-core`. Each verb
-//! resolves config + policy, calls into core, and renders a human summary or
-//! (`--json`) a machine-readable document.
-//!
-//! Status: scaffolding. The parsing core (config + macro expansion, model
-//! classification, param-hash) and the emit surface (`completions`, `--man`,
-//! `--llm`) are live; `measure`/`build`/`apply`/`configure`/`setup` are being
-//! implemented (see ../../ROADMAP.md).
+//! resolves config + policy, calls one core function, and renders either a human
+//! summary or (`--json`) a machine-readable document built from a typed report
+//! (`llama_matrix_core::report`), so the two views can't drift (ARCHITECTURE.md).
 
-use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::{Context, Result};
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
-use llama_matrix_core::{apply, build, cache, config as ls_config, matrix, policy::Policy, settings, ui};
+use llama_matrix_core::{
+    apply, build, cache, config as ls_config, matrix, policy::Policy, report, settings, ui,
+};
 
 mod completions;
 
@@ -43,7 +40,10 @@ struct Cli {
     json: bool,
 
     /// Print the full LLM-readable guide (every command + the design) and exit.
-    #[arg(long, global = true)]
+    ///
+    /// A whole-program documentation flag like `--help`/`--version`, so it is
+    /// root-only (never `global`): `llama-matrix --llm`, not per-subcommand.
+    #[arg(long)]
     llm: bool,
 
     /// Show extra detail where available.
@@ -134,11 +134,24 @@ enum Cmd {
 #[derive(Subcommand)]
 enum ConfigureAction {
     /// Set a setting's value (writes llama-matrix.toml, comment-preserving).
-    Set { key: String, value: String },
+    Set {
+        /// The setting to change (completes from `configure keys`).
+        #[arg(value_parser = clap::builder::PossibleValuesParser::new(settings::keys()))]
+        key: String,
+        value: String,
+    },
     /// Remove a setting's override (revert to its default).
-    Unset { key: String },
+    Unset {
+        /// The setting to revert (completes from `configure keys`).
+        #[arg(value_parser = clap::builder::PossibleValuesParser::new(settings::keys()))]
+        key: String,
+    },
     /// Print one setting's effective value.
-    Get { key: String },
+    Get {
+        /// The setting to read (completes from `configure keys`).
+        #[arg(value_parser = clap::builder::PossibleValuesParser::new(settings::keys()))]
+        key: String,
+    },
     /// List every setting with its effective value.
     List,
     /// List the settable keys.
@@ -146,16 +159,31 @@ enum ConfigureAction {
 }
 
 fn main() -> ExitCode {
-    // `--llm` and `--man` are documentation flags like `--help`: they work from
-    // anywhere and need no subcommand, so intercept them before clap enforces one.
-    // `--man` is intentionally not a declared flag so it never leaks into the
-    // shell completion list.
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.iter().any(|a| a == "--llm") {
+    // Restore the default SIGPIPE disposition. Rust ignores SIGPIPE at startup, so
+    // `llama-matrix build | head` would otherwise panic ("failed printing to
+    // stdout") when the reader closes the pipe; the default (terminate quietly) is
+    // the expected shell behaviour.
+    // SAFETY: `signal` with a standard handler is async-signal-safe and this runs
+    // once before any threads are spawned.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+
+    // `--llm` and `--man` are whole-program documentation flags like `--help`:
+    // they work from anywhere and need no subcommand, so intercept them before clap
+    // enforces one. Scan only the *leading* options (up to the first subcommand
+    // token), never the whole arg vector, so a future value that happens to equal
+    // `--llm` can't hijack them. `--man` is intentionally not a declared flag so it
+    // never leaks into the shell completion list.
+    let leading: Vec<String> = std::env::args()
+        .skip(1)
+        .take_while(|arg| arg.starts_with('-'))
+        .collect();
+    if leading.iter().any(|arg| arg == "--llm") {
         print!("{}", llm_guide());
         return ExitCode::SUCCESS;
     }
-    if args.iter().any(|a| a == "--man") {
+    if leading.iter().any(|arg| arg == "--man") {
         return match completions::print_man() {
             Ok(()) => ExitCode::SUCCESS,
             Err(_) => ExitCode::FAILURE,
@@ -163,8 +191,15 @@ fn main() -> ExitCode {
     }
 
     let cli = Cli::parse();
+    let json = cli.json;
     if let Err(e) = run(cli) {
-        eprintln!("error: {e:#}");
+        if json {
+            // The error is this run's result document, so it goes to stdout.
+            let doc = report::ErrorReport { error: format!("{e:#}") };
+            println!("{}", serde_json::to_string(&doc).unwrap_or_default());
+        } else {
+            eprintln!("error: {e:#}");
+        }
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS
@@ -228,7 +263,11 @@ fn cmd_prune(yes: bool, json: bool) -> Result<()> {
 
     if removable.is_empty() {
         if json {
-            println!("{}", serde_json::json!({ "removed": [], "status": "nothing-to-prune" }));
+            let doc = report::Prune {
+                removed: Vec::new(),
+                status: Some("nothing-to-prune"),
+            };
+            println!("{}", serde_json::to_string(&doc)?);
         } else {
             ui::ok("nothing to prune — every measured model's weight file is still present");
         }
@@ -237,7 +276,8 @@ fn cmd_prune(yes: bool, json: bool) -> Result<()> {
 
     if !yes {
         if json {
-            println!("{}", serde_json::json!({ "would_remove": removable }));
+            let doc = report::PrunePreview { would_remove: removable.clone() };
+            println!("{}", serde_json::to_string(&doc)?);
         } else {
             ui::warn(&format!(
                 "would remove {} measurement file(s) (weights gone): {}",
@@ -253,7 +293,8 @@ fn cmd_prune(yes: bool, json: bool) -> Result<()> {
         store.remove_model(id)?;
     }
     if json {
-        println!("{}", serde_json::json!({ "removed": removable }));
+        let doc = report::Prune { removed: removable.clone(), status: None };
+        println!("{}", serde_json::to_string(&doc)?);
     } else {
         ui::ok(&format!("pruned {} measurement file(s)", removable.len()));
     }
@@ -271,52 +312,6 @@ fn open_store(config_dir: &Path, json: bool) -> Result<cache::Store> {
     Ok(store)
 }
 
-/// Load the config + measurement store and compute the matrix plan. Shared by
-/// `build` and `drift`. `budget_override` is the `--budget` flag, if any.
-fn resolve_plan(
-    config_path: &str,
-    policy: &Policy,
-    budget_override: Option<f64>,
-    store: &cache::Store,
-) -> Result<build::MatrixPlan> {
-    let parsed = ls_config::parse_file(config_path)?;
-    let box_meta = store.read_box()?;
-    // Budget resolution (never a silent guess): override > policy > detected total.
-    let budget = budget_override
-        .or(policy.budget)
-        .or(box_meta.detected_total)
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "no budget set — pass --budget <GB>, set `budget` in llama-matrix.toml, or run \
-                 `measure` to detect the pool"
-            )
-        })?;
-
-    let mut footprints = Vec::new();
-    let mut unmeasured = Vec::new();
-    for record in &parsed.models {
-        match store.select(&record.id, &record.param_hash)? {
-            Some(measurement) => footprints.push(build::ModelFootprint {
-                id: record.id.clone(),
-                model_type: record.model_type,
-                primary_file: record.primary_file.clone(),
-                d_total: measurement.d_total,
-                load_s: measurement.load_s,
-            }),
-            None => unmeasured.push(record.id.clone()),
-        }
-    }
-
-    let mut plan = build::build(&build::BuildInput {
-        models: &footprints,
-        policy,
-        baseline: box_meta.baseline,
-        budget,
-    })?;
-    plan.excluded.extend(unmeasured);
-    Ok(plan)
-}
-
 /// `drift` — compare the live config's matrix block to a fresh build (read-only).
 fn cmd_drift(json: bool) -> Result<()> {
     let policy = Policy::load(PathBuf::from("llama-matrix.toml"))?;
@@ -326,14 +321,15 @@ fn cmd_drift(json: bool) -> Result<()> {
 
     if store.list_ids().is_empty() {
         if json {
-            println!("{}", serde_json::json!({ "status": "no-measurements" }));
+            let doc = report::Status { status: "no-measurements" };
+            println!("{}", serde_json::to_string(&doc)?);
         } else {
             ui::warn("no measurements yet — run `llama-matrix measure`");
         }
         return Ok(());
     }
 
-    let plan = resolve_plan(&config_path, &policy, None, &store)?;
+    let plan = build::resolve_plan(&config_path, &policy, None, &store)?;
     let block = matrix::render(&plan);
     let config_text = std::fs::read_to_string(&config_path)
         .with_context(|| format!("reading {config_path}"))?;
@@ -344,17 +340,15 @@ fn cmd_drift(json: bool) -> Result<()> {
         .unwrap_or(false);
 
     if json {
-        println!(
-            "{}",
-            serde_json::json!({
-                "in_sync": in_sync,
-                "has_block": existing.is_some(),
-                "would_generate_sets": plan.sets.len(),
-                "packs": plan.n_packs,
-                "heavies": plan.n_heavies,
-                "excluded": plan.excluded,
-            })
-        );
+        let doc = report::Drift {
+            in_sync,
+            has_block: existing.is_some(),
+            would_generate_sets: plan.sets.len(),
+            packs: plan.n_packs,
+            heavies: plan.n_heavies,
+            excluded: plan.excluded.clone(),
+        };
+        println!("{}", serde_json::to_string(&doc)?);
         return Ok(());
     }
 
@@ -414,10 +408,11 @@ fn cmd_setup(config: Option<String>, endpoint: Option<String>, json: bool) -> Re
 
     if file.exists() {
         if json {
-            println!(
-                "{}",
-                serde_json::json!({ "status": "exists", "path": file.display().to_string() })
-            );
+            let doc = report::SetupExists {
+                status: "exists",
+                path: file.display().to_string(),
+            };
+            println!("{}", serde_json::to_string(&doc)?);
         } else {
             ui::warn("llama-matrix.toml already exists — not overwriting; setup would write:");
             print!("{content}");
@@ -427,16 +422,14 @@ fn cmd_setup(config: Option<String>, endpoint: Option<String>, json: bool) -> Re
 
     std::fs::write(&file, &content).with_context(|| format!("writing {}", file.display()))?;
     if json {
-        println!(
-            "{}",
-            serde_json::json!({
-                "written": file.display().to_string(),
-                "config": config_path,
-                "endpoint": endpoint,
-                "budget": budget,
-                "gpu": gpu_label,
-            })
-        );
+        let doc = report::SetupWritten {
+            written: file.display().to_string(),
+            config: config_path.clone(),
+            endpoint: endpoint.clone(),
+            budget,
+            gpu: gpu_label.clone(),
+        };
+        println!("{}", serde_json::to_string(&doc)?);
     } else {
         ui::ok(&format!("wrote {}", file.display()));
         if let Some(label) = &gpu_label {
@@ -491,21 +484,10 @@ fn cmd_measure(
     let summary = sweep(&parsed.models, &store, &policy, &options)?;
 
     if json {
-        println!(
-            "{}",
-            serde_json::json!({
-                "baseline": summary.baseline,
-                "detected_total": summary.detected_total,
-                "measured": summary.measured,
-                "cached": summary.cached,
-                "failed": summary.failed.iter()
-                    .map(|(id, reason)| serde_json::json!({ "id": id, "reason": reason }))
-                    .collect::<Vec<_>>(),
-                "skipped_missing": summary.skipped_missing,
-            })
-        );
+        // The summary *is* the report (collect/render split, D16): serialize it.
+        println!("{}", serde_json::to_string(&summary)?);
     } else {
-        ui::ok(&format!(
+        let headline = format!(
             "baseline {:.2} GB · pool {:.1} GB · measured {} · cached {} · failed {} · missing {}",
             summary.baseline,
             summary.detected_total,
@@ -513,9 +495,17 @@ fn cmd_measure(
             summary.cached.len(),
             summary.failed.len(),
             summary.skipped_missing.len()
-        ));
-        for (id, reason) in &summary.failed {
-            ui::warn(&format!("{id}: {reason}"));
+        );
+        // Failure-aware headline (D3): a green ✓ must not sit atop a run that
+        // failed. When any model failed or was skipped, flag the headline with ⚠
+        // (glyph + the counts in the text), since the exit status stays 0.
+        if summary.failed.is_empty() && summary.skipped_missing.is_empty() {
+            ui::ok(&headline);
+        } else {
+            ui::alert(&headline);
+        }
+        for failure in &summary.failed {
+            ui::warn(&format!("{}: {}", failure.id, failure.reason));
         }
         for id in &summary.skipped_missing {
             ui::warn(&format!("{id}: weight file missing — skipped"));
@@ -531,7 +521,8 @@ fn cmd_configure(action: ConfigureAction, json: bool) -> Result<()> {
         ConfigureAction::Set { key, value } => {
             let display = settings::set(&file, &key, &value)?;
             if json {
-                println!("{}", serde_json::json!({ "key": key, "value": display }));
+                let doc = report::ConfigValue { key, value: display };
+                println!("{}", serde_json::to_string(&doc)?);
             } else {
                 ui::ok(&format!("{key} = {display}"));
             }
@@ -539,7 +530,8 @@ fn cmd_configure(action: ConfigureAction, json: bool) -> Result<()> {
         ConfigureAction::Unset { key } => {
             settings::unset(&file, &key)?;
             if json {
-                println!("{}", serde_json::json!({ "unset": key }));
+                let doc = report::ConfigUnset { unset: key };
+                println!("{}", serde_json::to_string(&doc)?);
             } else {
                 ui::ok(&format!("unset {key} (reverted to default)"));
             }
@@ -547,7 +539,8 @@ fn cmd_configure(action: ConfigureAction, json: bool) -> Result<()> {
         ConfigureAction::Get { key } => {
             let value = settings::get(&file, &key)?;
             if json {
-                println!("{}", serde_json::json!({ "key": key, "value": value }));
+                let doc = report::ConfigValue { key, value };
+                println!("{}", serde_json::to_string(&doc)?);
             } else {
                 println!("{value}");
             }
@@ -555,11 +548,12 @@ fn cmd_configure(action: ConfigureAction, json: bool) -> Result<()> {
         ConfigureAction::List => {
             let effective = settings::list(&file);
             if json {
-                let map: serde_json::Map<String, serde_json::Value> = effective
+                // A key -> effective-value map (BTreeMap: deterministic, sorted).
+                let map: std::collections::BTreeMap<&str, String> = effective
                     .iter()
-                    .map(|(key, value)| ((*key).to_string(), serde_json::Value::String(value.clone())))
+                    .map(|(key, value)| (*key, value.clone()))
                     .collect();
-                println!("{}", serde_json::Value::Object(map));
+                println!("{}", serde_json::to_string(&map)?);
             } else {
                 for (key, value) in effective {
                     println!("{key} = {value}");
@@ -568,17 +562,15 @@ fn cmd_configure(action: ConfigureAction, json: bool) -> Result<()> {
         }
         ConfigureAction::Keys => {
             if json {
-                let entries: Vec<serde_json::Value> = settings::SETTINGS
+                let entries: Vec<report::SettingInfo> = settings::SETTINGS
                     .iter()
-                    .map(|setting| {
-                        serde_json::json!({
-                            "key": setting.key,
-                            "desc": setting.desc,
-                            "default": setting.default,
-                        })
+                    .map(|setting| report::SettingInfo {
+                        key: setting.key,
+                        desc: setting.desc,
+                        default: setting.default,
                     })
                     .collect();
-                println!("{}", serde_json::Value::Array(entries));
+                println!("{}", serde_json::to_string(&entries)?);
             } else {
                 for setting in settings::SETTINGS {
                     println!("{:<12} {}  (default: {})", setting.key, setting.desc, setting.default);
@@ -619,7 +611,7 @@ fn cmd_build(
         );
     }
 
-    let plan = resolve_plan(&config_path, &policy, budget, &store)?;
+    let plan = build::resolve_plan(&config_path, &policy, budget, &store)?;
     let block = matrix::render(&plan);
 
     if !json {
@@ -631,18 +623,16 @@ fn cmd_build(
     if apply {
         let result = apply::apply(Path::new(&config_path), &block, &policy.endpoint, !no_verify)?;
         if json {
-            println!(
-                "{}",
-                serde_json::json!({
-                    "applied": true,
-                    "backup": result.backup.display().to_string(),
-                    "verified": result.verified,
-                    "note": result.note,
-                    "packs": plan.n_packs,
-                    "heavies": plan.n_heavies,
-                    "sets": plan.sets.len(),
-                })
-            );
+            let doc = report::BuildApplied {
+                applied: true,
+                backup: result.backup.display().to_string(),
+                verified: result.verified,
+                note: result.note.clone(),
+                packs: plan.n_packs,
+                heavies: plan.n_heavies,
+                sets: plan.sets.len(),
+            };
+            println!("{}", serde_json::to_string(&doc)?);
         } else {
             ui::ok(&format!("applied to {config_path} — {}", result.note));
             ui::info(&format!("backup: {}", result.backup.display()));
@@ -656,7 +646,8 @@ fn cmd_build(
     if let Some(out_path) = out {
         std::fs::write(&out_path, &block)?;
         if json {
-            println!("{}", serde_json::json!({ "wrote": out_path, "sets": plan.sets.len() }));
+            let doc = report::BuildWrote { wrote: out_path.clone(), sets: plan.sets.len() };
+            println!("{}", serde_json::to_string(&doc)?);
         } else {
             ui::ok(&format!("wrote {out_path} ({} sets)", plan.sets.len()));
         }
@@ -664,37 +655,42 @@ fn cmd_build(
     }
 
     if json {
-        println!(
-            "{}",
-            serde_json::json!({
-                "budget": plan.budget,
-                "ceiling": plan.ceiling,
-                "packs": plan.n_packs,
-                "heavies": plan.n_heavies,
-                "sets": plan.sets.len(),
-                "excluded": plan.excluded,
-                "warnings": plan.warnings,
-            })
-        );
+        let doc = report::BuildPreview::of(&plan);
+        println!("{}", serde_json::to_string(&doc)?);
     } else {
         print!("{block}");
     }
     Ok(())
 }
 
-/// The `--llm` guide: the design docs, embedded at compile time so they never
-/// drift from the shipped binary (a doc change ships in the same commit).
+/// The `--llm` guide: the auto-generated command reference (from the one clap
+/// definition, so the command surface can never drift from the real binary)
+/// followed by the design docs, embedded at compile time so they never drift from
+/// the shipped binary (a doc change ships in the same commit). See DECISIONS.md D1.
 fn llm_guide() -> String {
     let mut out = String::new();
-    let interactive = io::stdout().is_terminal();
-    if interactive {
-        out.push_str("# llama-matrix — LLM guide\n\n");
-        out.push_str(
-            "The full machine-readable reference: what the tool is, how to operate it, \
-             and the schemas of record. Sections below are the repository docs, embedded \
-             at build time.\n\n",
-        );
+    out.push_str("# llama-matrix LLM guide\n\n");
+    out.push_str(
+        "The full machine-readable reference: the command surface (auto-generated from \
+         the CLI, so it always matches the real binary) followed by the repository \
+         design docs, embedded at build time.\n\n",
+    );
+
+    // The command reference, rendered from the single clap definition: the root
+    // long help plus each visible subcommand's, so `--llm` doubles as a `man` page
+    // and the set of commands/flags can never drift from the actual CLI.
+    let mut command = Cli::command();
+    command.build();
+    out.push_str("===== COMMANDS =====\n\n");
+    out.push_str(&command.render_long_help().to_string());
+    for sub in command.get_subcommands() {
+        if sub.is_hide_set() {
+            continue;
+        }
+        out.push_str(&format!("\n\n----- {} -----\n\n", sub.get_name()));
+        out.push_str(&sub.clone().render_long_help().to_string());
     }
+
     let sections: &[(&str, &str)] = &[
         ("README", include_str!("../../../README.md")),
         ("WORKFLOWS", include_str!("../../../WORKFLOWS.md")),
@@ -708,4 +704,45 @@ fn llm_guide() -> String {
         out.push_str(body);
     }
     out
+}
+
+#[cfg(test)]
+mod doc_tests {
+    //! Docs-can't-drift guards. The design docs are embedded into `--llm` and are
+    //! load-bearing, so a rename or new capability that skips them is a defect. If
+    //! a settable key isn't in SPEC.md, or a command isn't in the README table,
+    //! the build fails here rather than shipping a stale guide (the amdl/dotsync
+    //! `workflows_doc` pattern).
+    use super::Cli;
+    use clap::CommandFactory;
+    use llama_matrix_core::settings;
+
+    const SPEC: &str = include_str!("../../../SPEC.md");
+    const README: &str = include_str!("../../../README.md");
+
+    #[test]
+    fn every_setting_is_documented_in_spec() {
+        for setting in settings::SETTINGS {
+            assert!(
+                SPEC.contains(setting.key),
+                "SPEC.md never mentions the `{}` setting - document it or drop the key",
+                setting.key
+            );
+        }
+    }
+
+    #[test]
+    fn every_command_is_documented_in_readme() {
+        for sub in Cli::command().get_subcommands() {
+            let name = sub.get_name();
+            // `completions` is plumbing (Homebrew calls it), not a user-facing verb.
+            if name == "completions" {
+                continue;
+            }
+            assert!(
+                README.contains(name),
+                "README.md never mentions the `{name}` command - add it to the command table"
+            );
+        }
+    }
 }

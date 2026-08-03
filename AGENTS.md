@@ -22,6 +22,17 @@ in this repository.
 
   Once it is off, no attribution is emitted at all and this rule holds effortlessly.
 
+## No em-dashes
+
+Never use an em-dash (`—`) in agent-authored text: commit messages, PR
+descriptions, code comments, or prose in the docs. Use a plain hyphen, a comma, a
+colon, parentheses, or just rewrite the sentence. A stray em-dash is one of the
+strongest tells of machine-written text, and nothing in this repo should read as
+AI-generated (the same motivation as the no-attribution rule above); agents reach
+for em-dashes by default, so the rule has to be explicit. The docs and comments
+written before this rule still carry em-dashes; clearing them is a tracked
+ROADMAP.md item, not a reason to leave the rule unstated.
+
 ## Releases & versioning — auto-incremented from commit type
 
 CI cuts a release on every push to `main`, and the version is **derived
@@ -31,8 +42,9 @@ commit **subject prefix** decides the bump:
 
 - `feat: …` — a new feature → **minor** bump (1.2.0 → 1.3.0)
 - `fix: …` — a bug fix / hotfix → **patch** bump (1.2.3 → 1.2.4)
-- `feat!: …` (or any `type!:`, e.g. `fix!:`), or a `BREAKING CHANGE` — a breaking
-  change → **major** bump (1.4.2 → 2.0.0)
+- `feat!: …` (or any `type!:`, e.g. `fix!:`) — a breaking change → **major** bump
+  (1.4.2 → 2.0.0). Declare it with a `!` in the subject; a `BREAKING CHANGE`
+  footer is **not** scanned (the version awk reads commit subjects only).
 - anything else (`docs:`, `chore:`, `refactor:`, …) or an un-prefixed subject →
   **patch** bump
 

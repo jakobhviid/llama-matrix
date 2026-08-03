@@ -572,6 +572,7 @@ dependencies = [
  "clap",
  "clap_complete",
  "clap_mangen",
+ "libc",
  "llama-matrix-core",
  "predicates",
  "serde_json",

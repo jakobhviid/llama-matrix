@@ -13,6 +13,8 @@ use std::collections::BTreeSet;
 
 use anyhow::{bail, Result};
 
+use crate::cache::Store;
+use crate::config;
 use crate::model::ModelType;
 use crate::policy::{OnOverflow, Policy, Strategy};
 
@@ -107,6 +109,53 @@ pub struct BuildInput<'a> {
     pub policy: &'a Policy,
     pub baseline: f64,
     pub budget: f64,
+}
+
+/// Load the llama-swap config + measurement store and compute the plan. Shared by
+/// the `build` and `drift` verbs (so a second frontend never reimplements it).
+/// `budget_override` is the `--budget` flag, if any; budget resolution never
+/// guesses: override, else the configured budget, else the detected pool.
+pub fn resolve_plan(
+    config_path: &str,
+    policy: &Policy,
+    budget_override: Option<f64>,
+    store: &Store,
+) -> Result<MatrixPlan> {
+    let parsed = config::parse_file(config_path)?;
+    let box_meta = store.read_box()?;
+    let budget = budget_override
+        .or(policy.budget)
+        .or(box_meta.detected_total)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no budget set - pass --budget <GB>, set `budget` in llama-matrix.toml, or run \
+                 `measure` to detect the pool"
+            )
+        })?;
+
+    let mut footprints = Vec::new();
+    let mut unmeasured = Vec::new();
+    for record in &parsed.models {
+        match store.select(&record.id, &record.param_hash)? {
+            Some(measurement) => footprints.push(ModelFootprint {
+                id: record.id.clone(),
+                model_type: record.model_type,
+                primary_file: record.primary_file.clone(),
+                d_total: measurement.d_total,
+                load_s: measurement.load_s,
+            }),
+            None => unmeasured.push(record.id.clone()),
+        }
+    }
+
+    let mut plan = build(&BuildInput {
+        models: &footprints,
+        policy,
+        baseline: box_meta.baseline,
+        budget,
+    })?;
+    plan.excluded.extend(unmeasured);
+    Ok(plan)
 }
 
 /// Sanitize an id into a DSL-safe set-name fragment.

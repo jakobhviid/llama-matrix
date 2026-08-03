@@ -9,6 +9,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
+use serde::Serialize;
 
 use crate::cache::{BoxMeta, Measurement, ModelStore, Store};
 use crate::model::{ModelRecord, ModelType};
@@ -27,12 +28,22 @@ pub struct MeasureOptions {
     pub load_timeout: Duration,
 }
 
-/// What a sweep did.
-#[derive(Debug, Default)]
+/// One model that could not be measured, and why (surfaced in the `--json` report
+/// and the human failure list).
+#[derive(Debug, Clone, Serialize)]
+pub struct Failure {
+    pub id: String,
+    pub reason: String,
+}
+
+/// What a sweep did. This is the `measure --json` document (see the collect/render
+/// split, ../../CLI-PATTERNS.md, DECISIONS.md D16): the CLI serializes it directly
+/// and renders the human view from the same fields, so the two can't drift.
+#[derive(Debug, Default, Serialize)]
 pub struct MeasureSummary {
     pub measured: Vec<String>,
     pub cached: Vec<String>,
-    pub failed: Vec<(String, String)>,
+    pub failed: Vec<Failure>,
     pub skipped_missing: Vec<String>,
     pub baseline: f64,
     pub detected_total: f64,
@@ -249,7 +260,10 @@ pub fn sweep(
                     measured_at: today.clone(),
                     ..Default::default()
                 };
-                summary.failed.push((record.id.clone(), "load timed out or exited".to_string()));
+                summary.failed.push(Failure {
+                    id: record.id.clone(),
+                    reason: "load timed out or exited".to_string(),
+                });
                 failed
             }
             Some(load) => {
