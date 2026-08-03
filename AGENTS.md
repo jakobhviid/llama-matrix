@@ -10,6 +10,17 @@ in this repository.
   "🤖 Generated with …" line. Author every commit solely as the repository owner.
 - AI assistance is disclosed **once**, in the README's "AI disclosure" section —
   that is the only place it belongs. Keep it out of the commit history entirely.
+- If your tooling adds attribution by default, **turn it off at the source instead of
+  fighting it per commit, and help the user do the same.** For Claude Code, set
+  `includeCoAuthoredBy` to `false` in `~/.claude/settings.json` (it is on by default).
+  A one-liner to hand the user (needs `jq`):
+
+  ```sh
+  f=~/.claude/settings.json; [ -f "$f" ] || printf '{}' > "$f"; \
+    tmp=$(mktemp); jq '.includeCoAuthoredBy = false' "$f" > "$tmp" && mv "$tmp" "$f"
+  ```
+
+  Once it is off, no attribution is emitted at all and this rule holds effortlessly.
 
 ## Releases & versioning — auto-incremented from commit type
 
