@@ -14,6 +14,30 @@ use serde::{Deserialize, Serialize};
 /// The reserved box-level file name inside `measurements/`.
 pub const BOX_FILE: &str = "_box.json";
 
+/// The running llama-matrix version, stamped into the store (`BoxMeta::written_by`)
+/// on every write so a later build knows which on-disk schema wrote the store and
+/// can select a migration or flag a newer-than-me store (house guidelines D5).
+pub const WRITER_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Numeric `(major, minor, patch)` of a version string, ignoring any `-pre`/`+build`
+/// suffix. Unparseable parts become 0, so a version we can't read never spuriously
+/// compares as newer. (Ported from temper's `manifest::version_triple`.)
+fn version_triple(version: &str) -> (u64, u64, u64) {
+    let core = version.split(['-', '+']).next().unwrap_or(version);
+    let mut parts = core.split('.').map(|part| part.parse::<u64>().unwrap_or(0));
+    (
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+    )
+}
+
+/// Is `candidate` a strictly newer version than `running`? Numeric compare, not
+/// lexical, so `1.10.0` > `1.9.0`.
+pub fn version_is_newer(candidate: &str, running: &str) -> bool {
+    version_triple(candidate) > version_triple(running)
+}
+
 /// Box-level values that have no per-model home.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BoxMeta {
@@ -28,6 +52,11 @@ pub struct BoxMeta {
     pub date: Option<String>,
     #[serde(default)]
     pub additivity_check: Option<AdditivityCheck>,
+    /// The llama-matrix version that last wrote this store. Stamped by `write_box`
+    /// (never hand-set), so a later build knows the on-disk schema and can flag a
+    /// store written by a newer build than itself (house guidelines D5).
+    #[serde(default)]
+    pub written_by: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -134,7 +163,15 @@ impl Store {
 
     pub fn write_box(&self, meta: &BoxMeta) -> Result<()> {
         std::fs::create_dir_all(&self.dir)?;
-        let json = serde_json::to_string_pretty(meta)?;
+        let mut meta = meta.clone();
+        // Stamp the writing tool's version, monotonically: never stamp *down* a
+        // store a newer llama-matrix wrote (it may use a schema this build
+        // predates). Mirrors temper's `stamp_version`. See the guidelines' D5.
+        meta.written_by = Some(match self.read_box().ok().and_then(|prev| prev.written_by) {
+            Some(prev) if version_is_newer(&prev, WRITER_VERSION) => prev,
+            _ => WRITER_VERSION.to_string(),
+        });
+        let json = serde_json::to_string_pretty(&meta)?;
         std::fs::write(self.box_path(), json + "\n")?;
         Ok(())
     }
@@ -185,6 +222,7 @@ impl Store {
             detected_total: legacy.budget,
             date: legacy.date,
             additivity_check: legacy.additivity_check,
+            ..Default::default()
         })?;
         for (id, model_store) in &legacy.models {
             self.write_model(id, model_store)?;
@@ -248,9 +286,12 @@ mod tests {
                 detected_total: Some(111.5),
                 date: Some("2026-01-01".into()),
                 additivity_check: None,
+                ..Default::default()
             })
             .unwrap();
         assert_eq!(store.read_box().unwrap().detected_total, Some(111.5));
+        // write_box stamps the writing tool's version (D5); read it back.
+        assert_eq!(store.read_box().unwrap().written_by.as_deref(), Some(WRITER_VERSION));
 
         let mut measurements = IndexMap::new();
         measurements.insert(
@@ -278,6 +319,36 @@ mod tests {
         // sole-ok fallback on a hash miss
         assert_eq!(store.select("coder-70b", "other").unwrap().unwrap().d_total, 49.0);
         assert_eq!(store.list_ids(), vec!["coder-70b".to_string()]);
+    }
+
+    #[test]
+    fn version_stamp_is_monotonic_and_numeric() {
+        assert!(version_is_newer("1.10.0", "1.9.0")); // numeric compare, not lexical
+        assert!(!version_is_newer("1.0.0", "1.0.0"));
+        assert!(!version_is_newer("bogus", "1.0.0")); // unparseable is never "newer"
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().join("measurements"));
+
+        // A fresh write stamps the running version.
+        store.write_box(&BoxMeta::default()).unwrap();
+        assert_eq!(store.read_box().unwrap().written_by.as_deref(), Some(WRITER_VERSION));
+
+        // Seed a stamp from a hypothetical newer build, then a normal write must not
+        // stamp it back down (monotonic), while still updating the other fields.
+        std::fs::write(
+            store.dir().join(BOX_FILE),
+            serde_json::to_string(&BoxMeta {
+                written_by: Some("999.0.0".into()),
+                ..Default::default()
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        store.write_box(&BoxMeta { baseline: 1.5, ..Default::default() }).unwrap();
+        let after = store.read_box().unwrap();
+        assert_eq!(after.written_by.as_deref(), Some("999.0.0"));
+        assert_eq!(after.baseline, 1.5);
     }
 
     #[test]

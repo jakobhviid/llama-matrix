@@ -58,15 +58,39 @@ impl LockGuard {
     fn acquire(dir: &Path) -> Result<Self> {
         std::fs::create_dir_all(dir)?;
         let path = dir.join(".measure.lock");
-        if path.exists() {
-            bail!(
-                "a sweep lock exists at {} — another measure is running (or crashed; remove it)",
-                path.display()
-            );
+        // A lock file records the owning pid. If that process is still alive,
+        // another sweep is genuinely running - refuse. If it is gone, the lock is
+        // stale (a crash or a Ctrl-C: Drop does not run on SIGINT), so reclaim it
+        // rather than forcing the user to `rm` it by hand.
+        if let Ok(contents) = std::fs::read_to_string(&path) {
+            if let Ok(pid) = contents.trim().parse::<i32>() {
+                if pid_is_alive(pid) {
+                    bail!(
+                        "a sweep is already running (pid {pid}); wait for it to finish, or \
+                         remove {} if it is stale",
+                        path.display()
+                    );
+                }
+            }
+            // an unreadable pid, or one that is gone, means a stale lock: reclaim.
         }
         std::fs::write(&path, std::process::id().to_string())?;
         Ok(LockGuard { path })
     }
+}
+
+/// Is a process with this pid still alive? `kill(pid, 0)` delivers no signal but
+/// runs the kernel's existence + permission check: success or `EPERM` (alive but
+/// not ours) means present; `ESRCH` means gone. Used to tell a running sweep from
+/// a stale lock a crashed or interrupted one left behind.
+fn pid_is_alive(pid: i32) -> bool {
+    if pid <= 0 {
+        return false;
+    }
+    // SAFETY: `kill` with signal 0 only probes for the process; it delivers no
+    // signal and mutates no state.
+    let rc = unsafe { libc::kill(pid, 0) };
+    rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 impl Drop for LockGuard {
@@ -302,6 +326,7 @@ pub fn sweep(
         detected_total: Some(round2(summary.detected_total)),
         date: Some(today),
         additivity_check: None,
+        ..Default::default()
     })?;
 
     Ok(summary)
@@ -359,6 +384,22 @@ fn tiny_wav() -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn live_lock_is_refused_and_a_stale_one_is_reclaimed() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = dir.path().join(".measure.lock");
+
+        // Our own pid is alive, so an existing lock owned by it is refused.
+        std::fs::write(&lock, std::process::id().to_string()).unwrap();
+        assert!(LockGuard::acquire(dir.path()).is_err());
+
+        // A pid that is not running leaves a stale lock, which is reclaimed.
+        std::fs::write(&lock, "2147483646").unwrap();
+        let guard = LockGuard::acquire(dir.path()).expect("a stale lock must be reclaimed");
+        drop(guard); // Drop removes the lock on a clean exit
+        assert!(!lock.exists(), "Drop should remove the lock file");
+    }
 
     #[test]
     fn wav_has_a_valid_riff_header() {
