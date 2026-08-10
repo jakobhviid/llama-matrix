@@ -29,6 +29,16 @@ unmeasurable model (missing weights, failed load) is **excluded** from the matri
 with a visible reason, never assigned an invented number. Guessing low risks
 principle #1.
 
+**A number sampled before the allocation finished is a guess wearing a measurement's
+clothes.** "Loaded" is not a self-evident state: llama-swap reports a model `ready`
+when its upstream answers HTTP, which for a lazily-allocating backend happens before
+the weights are resident, and a mid-load plateau is indistinguishable from a settled
+reading by inspection. So the tool obtains **positive evidence** that allocation
+finished (it waits for the load-trigger to complete, then for occupancy to go quiet)
+and **records whether it got that evidence** with the measurement, rather than
+assuming it. What cannot be confirmed is labelled unconfirmed and surfaced everywhere
+it is used - never quietly promoted to a footprint (SPEC §7.2).
+
 ## 3. Flexibility first. Declare everything that fits.
 
 The default strategy (`flat`) treats every model as an independent unit and

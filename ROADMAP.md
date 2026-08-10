@@ -49,7 +49,10 @@ Roughly in order of value-to-effort:
    flat value.
 9. **Generation-peak budgeting.** Image servers transiently allocate more during a
    diffusion step than at idle-load; budget the transient peak when co-running image
-   generation near the ceiling.
+   generation near the ceiling. `measure` samples occupancy throughout the load-trigger
+   and records the highest delta as `peak_total`, so this item is a *consumer* for that
+   field (fit against `max(d_total, peak_total)` under a policy knob), not a new
+   measurement.
 10. **More platform backends.** `rocm-smi` and other AMD paths where sysfs isn't
     available. (Apple Silicon via Metal unified memory has shipped: `total` from
     `hw.memsize`, `used` from the `ioreg` IOAccelerator counter.)
@@ -66,7 +69,15 @@ Roughly in order of value-to-effort:
     a consumer for it (`build` still uses only `d_total`, so the split is recorded
     for insight and to feed item 11's per-device budgets).
 
-14. **Recover a renamed model's footprint.** A measurement file is opened by model
+14. **Widen the serving cross-check beyond `-c`.** The `/props` comparison (SPEC §7.1)
+    gives up whenever the command says `-c 0` (native context, resolvable only by the
+    loaded server), so an ordinary llama-server model can sit in `unverified_serving`
+    for a reason unrelated to its backend. Two cheap improvements: compare `total_slots`
+    whenever `-np` is declared even if `-c` is not comparable (today one unavailable
+    field skips the whole check), and compare the **model path** if the pinned
+    llama.cpp's `/props` exposes it, which would verify more than context ever can.
+
+15. **Recover a renamed model's footprint.** A measurement file is opened by model
     id, so renaming an id in the config orphans its file and re-measures under the
     new name. Scan the store for a file holding a matching param-hash before
     measuring, and adopt it (a rename is not a new footprint).

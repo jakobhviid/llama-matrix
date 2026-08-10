@@ -63,9 +63,20 @@ llama-matrix build --apply --no-verify   # …or a pure backup-and-splice (no ne
 
 - `measure` is **incremental** — a model whose footprint-affecting flags are
   unchanged is a cache hit and is skipped. A first/full sweep loads every model
-  (minutes); subsequent runs usually load nothing but the additivity combo.
+  (minutes); subsequent runs usually load nothing but the additivity combo. One
+  exception: an entry whose allocation was never **confirmed** is re-measured rather
+  than reused. A store holding no confirmations therefore sweeps in full (budget the
+  time for it); one holding them re-loads only what is suspect.
+- Read the sweep's warnings before building. Two are new and mean different things:
+  *recorded WITHOUT confirming the allocation finished* is actionable (the number may
+  be short - re-measure, and check the model's trigger works), while *recorded without
+  confirming llama-swap loaded the measured command* is permanent for backends with no
+  `/props` and is informational.
 - `build` selects each model's *current-config* footprint, collapses variants,
-  runs the knapsack, and emits the block. Always preview before `--apply`.
+  runs the knapsack, and emits the block. Always preview before `--apply`. If the
+  header carries an *unconfirmed footprint* warning, the sets it names are the ones
+  that may not fit; re-measure, or set `on_unconfirmed = "exclude"` to leave those
+  models out until you have.
 - `--apply` backs up `config.yaml`, splices on the generated marker, waits for the
   hot-reload, verifies, and rolls back on any anomaly.
 

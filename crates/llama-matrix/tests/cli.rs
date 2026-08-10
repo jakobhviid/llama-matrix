@@ -37,10 +37,12 @@ models:
     // Key each entry under the hash of its own command, exactly as `measure` does:
     // `build` selects by the *current* config's param-hash, and a hash miss is a
     // miss, so a placeholder key here would leave both models unmeasured.
+    // `allocation_confirmed` is what `measure` writes when the load-trigger finished;
+    // without it these would be unconfirmed footprints and `build` would warn.
     fs::write(
         measurements.join("chat.json"),
         format!(
-            r#"{{"type":"llm","file":"/models/chat.gguf","measurements":{{"{}":{{"status":"ok","d_total":30.0,"load_s":20.0}}}}}}"#,
+            r#"{{"type":"llm","file":"/models/chat.gguf","measurements":{{"{}":{{"status":"ok","d_total":30.0,"load_s":20.0,"allocation_confirmed":true}}}}}}"#,
             param_hash(CHAT_CMD)
         ),
     )
@@ -48,7 +50,7 @@ models:
     fs::write(
         measurements.join("embed.json"),
         format!(
-            r#"{{"type":"embed","file":"/models/e.gguf","measurements":{{"{}":{{"status":"ok","d_total":7.0,"load_s":6.0}}}}}}"#,
+            r#"{{"type":"embed","file":"/models/e.gguf","measurements":{{"{}":{{"status":"ok","d_total":7.0,"load_s":6.0,"allocation_confirmed":true}}}}}}"#,
             param_hash(EMBED_CMD)
         ),
     )
@@ -86,6 +88,94 @@ fn build_json_reports_counts() {
     let text = String::from_utf8(output).unwrap();
     assert!(text.contains("\"packs\""), "json missing packs: {text}");
     assert!(text.contains("\"ceiling\""), "json missing ceiling: {text}");
+}
+
+/// A footprint recorded before the model finished allocating may be a fraction of
+/// the truth, and under the default `on_unconfirmed = "warn"` it is still packed - so
+/// the emitted block itself has to say so, and name the sets at risk. `exclude` and
+/// `error` are the other two ends of the same knob.
+#[test]
+fn an_unconfirmed_footprint_is_flagged_in_the_block_and_can_be_excluded_or_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    write_working_dir(dir.path());
+    // Rewrite `chat` as an entry with no allocation confirmation (what every
+    // pre-fix sweep wrote).
+    fs::write(
+        dir.path().join("measurements").join("chat.json"),
+        format!(
+            r#"{{"type":"llm","file":"/models/chat.gguf","measurements":{{"{}":{{"status":"ok","d_total":30.0,"load_s":20.0}}}}}}"#,
+            param_hash(CHAT_CMD)
+        ),
+    )
+    .unwrap();
+
+    // warn (default): emitted, with the warning and the dependent set names in the
+    // block's comment header.
+    let output = Command::cargo_bin("llama-matrix")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("build")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let block = String::from_utf8(output).unwrap();
+    assert!(block.contains("# WARNING:"), "no warning in the block: {block}");
+    assert!(block.contains("without confirming"), "{block}");
+    assert!(block.contains("chat"), "{block}");
+    // Every warning line must stay a single YAML comment line.
+    for line in block.lines().filter(|line| line.contains("WARNING")) {
+        assert!(line.trim_start().starts_with('#'), "warning broke out of a comment: {line}");
+    }
+
+    // --json exposes it as data, not only as prose.
+    let json = Command::cargo_bin("llama-matrix")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["build", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json = String::from_utf8(json).unwrap();
+    assert!(json.contains("\"unconfirmed\":[\"chat\"]"), "{json}");
+
+    // exclude: the model leaves the matrix entirely.
+    fs::write(
+        dir.path().join("llama-matrix.toml"),
+        "budget = 100.0\non_unconfirmed = \"exclude\"\n",
+    )
+    .unwrap();
+    let excluded = Command::cargo_bin("llama-matrix")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("build")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let excluded = String::from_utf8(excluded).unwrap();
+    assert!(excluded.contains("NOT measured, excluded: chat"), "{excluded}");
+    for line in excluded.lines().filter(|line| line.trim_start().starts_with("pack")) {
+        assert!(!line.contains("chat"), "excluded model still packed: {line}");
+    }
+
+    // error: refuse to build at all.
+    fs::write(
+        dir.path().join("llama-matrix.toml"),
+        "budget = 100.0\non_unconfirmed = \"error\"\n",
+    )
+    .unwrap();
+    Command::cargo_bin("llama-matrix")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("build")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("without confirming"));
 }
 
 #[test]

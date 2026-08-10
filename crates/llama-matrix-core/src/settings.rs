@@ -19,6 +19,8 @@ pub enum Kind {
     Float,
     /// One of a fixed set of lowercase words.
     Enum(&'static [&'static str]),
+    /// A `WxH` pixel size (e.g. `1024x1024`).
+    Size,
 }
 
 /// One settable scalar: its key (mirrors the `llama-matrix.toml` key), value
@@ -68,6 +70,18 @@ pub const SETTINGS: &[Setting] = &[
         desc: "1000-combination cap handling",
         default: "group",
     },
+    Setting {
+        key: "on_unconfirmed",
+        kind: Kind::Enum(&["warn", "exclude", "error"]),
+        desc: "handling of footprints whose allocation was never confirmed",
+        default: "warn",
+    },
+    Setting {
+        key: "probe_image_size",
+        kind: Kind::Size,
+        desc: "WxH the image load-trigger generates at (decides what an image footprint means)",
+        default: "1024x1024",
+    },
 ];
 
 /// The settable keys (also the source for shell completion).
@@ -99,6 +113,21 @@ fn normalize(setting: &Setting, value: &str) -> Result<(String, toml_edit::Item)
                 bail!("`{}` expects one of {:?}, got `{value}`", setting.key, allowed);
             }
             Ok((chosen.clone(), toml_edit::value(chosen)))
+        }
+        Kind::Size => {
+            let size = value.trim().to_lowercase();
+            let dimensions = size
+                .split_once('x')
+                .and_then(|(width, height)| Some((width.parse::<u32>().ok()?, height.parse::<u32>().ok()?)));
+            match dimensions {
+                Some((width, height)) if width > 0 && height > 0 => {
+                    Ok((size.clone(), toml_edit::value(size)))
+                }
+                _ => bail!(
+                    "`{}` expects a WxH pixel size like 1024x1024, got `{value}`",
+                    setting.key
+                ),
+            }
         }
     }
 }
@@ -191,5 +220,21 @@ mod tests {
         assert!(set(&file, "nope", "x").is_err());
         assert!(set(&file, "strategy", "bogus").is_err());
         assert!(set(&file, "margin", "lots").is_err());
+    }
+
+    #[test]
+    fn probe_image_size_accepts_a_pixel_size_and_rejects_junk() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("llama-matrix.toml");
+
+        assert_eq!(get(&file, "probe_image_size").unwrap(), "1024x1024");
+        assert_eq!(set(&file, "probe_image_size", "512X512").unwrap(), "512x512");
+        assert_eq!(get(&file, "probe_image_size").unwrap(), "512x512");
+
+        for junk in ["1024", "1024x", "x512", "big", "0x512", "1024x1024x1"] {
+            assert!(set(&file, "probe_image_size", junk).is_err(), "accepted `{junk}`");
+        }
+        // …and the rejected writes never changed the stored value.
+        assert_eq!(get(&file, "probe_image_size").unwrap(), "512x512");
     }
 }

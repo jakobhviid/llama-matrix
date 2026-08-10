@@ -2,9 +2,21 @@
 //! occupancy after allocation stabilizes, and records the delta over an empty
 //! baseline into the per-model store, keyed by param-hash. GPU-touching, slow,
 //! and lockfile-guarded. See ARCHITECTURE.md §2.1.
+//!
+//! **`ready` is not `allocated`.** llama-swap reports a model `ready` when its
+//! upstream answers HTTP, which for a lazily-allocating backend (sd-server: the
+//! generation *is* the allocation) happens long before the weights are resident.
+//! Sampling at that point captures a mid-load plateau, which can be under half the
+//! real footprint and is indistinguishable by inspection from a settled reading, so it
+//! would reach `build` as the over-declaration Principle 1 forbids. The trigger request
+//! is therefore awaited: its completion is the strongest evidence any backend gives
+//! that it finished allocating, and whether that evidence was obtained is recorded with
+//! the measurement ([`crate::cache::Measurement::allocation_confirmed`]) rather than
+//! assumed.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -12,10 +24,38 @@ use anyhow::{bail, Context, Result};
 use serde::Serialize;
 
 use crate::cache::{BoxMeta, Measurement, ModelStore, Store};
-use crate::model::{ModelRecord, ModelType};
+use crate::model::{weight_files, ModelRecord, ModelType};
 use crate::param_hash::memory_cmd;
-use crate::platform::{self, GpuMemory};
+use crate::platform::{self, GpuMemory, BYTES_PER_GIB};
 use crate::policy::Policy;
+
+/// How long to wait for `/running` to report a model `ready`.
+pub const DEFAULT_LOAD_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// How long to wait for the load-trigger request itself to finish. Generous on
+/// purpose: for an image backend this covers a full generation at the probe
+/// resolution, and overrunning it does not produce a wrong number, only an
+/// *unconfirmed* one that says so.
+pub const DEFAULT_TRIGGER_TIMEOUT: Duration = Duration::from_secs(900);
+
+/// How often occupancy is sampled while waiting for the trigger to finish (only to
+/// track the allocation peak; the footprint itself comes from `stabilize`).
+const TRIGGER_SAMPLE_INTERVAL: Duration = Duration::from_millis(250);
+
+/// Consecutive quiet samples required before occupancy counts as settled. Three
+/// (~3.6 s) rather than two: a staged loader pauses between components, and with the
+/// trigger already awaited there is nothing left to allocate, so the extra sample
+/// costs a second and removes a whole class of false settle.
+const STABILIZE_HOLD: u32 = 3;
+
+/// How long to keep sampling for a settled reading before giving up (and saying so).
+const STABILIZE_MAX_WAIT: Duration = Duration::from_secs(30);
+
+/// Two readings within this many GB of each other count as quiet.
+const STABILIZE_EPS: f64 = 0.03;
+
+/// Delay between occupancy samples while looking for a settled reading.
+const STABILIZE_INTERVAL: Duration = Duration::from_millis(1200);
 
 /// Knobs for a sweep.
 pub struct MeasureOptions {
@@ -24,8 +64,14 @@ pub struct MeasureOptions {
     pub force: bool,
     /// Restrict to these ids (None = the whole config worklist).
     pub only: Option<Vec<String>>,
-    /// Per-model load timeout.
+    /// Per-model load timeout (how long `/running` may take to say `ready`).
     pub load_timeout: Duration,
+    /// How long the load-trigger itself may take. Completing it is what proves the
+    /// allocation finished, so this is a correctness budget, not a convenience one.
+    pub trigger_timeout: Duration,
+    /// `WxH` for the image load-trigger: a diffusion model's allocation scales with
+    /// the resolution it generates at, so this decides what the footprint means.
+    pub probe_image_size: String,
 }
 
 /// One model that could not be measured, and why (surfaced in the `--json` report
@@ -49,7 +95,21 @@ pub struct MeasureSummary {
     /// actually loaded the command we hashed (the backend exposes no `/props`, or
     /// the endpoint predates it). Reported rather than silently implied to be
     /// verified: Principle 7.
+    ///
+    /// Informational and **permanent** for some backends (an image or STT server has
+    /// no `/props` to ask), which is exactly why it does not escalate the headline:
+    /// a warning that can never be cleared trains an operator to ignore it. The
+    /// actionable sibling is `unconfirmed_allocation`.
     pub unverified_serving: Vec<String>,
+    /// Models whose footprint was recorded **without confirming the allocation
+    /// finished** (the load-trigger never came back, or occupancy was still moving
+    /// when sampling stopped). Unlike `unverified_serving` this is clearable, and
+    /// `build` treats it as policy (`on_unconfirmed`), so it does escalate.
+    pub unconfirmed_allocation: Vec<Failure>,
+    /// Models whose footprint came out implausibly small for the weight files their
+    /// command names (below `cache::WEIGHT_FLOOR_RATIO` of the total on disk). A
+    /// signal, not a verdict: partial offload legitimately sits lower.
+    pub below_weight_floor: Vec<Failure>,
     pub baseline: f64,
     pub detected_total: f64,
 }
@@ -288,14 +348,42 @@ fn unload_all(agent: &ureq::Agent, endpoint: &str, settle: Duration) {
     thread::sleep(settle);
 }
 
-/// Fire the model's load-trigger on a detached thread (we poll `/running`
-/// instead of awaiting — an image/chat call blocks well past the load).
-fn trigger(model: &str, model_type: ModelType, endpoint: &str) -> thread::JoinHandle<()> {
+/// What a load-trigger request did.
+#[derive(Debug, PartialEq, Eq)]
+enum TriggerOutcome {
+    /// The backend answered with this HTTP status.
+    Answered(u16),
+    /// The request never completed (transport error, timeout, refused).
+    Failed(String),
+}
+
+/// A fired load-trigger, awaited by [`await_allocation`].
+///
+/// The request runs on its own thread, because the load has to be in flight while
+/// `/running` is polled for `ready`. The sweep then waits for it before sampling, so a
+/// lazily-allocating backend is measured after it allocated, and no request from one
+/// model is still running during the next model's measurement window.
+struct Trigger {
+    outcome: Receiver<TriggerOutcome>,
+    /// When the request was fired. The wait budget is measured from here, not from
+    /// when the sweep starts waiting, so a model's total cost is bounded by the
+    /// trigger timeout instead of stacking it on top of the ready timeout.
+    fired_at: Instant,
+}
+
+/// Fire the model's load-trigger on its own thread and hand back a [`Trigger`].
+///
+/// The request's own timeout matches the wait budget, so when the sweep stops waiting
+/// the thread is already unwinding rather than allocating behind its back.
+fn trigger(model: &str, model_type: ModelType, options: &MeasureOptions) -> Trigger {
     let model = model.to_string();
-    let endpoint = endpoint.to_string();
+    let endpoint = options.endpoint.clone();
+    let image_size = options.probe_image_size.clone();
+    let timeout = options.trigger_timeout;
+    let (sender, outcome) = mpsc::channel();
     thread::spawn(move || {
-        let agent = ureq::builder().timeout(Duration::from_secs(320)).build();
-        let _ = match model_type {
+        let agent = ureq::builder().timeout(timeout).build();
+        let response = match model_type {
             ModelType::Embed => agent
                 .post(&format!("{endpoint}/v1/embeddings"))
                 .send_json(serde_json::json!({"model": model, "input": "x"})),
@@ -303,7 +391,7 @@ fn trigger(model: &str, model_type: ModelType, endpoint: &str) -> thread::JoinHa
                 serde_json::json!({"model": model, "query": "x", "documents": ["a", "b"]}),
             ),
             ModelType::Image => agent.post(&format!("{endpoint}/v1/images/generations")).send_json(
-                serde_json::json!({"model": model, "prompt": "a cat", "size": "256x256"}),
+                serde_json::json!({"model": model, "prompt": "a cube", "size": image_size}),
             ),
             ModelType::Stt => {
                 let boundary = "----llamamatrixboundary";
@@ -321,7 +409,80 @@ fn trigger(model: &str, model_type: ModelType, endpoint: &str) -> thread::JoinHa
                     "max_tokens": 1
                 })),
         };
-    })
+        // A non-2xx is an *answer*, not a transport failure: ureq models it as an
+        // error, but it tells us the backend replied, and the status explains why a
+        // load produced nothing worth recording.
+        let outcome = match response {
+            Ok(response) => TriggerOutcome::Answered(response.status()),
+            Err(ureq::Error::Status(status, _)) => TriggerOutcome::Answered(status),
+            Err(error) => TriggerOutcome::Failed(error.to_string()),
+        };
+        let _ = sender.send(outcome);
+    });
+    Trigger { outcome, fired_at: Instant::now() }
+}
+
+/// Whether a model's allocation is known to have finished, and the highest occupancy
+/// seen while it was allocating.
+#[derive(Debug, PartialEq)]
+enum Allocation {
+    /// The trigger completed successfully: whatever it allocated is now resident.
+    Confirmed { peak: f64 },
+    /// The trigger itself failed or was refused, so nothing about the reading can be
+    /// trusted - the model may be half-loaded, or loaded and then torn down.
+    Rejected { reason: String },
+    /// It never came back inside the budget. The sensor reading may be a mid-load
+    /// plateau, so it is recorded and flagged, never silently trusted.
+    Unconfirmed { peak: f64, reason: String },
+}
+
+/// Wait for the load-trigger to finish, sampling occupancy for its peak meanwhile.
+///
+/// This is the fix for the under-measurement: for sd-server the generation request
+/// *is* the allocation, so its completion - not llama-swap's `ready` - is the moment
+/// a footprint becomes meaningful.
+///
+/// `budget` is measured from when the trigger was fired, so waiting for it never adds
+/// to the time already spent waiting for `ready`; a model that goes wrong costs at
+/// most one budget, not two.
+fn await_allocation(trigger: &Trigger, gpu: &dyn GpuMemory, budget: Duration) -> Allocation {
+    let mut peak = 0.0_f64;
+    loop {
+        peak = peak.max(gpu.used_gb().unwrap_or(0.0));
+        match trigger.outcome.recv_timeout(TRIGGER_SAMPLE_INTERVAL) {
+            Ok(TriggerOutcome::Answered(status)) if (200..300).contains(&status) => {
+                return Allocation::Confirmed { peak };
+            }
+            Ok(TriggerOutcome::Answered(status)) => {
+                return Allocation::Rejected {
+                    reason: format!("the load-trigger returned HTTP {status}"),
+                };
+            }
+            Ok(TriggerOutcome::Failed(error)) => {
+                return Allocation::Rejected {
+                    reason: format!("the load-trigger did not complete: {error}"),
+                };
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                if trigger.fired_at.elapsed() >= budget {
+                    return Allocation::Unconfirmed {
+                        peak,
+                        reason: format!(
+                            "the load-trigger was still running {}s after it was fired, so the \
+                             reading may be a mid-load plateau rather than the finished footprint",
+                            budget.as_secs()
+                        ),
+                    };
+                }
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                return Allocation::Unconfirmed {
+                    peak,
+                    reason: "the load-trigger ended without reporting an outcome".to_string(),
+                };
+            }
+        }
+    }
 }
 
 /// Poll until the model is `ready` (returns load seconds) or gives up / tears down.
@@ -343,28 +504,96 @@ fn wait_ready(
     None
 }
 
-/// Sample occupancy until two consecutive readings are within `eps` GB (KV +
-/// compute buffers finish allocating after `ready`), or `max_wait` elapses.
-fn stabilize(gpu: &dyn GpuMemory, max_wait: Duration, eps: f64, hold: u32) -> f64 {
+/// A settled occupancy reading.
+struct Stabilized {
+    /// The occupancy accepted as the footprint, in GB.
+    used: f64,
+    /// Did occupancy go quiet, or did `max_wait` run out while it was still moving? A
+    /// reading that never settled is not a finished allocation, so the caller records it
+    /// as unconfirmed rather than as a footprint.
+    settled: bool,
+    /// Highest occupancy seen while sampling.
+    peak: f64,
+}
+
+/// Sample occupancy every `interval` until `hold` consecutive readings are within
+/// `eps` GB (KV and compute buffers finish allocating after `ready`), or `max_wait`
+/// elapses. `interval` is a parameter so the sampling logic is testable in
+/// milliseconds instead of in real sweep time.
+fn stabilize(
+    gpu: &dyn GpuMemory,
+    max_wait: Duration,
+    interval: Duration,
+    eps: f64,
+    hold: u32,
+) -> Stabilized {
     let mut previous: Option<f64> = None;
     let mut stable = 0;
+    let mut peak = 0.0_f64;
     let start = Instant::now();
     while start.elapsed() < max_wait {
         let current = gpu.used_gb().unwrap_or(0.0);
+        peak = peak.max(current);
         if let Some(prev) = previous {
             if (current - prev).abs() < eps {
                 stable += 1;
                 if stable >= hold {
-                    return current;
+                    return Stabilized { used: current, settled: true, peak };
                 }
             } else {
                 stable = 0;
             }
         }
         previous = Some(current);
-        thread::sleep(Duration::from_millis(1200));
+        thread::sleep(interval);
     }
-    gpu.used_gb().unwrap_or(0.0)
+    let current = gpu.used_gb().unwrap_or(0.0);
+    Stabilized { used: current, settled: false, peak: peak.max(current) }
+}
+
+/// Total size in GB of the weight files the command names, host-mapped and stat'ed.
+///
+/// `None` when none of them can be read (an unmapped container path, a remote mount),
+/// in which case no floor check is possible and none is claimed.
+fn weights_gb(record: &ModelRecord, policy: &Policy) -> Option<f64> {
+    let mut total = 0.0;
+    let mut readable = false;
+    for file in weight_files(&record.cmd) {
+        if let Ok(metadata) = std::fs::metadata(policy.to_host(&file)) {
+            total += metadata.len() as f64 / BYTES_PER_GIB;
+            readable = true;
+        }
+    }
+    readable.then_some(total)
+}
+
+/// Upsert one measurement into the model's store file, refreshing the type/file the
+/// entry is filed under.
+///
+/// A `FAILED` result never overwrites an existing `ok` footprint at the same hash. A
+/// measurement is data the operator paid GPU time for, the store's rule is that nothing
+/// is auto-deleted (SPEC §2), and a bad load in this sweep (a rejected trigger, a
+/// timeout during a `--force` re-measure) is no evidence against the stored number,
+/// while clobbering it would silently drop the model out of every future matrix. The
+/// failure is reported in the sweep summary either way.
+fn store_measurement(store: &Store, record: &ModelRecord, measurement: Measurement) -> Result<()> {
+    let mut model_store = store.read_model(&record.id)?.unwrap_or_else(|| ModelStore {
+        model_type: record.model_type.as_str().to_string(),
+        file: record.primary_file.clone(),
+        measurements: Default::default(),
+    });
+    if !measurement.is_ok()
+        && model_store
+            .measurements
+            .get(&record.param_hash)
+            .is_some_and(Measurement::is_ok)
+    {
+        return Ok(());
+    }
+    model_store.model_type = record.model_type.as_str().to_string();
+    model_store.file = record.primary_file.clone();
+    model_store.measurements.insert(record.param_hash.clone(), measurement);
+    store.write_model(&record.id, &model_store)
 }
 
 /// Run the sweep. Detects the GPU (errors if none — measure needs a sensor).
@@ -415,114 +644,210 @@ pub fn sweep(
             }
         }
 
-        // cache hit?
+        // cache hit? An *unconfirmed* entry is not one: it may be a mid-load plateau
+        // rather than a footprint, so re-measuring it is the cheap half of Principle 6
+        // (extra work beats wrong reuse), and it self-heals without the operator having
+        // to know which entries to distrust. A store holding no confirmations therefore
+        // re-measures in full, and one holding them re-measures only what is suspect.
         if !options.force {
             if let Some(existing) = store.select(&record.id, &record.param_hash)? {
-                if existing.is_ok() {
+                if existing.is_confirmed() {
                     summary.cached.push(record.id.clone());
                     continue;
                 }
             }
         }
 
+        // Weights on disk: a floor on the footprint of a fully offloaded model, and
+        // the one cross-check that needs no GPU and no cooperation from the backend.
+        let weights = weights_gb(record, policy);
+
         unload_all(&agent, &options.endpoint, Duration::from_secs(2));
-        let handle = trigger(&record.id, record.model_type, &options.endpoint);
+        let fired = trigger(&record.id, record.model_type, options);
         let load_seconds = wait_ready(&agent, &options.endpoint, &record.id, options.load_timeout);
 
-        let measurement = match load_seconds {
+        // Every path below yields at most one measurement and then falls through to a
+        // single store-and-unload. `None` means record nothing at all, which is
+        // reserved for a serving mismatch: that reading describes neither the config's
+        // command nor the served one, so storing it is the one outcome that must not
+        // happen (it would look like a present hash forever after).
+        let recorded: Option<Measurement> = match load_seconds {
             None => {
-                let failed = Measurement {
-                    status: "FAILED".to_string(),
-                    params: memory_cmd(&record.cmd),
-                    measured_at: today.clone(),
-                    ..Default::default()
-                };
+                // The trigger may still be in flight. Wait it out (bounded) so a
+                // request from this model can never allocate during the next model's
+                // measurement window, and use whatever it reports to explain the
+                // failure - "the load-trigger returned HTTP 502" beats "timed out".
+                let trigger_note =
+                    match await_allocation(&fired, gpu.as_ref(), options.trigger_timeout) {
+                        Allocation::Rejected { reason } => Some(reason),
+                        _ => None,
+                    };
                 // An id llama-swap doesn't advertise is the likeliest cause worth
                 // naming: it usually means it is serving a different config than the
                 // one being measured. Only a hint, since an `unlisted` model is
                 // absent from the roster and still loadable (SPEC §8).
                 let unknown_to_llama_swap =
                     served.as_ref().is_some_and(|ids| !ids.contains(&record.id));
+                let base = if unknown_to_llama_swap {
+                    "load timed out or exited, and llama-swap does not list this model \
+                     id - it may be serving a different config than the one being \
+                     measured (reload it, or point --config at the file it loaded)"
+                } else {
+                    "load timed out or exited"
+                };
                 summary.failed.push(Failure {
                     id: record.id.clone(),
-                    reason: if unknown_to_llama_swap {
-                        "load timed out or exited, and llama-swap does not list this model \
-                         id - it may be serving a different config than the one being \
-                         measured (reload it, or point --config at the file it loaded)"
-                            .to_string()
-                    } else {
-                        "load timed out or exited".to_string()
+                    reason: match trigger_note {
+                        Some(note) => format!("{base} ({note})"),
+                        None => base.to_string(),
                     },
                 });
-                failed
-            }
-            Some(load) => {
-                // Is the server that just loaded running the command we hashed? On a
-                // mismatch the reading belongs to neither command, so nothing is
-                // recorded: a wrong footprint stored under a right-looking hash would
-                // never self-correct (Principle 2, and Principle 1 downstream).
-                match check_serving(&agent, &options.endpoint, record) {
-                    Serving::Mismatch { declared, served } => {
-                        summary.failed.push(Failure {
-                            id: record.id.clone(),
-                            reason: format!(
-                                "llama-swap loaded {served} while this config declares \
-                                 {declared}, so it is serving a different command - no \
-                                 footprint recorded (reload llama-swap, or measure the \
-                                 config it actually loaded)"
-                            ),
-                        });
-                        drop(handle);
-                        unload_all(&agent, &options.endpoint, Duration::from_secs(2));
-                        continue;
-                    }
-                    Serving::Unconfirmed => summary.unverified_serving.push(record.id.clone()),
-                    Serving::Confirmed => {}
-                }
-
-                let used = stabilize(gpu.as_ref(), Duration::from_secs(30), 0.03, 2);
-                // Read the split at the same settled point as the total. Both are
-                // None on a device with a single (or unified) pool, and are then
-                // omitted from the store rather than written as zeros.
-                let (d_vram, d_gtt, abs_vram, abs_gtt) =
-                    match (gpu.used_split_gb(), baseline_split) {
-                        (Some((vram, gtt)), Some((base_vram, base_gtt))) => (
-                            Some(round2(vram - base_vram)),
-                            Some(round2(gtt - base_gtt)),
-                            Some(round2(vram)),
-                            Some(round2(gtt)),
-                        ),
-                        _ => (None, None, None, None),
-                    };
-                summary.measured.push(record.id.clone());
-                Measurement {
-                    status: "ok".to_string(),
-                    d_total: round2(used - summary.baseline),
-                    abs_total: round2(used),
-                    d_vram,
-                    d_gtt,
-                    abs_vram,
-                    abs_gtt,
-                    load_s: round1(load),
+                Some(Measurement {
+                    status: "FAILED".to_string(),
                     params: memory_cmd(&record.cmd),
                     measured_at: today.clone(),
-                }
+                    weights_gb: weights.map(round2),
+                    ..Default::default()
+                })
             }
+            // Is the server that just loaded running the command we hashed? On a
+            // mismatch the reading belongs to neither command (Principle 2, and
+            // Principle 1 downstream).
+            Some(load) => match check_serving(&agent, &options.endpoint, record) {
+                Serving::Mismatch { declared, served } => {
+                    summary.failed.push(Failure {
+                        id: record.id.clone(),
+                        reason: format!(
+                            "llama-swap loaded {served} while this config declares \
+                             {declared}, so it is serving a different command - no \
+                             footprint recorded (reload llama-swap, or measure the \
+                             config it actually loaded)"
+                        ),
+                    });
+                    None
+                }
+                serving => {
+                    if serving == Serving::Unconfirmed {
+                        summary.unverified_serving.push(record.id.clone());
+                    }
+                    let serving_verified = Some(serving == Serving::Confirmed);
+
+                    // The load-trigger's completion is the allocation signal: a
+                    // diffusion backend allocates *during* the generation, so `ready`
+                    // is far too early. Peak occupancy is tracked while we wait.
+                    let allocating =
+                        match await_allocation(&fired, gpu.as_ref(), options.trigger_timeout) {
+                            Allocation::Confirmed { peak } => Some((peak, None)),
+                            Allocation::Unconfirmed { peak, reason } => Some((peak, Some(reason))),
+                            Allocation::Rejected { reason } => {
+                                summary.failed.push(Failure {
+                                    id: record.id.clone(),
+                                    reason: format!("{reason}, so no footprint was recorded"),
+                                });
+                                None
+                            }
+                        };
+
+                    match allocating {
+                        None => Some(Measurement {
+                            status: "FAILED".to_string(),
+                            params: memory_cmd(&record.cmd),
+                            measured_at: today.clone(),
+                            weights_gb: weights.map(round2),
+                            serving_verified,
+                            ..Default::default()
+                        }),
+                        Some((trigger_peak, trigger_note)) => {
+                            let settled = stabilize(
+                                gpu.as_ref(),
+                                STABILIZE_MAX_WAIT,
+                                STABILIZE_INTERVAL,
+                                STABILIZE_EPS,
+                                STABILIZE_HOLD,
+                            );
+                            // Confirmed needs both halves: the trigger finished *and*
+                            // occupancy then stopped moving. Either one missing means
+                            // the number may be incomplete, which is recorded rather
+                            // than assumed away.
+                            let confirmed = trigger_note.is_none() && settled.settled;
+                            if !confirmed {
+                                summary.unconfirmed_allocation.push(Failure {
+                                    id: record.id.clone(),
+                                    reason: trigger_note.unwrap_or_else(|| {
+                                        format!(
+                                            "occupancy was still changing after {}s of sampling, \
+                                             so the footprint may be incomplete",
+                                            STABILIZE_MAX_WAIT.as_secs()
+                                        )
+                                    }),
+                                });
+                            }
+
+                            let used = settled.used;
+                            // Read the split at the same settled point as the total.
+                            // Both are None on a device with a single (or unified)
+                            // pool, and are then omitted from the store rather than
+                            // written as zeros.
+                            let (d_vram, d_gtt, abs_vram, abs_gtt) =
+                                match (gpu.used_split_gb(), baseline_split) {
+                                    (Some((vram, gtt)), Some((base_vram, base_gtt))) => (
+                                        Some(round2(vram - base_vram)),
+                                        Some(round2(gtt - base_gtt)),
+                                        Some(round2(vram)),
+                                        Some(round2(gtt)),
+                                    ),
+                                    _ => (None, None, None, None),
+                                };
+                            let d_total = round2(used - summary.baseline);
+                            let peak = trigger_peak.max(settled.peak) - summary.baseline;
+                            let measurement = Measurement {
+                                status: "ok".to_string(),
+                                d_total,
+                                abs_total: round2(used),
+                                d_vram,
+                                d_gtt,
+                                abs_vram,
+                                abs_gtt,
+                                load_s: round1(load),
+                                allocation_confirmed: Some(confirmed),
+                                serving_verified,
+                                peak_total: Some(round2(peak.max(d_total))),
+                                weights_gb: weights.map(round2),
+                                params: memory_cmd(&record.cmd),
+                                measured_at: today.clone(),
+                            };
+                            if let (true, Some(ratio), Some(weights)) = (
+                                measurement.below_weight_floor(),
+                                measurement.weight_ratio(),
+                                weights,
+                            ) {
+                                summary.below_weight_floor.push(Failure {
+                                    id: record.id.clone(),
+                                    reason: format!(
+                                        "footprint {d_total:.2} GB is only {:.0}% of the \
+                                         {weights:.2} GB of weight files its command names; a \
+                                         fully offloaded model cannot hold much less than its \
+                                         weights, so this may be under-measured (partial offload \
+                                         with -ngl/-ot/--cpu-moe is a legitimate reason to sit \
+                                         lower)",
+                                        ratio * 100.0
+                                    ),
+                                });
+                            }
+                            summary.measured.push(record.id.clone());
+                            Some(measurement)
+                        }
+                    }
+                }
+            },
         };
 
-        // upsert into the model's store file
-        let mut model_store = store.read_model(&record.id)?.unwrap_or_else(|| ModelStore {
-            model_type: record.model_type.as_str().to_string(),
-            file: record.primary_file.clone(),
-            measurements: Default::default(),
-        });
-        model_store.model_type = record.model_type.as_str().to_string();
-        model_store.file = record.primary_file.clone();
-        model_store.measurements.insert(record.param_hash.clone(), measurement);
-        store.write_model(&record.id, &model_store)?;
-
-        // best-effort: kill the (likely still-blocking) trigger call
-        drop(handle);
+        if let Some(measurement) = recorded {
+            store_measurement(store, record, measurement)?;
+        }
+        // The trigger has been awaited (or waited out) by now, so nothing of this
+        // model's is still allocating; release the channel and clear the pool.
+        drop(fired);
         unload_all(&agent, &options.endpoint, Duration::from_secs(2));
     }
 
@@ -588,7 +913,191 @@ fn tiny_wav() -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
+
+    /// A sensor that replays a scripted sequence of readings, so the sampling logic
+    /// can be exercised without a GPU. Past the end of the script it holds the last
+    /// value, or keeps climbing by `climb` - a model that is still allocating does not
+    /// politely stop when the script does, and a fake that flattens out would let a
+    /// never-settling reading look settled.
+    struct ScriptedGpu {
+        readings: Vec<f64>,
+        next: AtomicUsize,
+        climb: f64,
+    }
+
+    impl ScriptedGpu {
+        fn new(readings: &[f64]) -> Self {
+            ScriptedGpu { readings: readings.to_vec(), next: AtomicUsize::new(0), climb: 0.0 }
+        }
+
+        /// Occupancy that rises by `step` GB on every read, forever.
+        fn climbing(step: f64) -> Self {
+            ScriptedGpu { readings: vec![step], next: AtomicUsize::new(0), climb: step }
+        }
+    }
+
+    impl GpuMemory for ScriptedGpu {
+        fn label(&self) -> String {
+            "scripted".to_string()
+        }
+        fn total_gb(&self) -> Result<f64> {
+            Ok(100.0)
+        }
+        fn used_gb(&self) -> Result<f64> {
+            let index = self.next.fetch_add(1, Ordering::SeqCst);
+            let last = self.readings.len() - 1;
+            Ok(match index <= last {
+                true => self.readings[index],
+                false => self.readings[last] + self.climb * (index - last) as f64,
+            })
+        }
+    }
+
+    fn trigger_holding(outcome: Option<TriggerOutcome>) -> (mpsc::Sender<TriggerOutcome>, Trigger) {
+        let (sender, receiver) = mpsc::channel();
+        if let Some(outcome) = outcome {
+            sender.send(outcome).unwrap();
+        }
+        // The sender is handed back so the caller can keep the channel open: dropping
+        // it would look like a finished trigger rather than a stalled one.
+        (sender, Trigger { outcome: receiver, fired_at: Instant::now() })
+    }
+
+    /// The report's core failure: a reading taken while the model is still loading.
+    /// `stabilize` cannot tell a mid-load plateau from a finished one - that is what
+    /// awaiting the trigger is for - but it must at least never *claim* a reading
+    /// settled when occupancy was still climbing when time ran out.
+    #[test]
+    fn stabilize_reports_whether_it_actually_settled() {
+        let interval = Duration::from_millis(1);
+
+        // Still climbing when the budget runs out: not settled, and the peak is kept.
+        let climbing = ScriptedGpu::climbing(4.0);
+        let result = stabilize(&climbing, Duration::from_millis(20), interval, 0.03, 3);
+        assert!(!result.settled, "a moving reading must not be reported as settled");
+        assert!(result.peak >= 13.0, "peak {} should track the climb", result.peak);
+
+        // Quiet for three consecutive samples: settled, at the quiet value.
+        let quiet = ScriptedGpu::new(&[4.0, 16.10, 16.11, 16.10, 16.10]);
+        let result = stabilize(&quiet, Duration::from_secs(5), interval, 0.03, 3);
+        assert!(result.settled);
+        assert!((result.used - 16.10).abs() < 1e-9, "used {}", result.used);
+
+        // A plateau that holds long enough is accepted, which is precisely why the
+        // trigger has to be awaited first: three quiet samples mid-load look
+        // identical to three quiet samples post-load.
+        let plateau = ScriptedGpu::new(&[8.87, 8.87, 8.87, 8.87]);
+        let result = stabilize(&plateau, Duration::from_secs(5), interval, 0.03, 3);
+        assert!(result.settled && (result.used - 8.87).abs() < 1e-9);
+    }
+
+    /// The trigger's outcome decides whether a footprint counts as confirmed.
+    #[test]
+    fn a_finished_trigger_confirms_and_a_stalled_one_does_not() {
+        let gpu = ScriptedGpu::new(&[2.0]);
+
+        // 2xx: the request that does the allocating finished, so what is resident now
+        // is the whole footprint.
+        let (_sender, trigger) = trigger_holding(Some(TriggerOutcome::Answered(200)));
+        assert!(matches!(
+            await_allocation(&trigger, &gpu, Duration::from_secs(5)),
+            Allocation::Confirmed { .. }
+        ));
+
+        // A non-2xx answer: the model may be half-loaded or already tearing down, so
+        // nothing about the reading is trustworthy.
+        let (_sender, trigger) = trigger_holding(Some(TriggerOutcome::Answered(500)));
+        match await_allocation(&trigger, &gpu, Duration::from_secs(5)) {
+            Allocation::Rejected { reason } => assert!(reason.contains("500"), "{reason}"),
+            other => panic!("expected Rejected, got {other:?}"),
+        }
+
+        // A transport failure is equally disqualifying.
+        let (_sender, trigger) =
+            trigger_holding(Some(TriggerOutcome::Failed("connection reset".into())));
+        assert!(matches!(
+            await_allocation(&trigger, &gpu, Duration::from_secs(5)),
+            Allocation::Rejected { .. }
+        ));
+
+        // Never answers inside the budget: unconfirmed, carrying the peak it saw
+        // while waiting (9.0), not silently trusted.
+        let peaky = ScriptedGpu::new(&[1.0, 9.0, 3.0]);
+        let (_sender, trigger) = trigger_holding(None);
+        match await_allocation(&trigger, &peaky, Duration::from_millis(600)) {
+            Allocation::Unconfirmed { peak, reason } => {
+                assert!((peak - 9.0).abs() < 1e-9, "peak {peak}");
+                assert!(reason.contains("mid-load plateau"), "{reason}");
+                assert!(reason.contains("after it was fired"), "{reason}");
+            }
+            other => panic!("expected Unconfirmed, got {other:?}"),
+        }
+    }
+
+    /// The weights floor totals every weight file the command names, through the
+    /// container→host path map, and ignores what it cannot read.
+    #[test]
+    fn weights_are_totalled_across_host_mapped_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("unet.gguf"), vec![0u8; 3 * 1024 * 1024]).unwrap();
+        std::fs::write(dir.path().join("vae.safetensors"), vec![0u8; 1024 * 1024]).unwrap();
+        let mut policy = Policy::default();
+        policy.paths.insert("/sd".to_string(), dir.path().display().to_string());
+
+        let record = ModelRecord::from_expanded(
+            "img",
+            "/opt/sdcpp/bin/sd-server --diffusion-model /sd/unet.gguf \
+             --vae /sd/vae.safetensors --t5xxl /sd/absent.safetensors",
+        );
+        // 4 MiB readable; the missing file contributes nothing rather than aborting.
+        let total = weights_gb(&record, &policy).expect("readable weights");
+        assert!((total - 4.0 / 1024.0).abs() < 1e-9, "total {total}");
+
+        // Nothing readable at all → no floor is claimed (an unmapped container path).
+        let unmapped = ModelRecord::from_expanded(
+            "img",
+            "/opt/sdcpp/bin/sd-server --diffusion-model /elsewhere/u.gguf",
+        );
+        assert_eq!(weights_gb(&unmapped, &Policy::default()), None);
+    }
+
+    /// A failed load must not erase a footprint that was measured successfully: the
+    /// store is append-and-keep, and losing the number would quietly drop the model
+    /// from every future matrix.
+    #[test]
+    fn a_failure_never_overwrites_a_good_footprint() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().join("measurements"));
+        let record = ModelRecord::from_expanded("chat", "/app/llama-server -m /m.gguf -c 4096");
+
+        let good = Measurement {
+            status: "ok".to_string(),
+            d_total: 30.0,
+            allocation_confirmed: Some(true),
+            ..Default::default()
+        };
+        store_measurement(&store, &record, good).unwrap();
+
+        let failed = Measurement { status: "FAILED".to_string(), ..Default::default() };
+        store_measurement(&store, &record, failed).unwrap();
+        let kept = store.select("chat", &record.param_hash).unwrap().expect("footprint kept");
+        assert_eq!(kept.d_total, 30.0);
+
+        // With nothing to protect, the failure is recorded as usual (a `FAILED` entry
+        // documents that this exact command was tried and didn't load).
+        let fresh = ModelRecord::from_expanded("other", "/app/llama-server -m /o.gguf -c 4096");
+        store_measurement(
+            &store,
+            &fresh,
+            Measurement { status: "FAILED".to_string(), ..Default::default() },
+        )
+        .unwrap();
+        let stored = store.read_model("other").unwrap().unwrap();
+        assert_eq!(stored.measurements[&fresh.param_hash].status, "FAILED");
+    }
 
     #[test]
     fn live_lock_is_refused_and_a_stale_one_is_reclaimed() {

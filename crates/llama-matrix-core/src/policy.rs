@@ -9,6 +9,13 @@ use anyhow::{Context, Result};
 use indexmap::IndexMap;
 use serde::Deserialize;
 
+/// The default image-probe resolution. 1024x1024 rather than a token 256x256: the
+/// footprint recorded is whatever that generation allocates, so probing tiny would
+/// under-measure every operator who serves at a real resolution (Principle 1).
+pub fn default_probe_image_size() -> String {
+    "1024x1024".to_string()
+}
+
 /// The packing strategy: how models become knapsack units.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -29,6 +36,21 @@ pub enum OnOverflow {
     #[default]
     Group,
     /// Refuse to emit; the operator groups by hand.
+    Error,
+}
+
+/// What `build` does with a footprint whose allocation was never confirmed (a
+/// measurement taken before the model finished allocating may be a mid-load plateau,
+/// which under-counts the matrix - see `cache::Measurement::is_confirmed`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OnUnconfirmed {
+    /// Use it, but warn and name both the models and the sets that depend on them.
+    #[default]
+    Warn,
+    /// Leave the model out of the matrix entirely (a safe under-declaration).
+    Exclude,
+    /// Refuse to build until the store has been re-measured.
     Error,
 }
 
@@ -57,6 +79,11 @@ pub struct Policy {
     pub margin: f64,
     pub strategy: Strategy,
     pub on_overflow: OnOverflow,
+    pub on_unconfirmed: OnUnconfirmed,
+    /// `WxH` for the image load-trigger. What a diffusion model allocates scales
+    /// with the resolution it generates at, so this decides what an image
+    /// footprint *means*: measure at the size you actually serve.
+    pub probe_image_size: String,
     /// Container → host weight-dir mapping (empty for native deployments).
     pub paths: IndexMap<String, String>,
     pub roles: Roles,
@@ -73,6 +100,8 @@ impl Default for Policy {
             margin: 4.0,
             strategy: Strategy::Flat,
             on_overflow: OnOverflow::Group,
+            on_unconfirmed: OnUnconfirmed::Warn,
+            probe_image_size: default_probe_image_size(),
             paths: IndexMap::new(),
             roles: Roles::default(),
             groups: IndexMap::new(),

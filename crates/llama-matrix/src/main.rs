@@ -347,6 +347,7 @@ fn cmd_drift(json: bool) -> Result<()> {
             packs: plan.n_packs,
             heavies: plan.n_heavies,
             excluded: plan.excluded.clone(),
+            unconfirmed: plan.unconfirmed.clone(),
         };
         println!("{}", serde_json::to_string(&doc)?);
         return Ok(());
@@ -367,6 +368,13 @@ fn cmd_drift(json: bool) -> Result<()> {
     }
     if !plan.excluded.is_empty() {
         ui::info(&format!("{} model(s) unmeasured/excluded", plan.excluded.len()));
+    }
+    if !plan.unconfirmed.is_empty() {
+        ui::warn(&format!(
+            "{} footprint(s) unconfirmed (may be under-measured): run `llama-matrix build` to see \
+             the affected sets, or re-run `measure`",
+            plan.unconfirmed.len()
+        ));
     }
     Ok(())
 }
@@ -454,8 +462,9 @@ fn cmd_measure(
     only: Option<String>,
     json: bool,
 ) -> Result<()> {
-    use llama_matrix_core::measure::{sweep, MeasureOptions};
-    use std::time::Duration;
+    use llama_matrix_core::measure::{
+        sweep, MeasureOptions, DEFAULT_LOAD_TIMEOUT, DEFAULT_TRIGGER_TIMEOUT,
+    };
 
     let policy = Policy::load(PathBuf::from("llama-matrix.toml"))?;
     let config_dir = std::env::current_dir()?;
@@ -471,7 +480,9 @@ fn cmd_measure(
         endpoint,
         force,
         only,
-        load_timeout: Duration::from_secs(300),
+        load_timeout: DEFAULT_LOAD_TIMEOUT,
+        trigger_timeout: DEFAULT_TRIGGER_TIMEOUT,
+        probe_image_size: policy.probe_image_size.clone(),
     };
 
     if !json {
@@ -503,7 +514,14 @@ fn cmd_measure(
         // /props is a permanent property of a backend (image, STT), so every sweep on
         // such a roster would carry a ⚠ and train the operator to ignore it. It gets
         // its own warning line below instead.
-        if summary.failed.is_empty() && summary.skipped_missing.is_empty() {
+        //
+        // An *unconfirmed allocation* does escalate: unlike the serving check it is
+        // clearable, it means a recorded footprint may be short, and `build` will pack
+        // it by default, so it is exactly the case that must not look clean.
+        if summary.failed.is_empty()
+            && summary.skipped_missing.is_empty()
+            && summary.unconfirmed_allocation.is_empty()
+        {
             ui::ok(&headline);
         } else {
             ui::alert(&headline);
@@ -513,6 +531,15 @@ fn cmd_measure(
         }
         for id in &summary.skipped_missing {
             ui::warn(&format!("{id}: weight file missing — skipped"));
+        }
+        for unconfirmed in &summary.unconfirmed_allocation {
+            ui::warn(&format!(
+                "{}: recorded WITHOUT confirming the allocation finished - {}",
+                unconfirmed.id, unconfirmed.reason
+            ));
+        }
+        for suspect in &summary.below_weight_floor {
+            ui::warn(&format!("{}: {}", suspect.id, suspect.reason));
         }
         if !summary.unverified_serving.is_empty() {
             ui::warn(&format!(
@@ -585,7 +612,7 @@ fn cmd_configure(action: ConfigureAction, json: bool) -> Result<()> {
                 println!("{}", serde_json::to_string(&entries)?);
             } else {
                 for setting in settings::SETTINGS {
-                    println!("{:<12} {}  (default: {})", setting.key, setting.desc, setting.default);
+                    println!("{:<16} {}  (default: {})", setting.key, setting.desc, setting.default);
                 }
             }
         }
@@ -643,6 +670,7 @@ fn cmd_build(
                 packs: plan.n_packs,
                 heavies: plan.n_heavies,
                 sets: plan.sets.len(),
+                unconfirmed: plan.unconfirmed.clone(),
             };
             println!("{}", serde_json::to_string(&doc)?);
         } else {
@@ -758,6 +786,10 @@ mod doc_tests {
             abs_vram: Some(48.92),
             abs_gtt: Some(0.29),
             load_s: 42.0,
+            allocation_confirmed: Some(true),
+            serving_verified: Some(true),
+            peak_total: Some(49.60),
+            weights_gb: Some(49.90),
             params: "/app/llama-server -m /m.gguf -c 4096".into(),
             measured_at: "2026-01-01".into(),
         };

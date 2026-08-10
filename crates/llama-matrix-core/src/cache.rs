@@ -94,6 +94,32 @@ pub struct Measurement {
     pub abs_gtt: Option<f64>,
     #[serde(default)]
     pub load_s: f64,
+    /// Did the load-trigger complete, proving the model finished allocating?
+    ///
+    /// `Some(true)`: the trigger returned and occupancy then settled, so the number
+    /// describes a finished allocation. `Some(false)`: it did not, so the reading may
+    /// be a mid-load plateau (a lazily-allocating backend such as sd-server is
+    /// `ready` long before its weights are resident). `None`: the writer recorded no
+    /// confirmation, which is exactly as much evidence as `Some(false)` and is treated
+    /// the same. See SPEC §7.2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allocation_confirmed: Option<bool>,
+    /// Did `/props` confirm llama-swap was serving the command we hashed (SPEC §7.1)?
+    /// `Some(false)`/`None` mean *unconfirmable* (no `/props` on that backend, or
+    /// nothing comparable in the command), not wrong.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serving_verified: Option<bool>,
+    /// Highest occupancy seen while the model was allocating, as a delta over
+    /// baseline in GB (so it is directly comparable to `d_total`). A diffusion step
+    /// can allocate transiently above what it leaves resident; recorded for insight
+    /// and for future peak budgeting. `build` plans against `d_total`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peak_total: Option<f64>,
+    /// Total size in GB of the weight files the command names, when they were
+    /// readable at measure time. A fully offloaded model cannot hold much less than
+    /// its weights, which makes this a cheap, backend-agnostic sanity floor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weights_gb: Option<f64>,
     /// The hashed (memory) command, human-readable.
     #[serde(default)]
     pub params: String,
@@ -101,9 +127,41 @@ pub struct Measurement {
     pub measured_at: String,
 }
 
+/// A footprint below this fraction of its weights on disk is implausible for a
+/// fully offloaded model. Not 1.0: not every component is resident at once, and two
+/// verified image measurements sat at 0.97-0.98 of their file total, so the floor
+/// has to clear those while still catching a half-measured load.
+pub const WEIGHT_FLOOR_RATIO: f64 = 0.90;
+
 impl Measurement {
     pub fn is_ok(&self) -> bool {
         self.status == "ok"
+    }
+
+    /// Is this footprint trustworthy for the knapsack: measured, *and* the
+    /// allocation it describes is known to have finished?
+    ///
+    /// The two halves are separate on purpose. `is_ok` says a number was recorded;
+    /// this says the number is complete. An entry that is `ok` but unconfirmed may be
+    /// a mid-load plateau, which under-counts the matrix - the one direction
+    /// Principle 1 cannot tolerate - so `build` treats it as policy
+    /// (`on_unconfirmed`) rather than as data.
+    pub fn is_confirmed(&self) -> bool {
+        self.is_ok() && self.allocation_confirmed == Some(true)
+    }
+
+    /// `d_total` as a fraction of the weights on disk, when both are known.
+    pub fn weight_ratio(&self) -> Option<f64> {
+        let weights = self.weights_gb?;
+        (weights > 0.0).then_some(self.d_total / weights)
+    }
+
+    /// Is the footprint implausibly small for the weights the command loads?
+    ///
+    /// A warning signal, never a verdict: partial offload (`-ngl` below all layers,
+    /// `-ot`, `--cpu-moe`) is a legitimate reason for a model to sit lower.
+    pub fn below_weight_floor(&self) -> bool {
+        self.weight_ratio().is_some_and(|ratio| ratio < WEIGHT_FLOOR_RATIO)
     }
 }
 
@@ -300,6 +358,14 @@ impl Store {
     /// resolvable without guessing because such an entry is not a measurement of
     /// flags that could have changed, and it is still required to be the model's
     /// *only* `ok` entry, so there is nothing to choose between.
+    ///
+    /// **Confirmation is the caller's decision.** This returns any `ok` entry at the
+    /// hash, including one whose allocation was never confirmed
+    /// ([`Measurement::is_confirmed`]), because the two consumers want opposite
+    /// things from it: `measure` re-measures an unconfirmed entry (so a suspect
+    /// number self-heals), while `build` applies `on_unconfirmed`. Folding the check
+    /// in here would make an unconfirmed entry invisible and silently re-measured
+    /// forever with no way to report it.
     pub fn select(&self, id: &str, param_hash: &str) -> Result<Option<Measurement>> {
         let Some(store) = self.read_model(id)? else {
             return Ok(None);
@@ -508,6 +574,110 @@ mod tests {
         let json = std::fs::read_to_string(store.dir().join("m.json")).unwrap();
         assert!(!json.contains("\"d_vram\": 0.0"), "an unknown split must not persist as 0");
         assert!(json.contains("\"d_vram\": 24.07"), "a real split must persist");
+    }
+
+    /// An entry carrying no `allocation_confirmed` carries no evidence that its
+    /// footprint is complete, so it must not read as confirmed: every footprint in a
+    /// store written without the field is unconfirmed until re-measured.
+    #[test]
+    fn a_legacy_entry_is_not_confirmed() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().join("measurements"));
+        std::fs::create_dir_all(store.dir()).unwrap();
+        std::fs::write(
+            store.dir().join("m.json"),
+            r#"{"type":"image","file":"/sd/u.gguf","measurements":{
+                 "legacy": {"status":"ok","d_total":8.87,"abs_total":9.03,"load_s":12.0}}}"#,
+        )
+        .unwrap();
+
+        let legacy = store.select("m", "legacy").unwrap().unwrap();
+        assert!(legacy.is_ok(), "it is still a recorded measurement");
+        assert!(!legacy.is_confirmed(), "…but nothing confirms the allocation finished");
+        assert_eq!(legacy.allocation_confirmed, None);
+        // No weights recorded, so no floor check is possible (never a false alarm).
+        assert_eq!(legacy.weight_ratio(), None);
+        assert!(!legacy.below_weight_floor());
+    }
+
+    /// The new evidence fields round-trip, and are omitted rather than written as
+    /// `false`/`0` when unknown (same rule as the per-pool split).
+    #[test]
+    fn confirmation_fields_round_trip_and_omit_when_unknown() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().join("measurements"));
+        let mut measurements = IndexMap::new();
+        measurements.insert(
+            "confirmed".to_string(),
+            Measurement {
+                status: "ok".into(),
+                d_total: 16.10,
+                abs_total: 16.26,
+                load_s: 14.0,
+                allocation_confirmed: Some(true),
+                serving_verified: Some(false),
+                peak_total: Some(17.40),
+                weights_gb: Some(16.55),
+                ..Default::default()
+            },
+        );
+        measurements.insert(
+            "unknown".to_string(),
+            Measurement { status: "ok".into(), d_total: 8.87, ..Default::default() },
+        );
+        store
+            .write_model(
+                "img",
+                &ModelStore {
+                    model_type: "image".into(),
+                    file: Some("/sd/u.gguf".into()),
+                    measurements,
+                },
+            )
+            .unwrap();
+
+        let confirmed = store.select("img", "confirmed").unwrap().unwrap();
+        assert!(confirmed.is_confirmed());
+        assert_eq!(confirmed.peak_total, Some(17.40));
+        // 16.10 / 16.55 = 0.97 → above the floor.
+        assert!(!confirmed.below_weight_floor());
+
+        let json = std::fs::read_to_string(store.dir().join("img.json")).unwrap();
+        assert!(json.contains("\"allocation_confirmed\": true"));
+        assert!(json.contains("\"serving_verified\": false"), "a real false must persist");
+        assert_eq!(
+            json.matches("allocation_confirmed").count(),
+            1,
+            "the unknown entry must omit the field, not write false"
+        );
+    }
+
+    /// The floor catches the reported failure: 8.87 GB recorded for a model whose
+    /// weight files total 16.55 GB is 0.54 of its own weights.
+    #[test]
+    fn the_weights_floor_flags_a_half_measured_load() {
+        let under = Measurement {
+            status: "ok".into(),
+            d_total: 8.87,
+            weights_gb: Some(16.55),
+            ..Default::default()
+        };
+        assert!(under.below_weight_floor());
+        assert!((under.weight_ratio().unwrap() - 0.5359).abs() < 1e-3);
+
+        // The two legitimately-just-under entries must stay clear of it.
+        for (footprint, weights) in [(21.04, 21.50), (6.30, 6.46)] {
+            let fine = Measurement {
+                status: "ok".into(),
+                d_total: footprint,
+                weights_gb: Some(weights),
+                ..Default::default()
+            };
+            assert!(
+                !fine.below_weight_floor(),
+                "{footprint} of {weights} GB is normal partial residency, not a bad measure"
+            );
+        }
     }
 
     #[test]

@@ -23,6 +23,8 @@ budget      = 50.0                       # GB llama-matrix may plan against.
 margin      = 4.0                        # GB safety slack inside the budget.
 strategy    = "flat"                     # flat | family
 on_overflow = "group"                    # group | error  (over-cap / too-many-combos handling)
+on_unconfirmed  = "warn"                 # warn | exclude | error  (unconfirmed footprints, §7.2)
+probe_image_size = "1024x1024"           # WxH the image load-trigger generates at (§7)
 
 # ---- structured tables (hand-edited) ----
 
@@ -49,6 +51,8 @@ gemma = ["gemma-27b-q4", "gemma-27b-q4-nothink", "gemma-27b-abliterated-q5"]
 | `margin` | float (GB) | `4.0` | `ceiling = budget − margin` |
 | `strategy` | enum | `flat` | `flat` = no grouping (max flexibility); `family` = collapse `[groups]` |
 | `on_overflow` | enum | `group` | applies to **both** the 1000-combination cap and an intractably large maximal-pack enumeration. `group` = drop the over-cap set / keep the bounded packs + warn (a safe under-declaration); `error` = refuse |
+| `on_unconfirmed` | enum | `warn` | what `build` does with a footprint whose allocation was never confirmed (§7.2, and every entry written before that was recorded). `warn` = plan with it, but name it *and* the declared sets that depend on it; `exclude` = leave the model out of the matrix (a safe under-declaration); `error` = refuse to build |
+| `probe_image_size` | string `WxH` | `1024x1024` | resolution the image load-trigger generates at. A diffusion model's allocation scales with it, so this decides what an image footprint **means** - probe at the size you actually serve, since a footprint measured at 256x256 is only a floor for anything larger |
 
 ### 1.2 The `configure` surface
 
@@ -111,6 +115,10 @@ one entry per distinct footprint it has been measured at:
       "d_vram": 48.77, "d_gtt": 0.27,           // optional; omitted, never 0, when unknown
       "abs_total": 49.21, "abs_vram": 48.92, "abs_gtt": 0.29,
       "load_s": 42.0,         // seconds to ready → feeds evict_costs
+      "allocation_confirmed": true,   // was the load-trigger seen to finish? (§7.2)
+      "serving_verified": true,       // did /props confirm the served cmd? (§7.1)
+      "peak_total": 49.60,    // highest delta seen while allocating (insight only)
+      "weights_gb": 49.90,    // total size of the weight files the cmd names
       "params": "…the hashed (memory) cmd, human-readable…",
       "measured_at": "2026-01-01"
     }
@@ -135,6 +143,22 @@ matching param-hash is a roadmap item, not current behaviour.
 > recognised as unpopulated and cleared to "unknown" on read (a per-entry schema
 > version does not exist; `_box.json`'s `written_by` is box-level).
 
+> **`allocation_confirmed` is evidence, not decoration.** `status: "ok"` says a number
+> was recorded; this says the number is **complete** - the load-trigger was seen to
+> finish, and occupancy then stopped moving (§7.2). A footprint recorded without it may
+> be a mid-load plateau, which under-counts the matrix, the one error direction that
+> OOMs. `false` and *absent* carry the same weight (absent = the writer recorded no
+> confirmation), so every entry in a store written without the field is unconfirmed
+> until re-measured; `measure` treats such an entry as a cache **miss** and `build`
+> applies `on_unconfirmed`. `serving_verified` is the §7.1 sibling and is informational: it is
+> permanently unobtainable on some backends, so nothing gates on it.
+>
+> `peak_total` is the highest delta over baseline seen while the model was allocating,
+> recorded because a diffusion step can transiently allocate above what it leaves
+> resident. Nothing consumes it yet (`build` plans against `d_total`); it exists so
+> peak budgeting has data to work from. `weights_gb` totals the weight files the
+> command names, when they were readable at measure time.
+
 **Consumer rule (build):** for each model, compute its param-hash from the *current*
 config, read `measurements/<id>.json`, and select `measurements[hash]`.
 
@@ -155,7 +179,11 @@ measurement at the current hash is skipped with a warning: the build runs on
 partial data; **missing is never treated as fits.**
 
 **Retention & prune:** nothing is auto-deleted — a model removed from the config
-keeps its file (re-adding hits the cache). Pruning is **explicit only**
+keeps its file (re-adding hits the cache). A `FAILED` result likewise never overwrites
+an existing `ok` footprint at the same hash: a bad load in one sweep (a rejected
+trigger, a timeout during a `--force` re-measure) is no evidence against the stored
+number, and clobbering it would silently drop the model from every future matrix. The
+failure is reported in the sweep summary regardless. Pruning is **explicit only**
 (`llama-matrix prune`), which may drop entries whose weight file is gone from disk.
 
 **Migration:** a legacy single `measurements.json` (one blob, `models`/`baseline`/
@@ -219,7 +247,7 @@ capped at 1000 combinations per expression** — the product of that expression'
 referenced by `+aux` (omitted entirely when there are no aux models). Quant slots
 and mutually-exclusive units → `|`; co-resident pools (images, multi-unit packs) →
 `&`. Every emitted set satisfies `baseline + Σ(members at max quant) + aux_cost ≤
-ceiling` (Architecture §4.5) or the build fails. (llama-matrix emits no `vars:` — §3
+ceiling` (Architecture §4.6) or the build fails. (llama-matrix emits no `vars:`, see §3
 above; the `<name>` here are the model ids themselves.)
 
 ### 3.2 The generated marker
@@ -300,9 +328,9 @@ their `measurements/<id>.json` by hand (often ~0 GPU).
 
 ## 7. Load triggers (how `measure` forces a load)
 
-Fire the request **detached** and poll `/running` for `ready` — do not await the
-response (image generation blocks long after the model is resident). Even a request
-that will 400 on params still triggers the load.
+Fire the request on its own thread (the load has to be **in flight** while `/running`
+is polled for `ready`), then **wait for it to finish before sampling** - see §7.2 for
+why awaiting it is load-bearing rather than tidy.
 
 | type | endpoint | minimal body |
 |---|---|---|
@@ -310,7 +338,11 @@ that will 400 on params still triggers the load.
 | embed | `POST /v1/embeddings` | `{"model":M,"input":"x"}` |
 | rerank | `POST /v1/rerank` | `{"model":M,"query":"x","documents":["a","b"]}` |
 | stt | `POST /v1/audio/transcriptions` (multipart) | `model=M`, `file=@<tiny.wav>` |
-| image | `POST /v1/images/generations` | `{"model":M,"prompt":"a cat","size":"256x256"}` |
+| image | `POST /v1/images/generations` | `{"model":M,"prompt":"a cube","size":<probe_image_size>}` |
+
+The image body's `size` comes from `probe_image_size` (§1.1, default `1024x1024`), not
+a fixed token resolution: what a diffusion backend allocates scales with the
+resolution, so the probe size is what an image footprint is a measurement *of*.
 
 Adding a new type = add a row here (endpoint + minimal body) and, if it lives on a
 different service/port, point the trigger there. The measurement math is
@@ -353,6 +385,51 @@ at once.
 
 A model id missing from `GET /v1/models` is a **hint** only, used to explain a failed
 load: an `unlisted` model is absent from that roster and still loadable (§8).
+
+### 7.2 Allocation confirmation (`ready` is not `allocated`)
+
+llama-swap reports a model `ready` when its upstream answers HTTP. For llama.cpp that
+is after the allocation; for a **lazily-allocating backend it is not**. sd-server serves
+immediately and allocates its weights and compute buffers when a generation actually
+runs, so a footprint sampled at `ready` can be **under half** the truth, and is
+non-deterministic (it captures whatever the loader happened to have allocated when
+sampling started). Nothing about a plateau distinguishes it from a settled reading, so
+no amount of stabilizing fixes this: the sampler cannot tell mid-load quiet from
+post-load quiet.
+
+The trigger's completion is the signal, because for such a backend **the trigger's work
+is the allocation**:
+
+1. Fire the trigger (§7), poll `/running` for `ready`, cross-check the served command
+   (§7.1).
+2. **Await the trigger.** A 2xx means the work that allocates has finished. A non-2xx or
+   a transport failure means the model may be half-loaded or already tearing down, so
+   nothing is recorded beyond a `FAILED` entry naming the status. Overrunning the wait
+   budget (900 s, measured from when the trigger was **fired**, so it never stacks on
+   top of the 300 s ready timeout) records the reading with
+   `allocation_confirmed: false`.
+3. Only then stabilize (§8), requiring three consecutive quiet samples. Occupancy still
+   moving when sampling stops is also `allocation_confirmed: false`.
+4. Record `allocation_confirmed` with the measurement (§2), so the distinction survives
+   into `build` instead of dying in the sweep log.
+
+Two consequences that are part of the contract:
+
+- **No request outlives its model.** The sweep waits for the trigger (or waits it out)
+  before moving on, including after a failed load, so a request fired for one model can
+  never still be allocating during the next model's baseline read or sampling window.
+- **An unconfirmed entry is a cache miss.** `measure` re-measures it rather than
+  reporting `cached`, so no operator has to know which entries to distrust. A store
+  holding no confirmations re-measures in full; one holding them re-measures only what
+  is suspect.
+
+**The weights-on-disk floor.** A fully offloaded model cannot hold much less than its
+weights, so `measure` totals the weight files its command names (`weights_gb`) and flags
+any footprint below **0.90** of that total, in the sweep output and again in `build`'s
+warnings. A **warning, never a verdict**: partial offload (`-ngl` below all layers,
+`-ot`, `--cpu-moe`) is a legitimate reason to sit lower, and two verified image
+measurements sat at 0.97-0.98, which is why the floor is not 1.0. It needs no GPU and no
+cooperation from the backend, which is what makes it the cheapest cross-check available.
 
 ## 8. Server control endpoints (llama-swap)
 

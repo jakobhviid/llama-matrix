@@ -84,9 +84,8 @@ For each model in the config worklist:
 
 1. Unload everything (`POST /api/models/unload`; `GET /unload` is a legacy
    fallback); settle to a clean baseline (read once per sweep).
-2. Trigger the model to load via its type's endpoint (fire-and-forget; poll for
-   ready rather than awaiting the response — an image generation blocks long after
-   the model is already resident).
+2. Trigger the model to load via its type's endpoint, on its own thread so the load
+   is in flight while `/running` is polled.
 3. Poll `/running` until the model's state is `ready` — the only go signal.
    `starting` means wait; `stopping`/`stopped`/`shutdown` mean do-not-sample (a
    tearing-down model's reading is meaningless).
@@ -95,12 +94,22 @@ For each model in the config worklist:
    llama-swap serves whatever config *it* last reloaded, which is not necessarily the
    file we parsed. A mismatch records nothing and fails the model; an unconfirmable
    backend (image, STT) is measured and reported as unverified (SPEC §7.1).
-5. **Stabilize**: sample occupancy until two consecutive readings are within a
-   small epsilon (KV and compute buffers finish allocating *after* `ready`).
-6. Record the delta over baseline and the load time, plus the VRAM/GTT split when
+5. **Await the trigger.** `ready` means the upstream answers HTTP, which for a
+   lazily-allocating backend is long before its weights are resident: sd-server
+   allocates when a generation actually runs, so the trigger's own completion is the
+   allocation signal. A 2xx means the allocating work finished; a non-2xx or a
+   transport failure records `FAILED` naming the status (the model may be half
+   loaded); overrunning the budget records the reading as **unconfirmed**. Occupancy
+   is sampled throughout for its peak (SPEC §7.2).
+6. **Stabilize**: sample occupancy until three consecutive readings are within a
+   small epsilon (KV and compute buffers finish allocating *after* `ready`). Still
+   moving when sampling stops is also recorded as unconfirmed, rather than returned
+   as though it had settled.
+7. Record the delta over baseline and the load time, plus the VRAM/GTT split when
    the backend separates pools (AMD sysfs; a unified or single-pool device omits it
-   rather than recording zeros).
-7. Unload (all, or `POST /api/models/unload/:model_id` for just this one).
+   rather than recording zeros), the allocation peak, whether allocation and serving
+   were confirmed, and the total size of the weight files the command names.
+8. Unload (all, or `POST /api/models/unload/:model_id` for just this one).
 
 Then an **additivity check**: load a real co-resident combo, compare the measured
 total to `baseline + Σ(solo deltas)`. Footprints are additive to within a small
@@ -110,8 +119,19 @@ safety margin.
 Guards: a **pid lockfile** (two concurrent sweeps share the unload primitive and
 corrupt each other's readings); a **pre-check** that the weight file exists (a
 missing file exits the loader instantly — skip it with a clear message rather than
-burning the load timeout); and **failure classification** (missing-file vs timeout
-vs premature-exit) so a broken model is recorded, not retried forever.
+burning the load timeout); **failure classification** (missing-file vs timeout
+vs premature-exit) so a broken model is recorded, not retried forever; **no request
+outliving its model** (the trigger is awaited, or waited out, before the sweep moves
+on, so one model's generation can never allocate during the next model's sampling
+window); and the **weights-on-disk floor** (a fully offloaded model cannot hold much
+less than its weights, so a footprint below 0.90 of the total size of the weight files
+its command names is flagged - a warning, since partial offload legitimately sits
+lower).
+
+An **unconfirmed footprint is a cache miss**: `measure` re-measures it rather than
+reporting `cached`. That is what makes the incremental cache safe to trust, and it needs
+no operator judgement about which entries to distrust. A store holding no confirmations
+re-measures in full; a store holding them re-measures only what is suspect.
 
 ### 2.2 Phase 2 — build
 
@@ -257,7 +277,26 @@ maximal-pack enumeration that overruns its work budget (§4.3). There `group` ke
 the bounded packs found so far and warns; `error` refuses. Both are the identical
 "the roster is too big — group it or accept less" decision, so they share one knob.
 
-### 4.5 The invariant every build asserts
+### 4.5 Footprints that are not evidence
+
+A measurement carries whether the allocation it describes was confirmed to have
+finished (§2.1, SPEC §7.2). `build` cannot re-derive that - the number looks the same
+either way - so it is read from the store and turned into policy by `on_unconfirmed`:
+
+- **`warn`** (default) plans with the footprint, then names both the models and the
+  **declared sets that depend on them**, in the block's comment header and in `--json`.
+  Naming the sets is the point: "these combinations may not fit" is the risk, and
+  because aux rides along in every set, one unconfirmed aux model puts the whole matrix
+  on that list.
+- **`exclude`** drops the model from the matrix entirely, which is the same treatment an
+  unmeasurable model gets (Principle #2) and a safe under-declaration.
+- **`error`** refuses to build until the store has been re-measured.
+
+The weights-on-disk floor is re-checked here too, from the stored `weights_gb`, so a
+suspiciously small footprint is surfaced at the moment a matrix is generated from it and
+not only in the sweep that recorded it.
+
+### 4.6 The invariant every build asserts
 
 For **every** emitted set: `baseline + Σ(members at max quant) + aux_cost ≤
 ceiling`. A violation means the generator is unsafe — the build fails rather than

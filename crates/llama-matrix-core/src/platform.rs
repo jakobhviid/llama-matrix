@@ -14,7 +14,7 @@ use std::process::Command;
 use anyhow::{bail, Context, Result};
 
 /// Bytes per GiB (all footprints are GiB: bytes / 1073741824).
-const BYTES_PER_GIB: f64 = 1_073_741_824.0;
+pub const BYTES_PER_GIB: f64 = 1_073_741_824.0;
 
 /// A source of live GPU memory occupancy, summed across pools into one number.
 pub trait GpuMemory {

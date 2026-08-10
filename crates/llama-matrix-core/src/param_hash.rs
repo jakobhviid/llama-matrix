@@ -25,12 +25,17 @@ const STRIP_WITH_VALUE: &[&str] = &[
     "--reasoning",
     "--chat-template-file",
     "--cache-reuse",
-    // stable-diffusion.cpp runtime knobs (do not change the resident footprint):
+    // stable-diffusion.cpp sampling knobs: they change the work done per step, not
+    // what stays resident.
     "--steps",
     "--cfg-scale",
     "--guidance",
-    "--cache-mode",
-    "--cache-option",
+    // Deliberately NOT stripped, though they look like siblings of the above:
+    // `--cache-mode` / `--cache-option` (sd-server's easycache). A step cache holds
+    // intermediate tensors on the compute device, so toggling it - or changing its
+    // threshold, which changes how much is cached - plausibly changes the resident
+    // footprint. Under the rule in the module docs an uncertain flag stays in the
+    // hash: the cost is one extra measurement, never a wrong reuse.
 ];
 
 /// Bare flags (no value) that do not affect VRAM.
@@ -102,6 +107,24 @@ mod tests {
         let h = param_hash("/app/llama-server -m /x.gguf -c 4096");
         assert_eq!(h.len(), 12);
         assert!(h.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    /// A sampling knob is footprint-neutral, but a device-side step cache is not:
+    /// `--cache-mode`/`--cache-option` stay in the hash, so flipping easycache buys
+    /// a fresh measurement instead of reusing a footprint taken without it.
+    #[test]
+    fn sampling_knobs_are_stripped_but_the_step_cache_is_not() {
+        let base = "/opt/sdcpp/bin/sd-server --diffusion-model /sd/u.gguf --steps 16 --cfg-scale 4.0";
+        let restepped =
+            "/opt/sdcpp/bin/sd-server --diffusion-model /sd/u.gguf --steps 28 --cfg-scale 6.0";
+        assert_eq!(param_hash(base), param_hash(restepped));
+
+        let cached = "/opt/sdcpp/bin/sd-server --diffusion-model /sd/u.gguf --steps 16 \
+                      --cfg-scale 4.0 --cache-mode easycache --cache-option threshold=0.05";
+        assert_ne!(param_hash(base), param_hash(cached));
+        // …and the threshold itself is part of the key.
+        let looser = cached.replace("threshold=0.05", "threshold=0.2");
+        assert_ne!(param_hash(&looser), param_hash(cached));
     }
 
     #[test]

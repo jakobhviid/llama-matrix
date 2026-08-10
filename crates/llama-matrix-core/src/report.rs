@@ -24,6 +24,10 @@ pub struct BuildPreview {
     pub heavies: usize,
     pub sets: usize,
     pub excluded: Vec<String>,
+    /// Models packed from a footprint whose allocation was never confirmed, so the
+    /// sets containing them may not fit (SPEC §7.2). Machine-readable because the
+    /// default `on_unconfirmed = "warn"` still emits them.
+    pub unconfirmed: Vec<String>,
     pub warnings: Vec<String>,
 }
 
@@ -37,6 +41,7 @@ impl BuildPreview {
             heavies: plan.n_heavies,
             sets: plan.sets.len(),
             excluded: plan.excluded.clone(),
+            unconfirmed: plan.unconfirmed.clone(),
             warnings: plan.warnings.clone(),
         }
     }
@@ -52,6 +57,9 @@ pub struct BuildApplied {
     pub packs: usize,
     pub heavies: usize,
     pub sets: usize,
+    /// As `BuildPreview::unconfirmed` - carried here too, so applying a matrix built
+    /// on unconfirmed footprints is visible in the machine-readable record of it.
+    pub unconfirmed: Vec<String>,
 }
 
 /// `build --out FILE`: where the block was written.
@@ -70,6 +78,7 @@ pub struct Drift {
     pub packs: usize,
     pub heavies: usize,
     pub excluded: Vec<String>,
+    pub unconfirmed: Vec<String>,
 }
 
 /// `prune`: what was removed, or (with `status`) why there was nothing to do.

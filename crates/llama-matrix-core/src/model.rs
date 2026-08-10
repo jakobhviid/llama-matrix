@@ -62,6 +62,33 @@ pub fn primary_file(cmd: &str) -> Option<String> {
     None
 }
 
+/// Extensions that name a weight file a backend loads into memory.
+///
+/// Used to total a model's weights on disk, which is a floor on the footprint of a
+/// fully offloaded model (see `measure`). Deliberately extension-driven rather than
+/// a flag allowlist: one command names its weights across many flags (`-m`,
+/// `--diffusion-model`, `--vae`, `--t5xxl`, `--llm`, `--mmproj`, ...) and the next
+/// backend invents more, so an allowlist silently misses one while the extension
+/// keeps holding.
+const WEIGHT_EXTENSIONS: &[&str] = &[".gguf", ".safetensors", ".bin", ".ckpt", ".pt", ".pth"];
+
+/// Every weight file the command names, in order, deduplicated.
+///
+/// Callers stat these, so a token that merely looks like a path costs nothing and a
+/// path that isn't readable (an unmapped container path) simply doesn't count.
+pub fn weight_files(cmd: &str) -> Vec<String> {
+    let mut files: Vec<String> = Vec::new();
+    for token in cmd.split_whitespace() {
+        let lowered = token.to_ascii_lowercase();
+        if WEIGHT_EXTENSIONS.iter().any(|extension| lowered.ends_with(extension))
+            && !files.iter().any(|seen| seen == token)
+        {
+            files.push(token.to_string());
+        }
+    }
+    files
+}
+
 /// Does this command look like a placeholder proxy rather than a real server
 /// (e.g. `sleep infinity`)? Such entries allocate no GPU and are excluded from
 /// the measure worklist.
@@ -139,6 +166,30 @@ mod tests {
             Some("/models/a.gguf".to_string())
         );
         assert_eq!(primary_file("/app/llama-server -ngl 99"), None);
+    }
+
+    #[test]
+    fn weight_files_collects_every_named_file() {
+        // A diffusion command names its weights across four different flags; the
+        // footprint floor needs all of them, not just the primary file.
+        let sd = "/opt/sdcpp/bin/sd-server --diffusion-model /sd/unet/z.Q6_K.gguf \
+                  --llm /sd/text_encoders/qwen3.Q4_K_M.gguf --vae /sd/vae/ae.safetensors \
+                  --diffusion-fa --vae-tiling --steps 8";
+        assert_eq!(
+            weight_files(sd),
+            vec![
+                "/sd/unet/z.Q6_K.gguf".to_string(),
+                "/sd/text_encoders/qwen3.Q4_K_M.gguf".to_string(),
+                "/sd/vae/ae.safetensors".to_string(),
+            ]
+        );
+        // whisper's `.bin`, and a repeated path counted once.
+        assert_eq!(
+            weight_files("/opt/whisper/bin/whisper-server -m /m/ggml.bin --model /m/ggml.bin"),
+            vec!["/m/ggml.bin".to_string()]
+        );
+        // Non-weight tokens (an output path, a template) are not weights.
+        assert!(weight_files("/app/llama-server -ngl 99 -o /tmp/out.png").is_empty());
     }
 
     #[test]

@@ -16,7 +16,7 @@ use anyhow::{bail, Result};
 use crate::cache::Store;
 use crate::config;
 use crate::model::ModelType;
-use crate::policy::{OnOverflow, Policy, Strategy};
+use crate::policy::{OnOverflow, OnUnconfirmed, Policy, Strategy};
 
 /// Work budget for maximal-pack enumeration. Enumerating maximal fitting packs is
 /// worst-case exponential in the light-unit count, so the recursion runs under a
@@ -93,6 +93,11 @@ pub struct MatrixPlan {
     pub sets: Vec<EmittedSet>,
     pub warnings: Vec<String>,
     pub excluded: Vec<String>,
+    /// Models whose footprint was recorded without confirming the allocation
+    /// finished, so it may be under-measured (SPEC §7.2). Named here whatever
+    /// `on_unconfirmed` did with them, so a `--json` consumer can see them even under
+    /// the default `warn`, where they are still packed.
+    pub unconfirmed: Vec<String>,
     pub baseline: f64,
     pub budget: f64,
     pub margin: f64,
@@ -135,17 +140,57 @@ pub fn resolve_plan(
 
     let mut footprints = Vec::new();
     let mut unmeasured = Vec::new();
+    // A footprint whose allocation was never confirmed may be a mid-load plateau
+    // rather than the real number, which is the one error direction that OOMs
+    // (Principle 1). `on_unconfirmed` decides what to do about it; either way the ids
+    // are named in the plan so no consumer has to guess which numbers are evidence.
+    let mut unconfirmed: Vec<String> = Vec::new();
+    let mut dropped_unconfirmed: Vec<String> = Vec::new();
+    let mut suspect: Vec<String> = Vec::new();
     for record in &parsed.models {
-        match store.select(&record.id, &record.param_hash)? {
-            Some(measurement) => footprints.push(ModelFootprint {
-                id: record.id.clone(),
-                model_type: record.model_type,
-                primary_file: record.primary_file.clone(),
-                d_total: measurement.d_total,
-                load_s: measurement.load_s,
-            }),
-            None => unmeasured.push(record.id.clone()),
+        let Some(measurement) = store.select(&record.id, &record.param_hash)? else {
+            unmeasured.push(record.id.clone());
+            continue;
+        };
+        if !measurement.is_confirmed() {
+            unconfirmed.push(record.id.clone());
+            match policy.on_unconfirmed {
+                OnUnconfirmed::Error => bail!(
+                    "`{}`'s footprint was recorded without confirming that the model finished \
+                     allocating, so it may be under-measured and a matrix built from it may not \
+                     fit; re-run `llama-matrix measure`, or set `on_unconfirmed` to \"warn\" or \
+                     \"exclude\"",
+                    record.id
+                ),
+                OnUnconfirmed::Exclude => {
+                    dropped_unconfirmed.push(record.id.clone());
+                    continue;
+                }
+                OnUnconfirmed::Warn => {}
+            }
         }
+        if let (true, Some(ratio), Some(weights)) = (
+            measurement.below_weight_floor(),
+            measurement.weight_ratio(),
+            measurement.weights_gb,
+        ) {
+            suspect.push(format!(
+                "`{}` measured {:.2} GB, only {:.0}% of the {weights:.2} GB of weight files its \
+                 command names - a fully offloaded model cannot hold much less than its weights, \
+                 so this footprint may be under-measured (partial offload with -ngl/-ot/--cpu-moe \
+                 is a legitimate reason to sit lower)",
+                record.id,
+                measurement.d_total,
+                ratio * 100.0
+            ));
+        }
+        footprints.push(ModelFootprint {
+            id: record.id.clone(),
+            model_type: record.model_type,
+            primary_file: record.primary_file.clone(),
+            d_total: measurement.d_total,
+            load_s: measurement.load_s,
+        });
     }
 
     let mut plan = build(&BuildInput {
@@ -155,7 +200,66 @@ pub fn resolve_plan(
         budget,
     })?;
     plan.excluded.extend(unmeasured);
+    plan.warnings.extend(suspect);
+    if !dropped_unconfirmed.is_empty() {
+        plan.warnings.push(format!(
+            "{} footprint(s) were recorded without confirming that the model finished allocating, \
+             and are excluded from the matrix (a safe under-declaration): {} - re-run \
+             `llama-matrix measure` to confirm them",
+            dropped_unconfirmed.len(),
+            dropped_unconfirmed.join(", ")
+        ));
+        plan.excluded.extend(dropped_unconfirmed);
+    } else if !unconfirmed.is_empty() {
+        // Naming the *sets* is the point: the models alone read as a housekeeping
+        // note, while "these declared combinations may not fit" is the actual risk,
+        // and one unconfirmed aux model puts every set on that list.
+        let dependents = sets_naming(&plan.sets, &unconfirmed);
+        plan.warnings.push(format!(
+            "{} footprint(s) recorded without confirming the model finished allocating, so \
+             possibly under-measured: {}. Declared sets that depend on them, which may therefore \
+             not fit: {}. Re-run `llama-matrix measure` to confirm them, or set `on_unconfirmed` \
+             to \"exclude\" to leave them out of the matrix",
+            unconfirmed.len(),
+            unconfirmed.join(", "),
+            if dependents.is_empty() { "none".to_string() } else { dependents.join(", ") }
+        ));
+    }
+    plan.unconfirmed = unconfirmed;
     Ok(plan)
+}
+
+/// The model ids and `+helper` references a set expression names.
+fn expr_tokens(expr: &str) -> impl Iterator<Item = &str> {
+    expr.split(|character: char| {
+        character.is_whitespace() || matches!(character, '&' | '|' | '(' | ')')
+    })
+    .filter(|token| !token.is_empty())
+}
+
+/// Names of the emitted sets that depend on any of `ids`, directly or through a
+/// helper set (`+g_*`, `+aux`) that names one.
+///
+/// The indirection is the interesting half: a variant-collapsed model appears in a
+/// pack only as `+g_<key>`, and an aux model appears only as `+aux` - so a single
+/// under-measured aux model taints *every* set, which a direct-only search would
+/// report as tainting none.
+fn sets_naming(sets: &[EmittedSet], ids: &[String]) -> Vec<String> {
+    let names_an_id =
+        |expr: &str| expr_tokens(expr).any(|token| ids.iter().any(|id| id == token));
+    let helper_refs: Vec<String> = sets
+        .iter()
+        .filter(|set| names_an_id(&set.expr))
+        .map(|set| format!("+{}", set.name))
+        .collect();
+    sets.iter()
+        .filter(|set| {
+            names_an_id(&set.expr)
+                || expr_tokens(&set.expr)
+                    .any(|token| helper_refs.iter().any(|reference| reference == token))
+        })
+        .map(|set| set.name.clone())
+        .collect()
 }
 
 /// Sanitize an id into a DSL-safe set-name fragment.
@@ -638,6 +742,9 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
         sets,
         warnings,
         excluded,
+        // Filled by `resolve_plan`, which is the layer that reads the store: the pure
+        // builder is handed footprints and has no notion of their provenance.
+        unconfirmed: Vec::new(),
         baseline,
         budget,
         margin: policy.margin,
@@ -651,6 +758,178 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::cache::{BoxMeta, Measurement, ModelStore};
+    use crate::param_hash::param_hash;
+
+    const EMBED_CMD: &str = "/app/llama-server -m /models/e.gguf --embedding -c 8192";
+    const CHAT_CMD: &str = "/app/llama-server -m /models/chat.gguf -ngl 99 -c 4096";
+    const IMG_CMD: &str = "/opt/sdcpp/bin/sd-server --diffusion-model /sd/u.gguf";
+
+    /// A working directory holding a llama-swap config plus a measurement store, where
+    /// `unconfirmed` names the ids whose entries carry no allocation confirmation.
+    fn store_and_config(dir: &std::path::Path, unconfirmed: &[&str]) -> (String, Store) {
+        let config_path = dir.join("config.yaml");
+        std::fs::write(
+            &config_path,
+            format!(
+                "models:\n  \"embed\":\n    cmd: \"{EMBED_CMD}\"\n  \"chat\":\n    cmd: \
+                 \"{CHAT_CMD}\"\n  \"img\":\n    cmd: \"{IMG_CMD}\"\n"
+            ),
+        )
+        .unwrap();
+
+        let store = Store::new(dir.join("measurements"));
+        store
+            .write_box(&BoxMeta {
+                baseline: 0.16,
+                detected_total: Some(100.0),
+                ..Default::default()
+            })
+            .unwrap();
+        for (id, cmd, model_type, d_total) in [
+            ("embed", EMBED_CMD, "embed", 7.0),
+            ("chat", CHAT_CMD, "llm", 30.0),
+            ("img", IMG_CMD, "image", 8.87),
+        ] {
+            let mut measurements = indexmap::IndexMap::new();
+            measurements.insert(
+                param_hash(cmd),
+                Measurement {
+                    status: "ok".to_string(),
+                    d_total,
+                    load_s: 10.0,
+                    allocation_confirmed: Some(!unconfirmed.contains(&id)),
+                    ..Default::default()
+                },
+            );
+            store
+                .write_model(
+                    id,
+                    &ModelStore {
+                        model_type: model_type.to_string(),
+                        file: None,
+                        measurements,
+                    },
+                )
+                .unwrap();
+        }
+        (config_path.display().to_string(), store)
+    }
+
+    fn budgeted(on_unconfirmed: OnUnconfirmed) -> Policy {
+        Policy {
+            budget: Some(100.0),
+            on_unconfirmed,
+            ..Policy::default()
+        }
+    }
+
+    /// Under the default `warn` the footprint is still packed, so the warning has to
+    /// carry the risk: which models are unconfirmed *and* which declared sets they
+    /// put in doubt.
+    #[test]
+    fn an_unconfirmed_footprint_is_named_along_with_the_sets_it_taints() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config_path, store) = store_and_config(dir.path(), &["img"]);
+
+        let plan = resolve_plan(&config_path, &budgeted(OnUnconfirmed::Warn), None, &store).unwrap();
+
+        assert_eq!(plan.unconfirmed, vec!["img".to_string()]);
+        assert!(
+            plan.sets.iter().any(|set| set.expr.contains("img")),
+            "`warn` keeps packing it"
+        );
+        let warning = plan
+            .warnings
+            .iter()
+            .find(|warning| warning.contains("without confirming"))
+            .expect("an unconfirmed footprint must warn");
+        assert!(warning.contains("img"), "{warning}");
+        let dependents = sets_naming(&plan.sets, &plan.unconfirmed);
+        assert!(!dependents.is_empty(), "the image sets depend on it");
+        for set in dependents {
+            assert!(warning.contains(&set), "set {set} missing from: {warning}");
+        }
+    }
+
+    /// aux rides along in every set, so one unconfirmed aux model puts the whole
+    /// matrix in doubt - reached only through the `+aux` indirection.
+    #[test]
+    fn an_unconfirmed_aux_footprint_taints_every_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config_path, store) = store_and_config(dir.path(), &["embed"]);
+
+        let plan = resolve_plan(&config_path, &budgeted(OnUnconfirmed::Warn), None, &store).unwrap();
+        let warning = plan
+            .warnings
+            .iter()
+            .find(|warning| warning.contains("without confirming"))
+            .expect("an unconfirmed footprint must warn");
+        for set in &plan.sets {
+            assert!(warning.contains(&set.name), "set {} missing from: {warning}", set.name);
+        }
+    }
+
+    #[test]
+    fn on_unconfirmed_exclude_drops_it_and_error_refuses() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config_path, store) = store_and_config(dir.path(), &["img"]);
+
+        let plan =
+            resolve_plan(&config_path, &budgeted(OnUnconfirmed::Exclude), None, &store).unwrap();
+        assert!(plan.excluded.contains(&"img".to_string()));
+        for set in &plan.sets {
+            assert!(!set.expr.contains("img"), "excluded model appears in {}", set.name);
+        }
+        // The other two models still build normally.
+        assert!(plan.sets.iter().any(|set| set.expr.contains("chat")));
+
+        assert!(
+            resolve_plan(&config_path, &budgeted(OnUnconfirmed::Error), None, &store).is_err(),
+            "`error` must refuse rather than emit"
+        );
+    }
+
+    /// The cheap invariant, at build time: a stored footprint below the weights it
+    /// loads is surfaced even though it is confirmed and packed.
+    #[test]
+    fn a_footprint_below_its_weights_on_disk_is_flagged() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config_path, store) = store_and_config(dir.path(), &[]);
+        // Same shape as the reported failure: 8.87 GB recorded against 16.55 GB of
+        // weight files (0.54), but confirmed, so only the floor can catch it.
+        let mut measurements = indexmap::IndexMap::new();
+        measurements.insert(
+            param_hash(IMG_CMD),
+            Measurement {
+                status: "ok".to_string(),
+                d_total: 8.87,
+                load_s: 12.0,
+                allocation_confirmed: Some(true),
+                weights_gb: Some(16.55),
+                ..Default::default()
+            },
+        );
+        store
+            .write_model(
+                "img",
+                &ModelStore {
+                    model_type: "image".to_string(),
+                    file: None,
+                    measurements,
+                },
+            )
+            .unwrap();
+
+        let plan = resolve_plan(&config_path, &budgeted(OnUnconfirmed::Warn), None, &store).unwrap();
+        assert!(plan.unconfirmed.is_empty(), "this entry is confirmed");
+        assert!(
+            plan.warnings.iter().any(|warning| warning.contains("`img` measured 8.87 GB, only 54%")),
+            "expected a weights-floor warning, got {:?}",
+            plan.warnings
+        );
+    }
 
     fn footprint(
         id: &str,

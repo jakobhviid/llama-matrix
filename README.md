@@ -125,7 +125,11 @@ command plus the design) — readable by a human *or* an LLM/agent. See
 
 `measure` loads each model alone and reads live GPU occupancy after allocation
 settles, caching the delta over an empty baseline in a per-model measurement store
-(keyed so that flipping a non-memory flag never re-measures). `build` collapses each model's
+(keyed so that flipping a non-memory flag never re-measures). "Settles" is
+load-bearing: llama-swap reports a model ready when its server answers, which for an
+image backend is *before* it has allocated anything (the generation is the
+allocation), so `measure` waits for the load-trigger to finish, then for occupancy to
+go quiet, and records whether it got that confirmation. `build` collapses each model's
 interchangeable quant/`-nothink` variants into one unit, then finds every *maximal*
 combination that fits under `ceiling = budget − margin` — because llama-swap treats
 any subset of a declared set as valid, declaring the maximal groups licenses all the
@@ -160,6 +164,16 @@ All of the above are compiled into `llama-matrix --llm`.
 - `measure` needs a supported GPU sensor (AMD sysfs, NVIDIA, or Apple Silicon via
   Metal unified memory); `build` works anywhere from an existing measurement store
   and a supplied `--budget`.
+- An **image footprint is measured at `probe_image_size`** (default `1024x1024`): what
+  a diffusion model allocates scales with the resolution it generates at, so a
+  footprint probed small is only a floor for anything larger. Set it to the size you
+  actually serve (`llama-matrix configure set probe_image_size 1024x1024`).
+- A footprint whose allocation could not be **confirmed** (the load-trigger never
+  returned, or occupancy never went quiet) is still recorded, and by default still
+  planned with, while naming the sets it puts in doubt. Tighten that with
+  `configure set on_unconfirmed exclude` (leave those models out) or `error` (refuse
+  to build). An unconfirmed footprint is re-measured on the next sweep rather than
+  reused, so a store that holds none sweeps in full.
 - Model **type** is inferred from the launch command (`sd-server` → image,
   `whisper-server` → stt, `--embedding`/`--reranking` → embed/rerank, else llm). An
   unusual backend binary falls back to `llm`; if its load-trigger then doesn't fit
