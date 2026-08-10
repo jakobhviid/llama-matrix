@@ -90,10 +90,17 @@ For each model in the config worklist:
 3. Poll `/running` until the model's state is `ready` — the only go signal.
    `starting` means wait; `stopping`/`stopped`/`shutdown` mean do-not-sample (a
    tearing-down model's reading is meaningless).
-4. **Stabilize**: sample occupancy until two consecutive readings are within a
+4. **Cross-check** that the server which just loaded is running the command we
+   hashed, by reading its own `/props` through llama-swap's `/upstream/<id>/` route:
+   llama-swap serves whatever config *it* last reloaded, which is not necessarily the
+   file we parsed. A mismatch records nothing and fails the model; an unconfirmable
+   backend (image, STT) is measured and reported as unverified (SPEC §7.1).
+5. **Stabilize**: sample occupancy until two consecutive readings are within a
    small epsilon (KV and compute buffers finish allocating *after* `ready`).
-5. Record the delta over baseline, the VRAM/GTT split, and the load time.
-6. Unload (all, or `POST /api/models/unload/:model_id` for just this one).
+6. Record the delta over baseline and the load time, plus the VRAM/GTT split when
+   the backend separates pools (AMD sysfs; a unified or single-pool device omits it
+   rather than recording zeros).
+7. Unload (all, or `POST /api/models/unload/:model_id` for just this one).
 
 Then an **additivity check**: load a real co-resident combo, compare the measured
 total to `baseline + Σ(solo deltas)`. Footprints are additive to within a small
@@ -154,6 +161,10 @@ knobs, etc. — is stripped; everything else is hashed). Consequences:
   old one. Revert later → the old hash hits instantly. Nothing is thrown away.
 - The strip-list is deliberately conservative: an unlisted-but-irrelevant flag
   causes a harmless extra measure, never a wrong reuse (Principle #6).
+- Lookup is by **exact hash, and a miss is a miss**: an entry stored under another
+  hash was measured under different memory flags, so reusing it would be the wrong
+  cache hit Principle #6 forbids. The one carve-out is a `tts-proxy` entry, which is
+  keyed by hand because it is never measured (SPEC §2 consumer rule).
 
 **Storage.** The cache is a `measurements/` directory beside `llama-matrix.toml` —
 **one JSON file per model** (`<model-id>.json`, holding that model's param-hash-keyed

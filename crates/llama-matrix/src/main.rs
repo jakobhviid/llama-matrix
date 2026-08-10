@@ -499,6 +499,10 @@ fn cmd_measure(
         // Failure-aware headline (D3): a green ✓ must not sit atop a run that
         // failed. When any model failed or was skipped, flag the headline with ⚠
         // (glyph + the counts in the text), since the exit status stays 0.
+        // An unconfirmable serving check does *not* escalate the headline: having no
+        // /props is a permanent property of a backend (image, STT), so every sweep on
+        // such a roster would carry a ⚠ and train the operator to ignore it. It gets
+        // its own warning line below instead.
         if summary.failed.is_empty() && summary.skipped_missing.is_empty() {
             ui::ok(&headline);
         } else {
@@ -509,6 +513,14 @@ fn cmd_measure(
         }
         for id in &summary.skipped_missing {
             ui::warn(&format!("{id}: weight file missing — skipped"));
+        }
+        if !summary.unverified_serving.is_empty() {
+            ui::warn(&format!(
+                "{} model(s) recorded without confirming llama-swap loaded the measured \
+                 command (no /props on that backend): {}",
+                summary.unverified_serving.len(),
+                summary.unverified_serving.join(", ")
+            ));
         }
     }
     Ok(())
@@ -727,6 +739,35 @@ mod doc_tests {
                 SPEC.contains(setting.key),
                 "SPEC.md never mentions the `{}` setting - document it or drop the key",
                 setting.key
+            );
+        }
+    }
+
+    /// The store schema is a published contract (SPEC §2 shows it field by field),
+    /// and a field nobody documents is how the per-pool split came to be described
+    /// as recorded while nothing wrote it. Serialize a fully populated measurement
+    /// and require every key to appear in SPEC.md.
+    #[test]
+    fn every_measurement_field_is_documented_in_spec() {
+        let populated = llama_matrix_core::cache::Measurement {
+            status: "ok".into(),
+            d_total: 49.05,
+            d_vram: Some(48.77),
+            d_gtt: Some(0.27),
+            abs_total: 49.21,
+            abs_vram: Some(48.92),
+            abs_gtt: Some(0.29),
+            load_s: 42.0,
+            params: "/app/llama-server -m /m.gguf -c 4096".into(),
+            measured_at: "2026-01-01".into(),
+        };
+        let serde_json::Value::Object(fields) = serde_json::to_value(&populated).unwrap() else {
+            panic!("a measurement serializes to a JSON object");
+        };
+        for key in fields.keys() {
+            assert!(
+                SPEC.contains(&format!("\"{key}\"")),
+                "SPEC.md §2 never shows the `{key}` measurement field - document it or drop it"
             );
         }
     }

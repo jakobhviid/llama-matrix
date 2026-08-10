@@ -108,7 +108,7 @@ one entry per distinct footprint it has been measured at:
     "b7e718dc3aac": {         // param-hash of the footprint-affecting flags
       "status": "ok",         // ok | FAILED
       "d_total": 49.05,       // GB delta over baseline — the primary number
-      "d_vram": 48.77, "d_gtt": 0.27,
+      "d_vram": 48.77, "d_gtt": 0.27,           // optional; omitted, never 0, when unknown
       "abs_total": 49.21, "abs_vram": 48.92, "abs_gtt": 0.29,
       "load_s": 42.0,         // seconds to ready → feeds evict_costs
       "params": "…the hashed (memory) cmd, human-readable…",
@@ -118,21 +118,41 @@ one entry per distinct footprint it has been measured at:
 }
 ```
 
-The filename is the model id (a legible 1:1 with config entries). Lookup is by
-param-hash regardless of filename, so a model whose id was renamed can be recovered
-by scanning the directory for a matching param-hash before re-measuring.
+The filename is the model id (a legible 1:1 with config entries), and lookup opens
+that file directly. Renaming a model id therefore orphans its file and re-measures
+under the new name; recovering the old footprint by scanning the directory for a
+matching param-hash is a roadmap item, not current behaviour.
 
-> The VRAM/GTT split fields (`d_vram`/`d_gtt`/`abs_vram`/`abs_gtt`) are recorded as
-> `0` in the current build — the platform layer reports summed occupancy, and
-> `build` consumes only `d_total`. They are reserved for a future per-pool sensor.
+> **The per-pool fields are optional.** `d_vram`/`d_gtt`/`abs_vram`/`abs_gtt` are
+> written only by a backend that can separate pools (AMD `amdgpu` sysfs, which reads
+> `mem_info_vram_used` + `mem_info_gtt_used`). A single-pool or unified-memory
+> backend (NVIDIA, Apple Silicon) **omits them entirely** rather than writing `0`, so
+> a recorded `0` always means a measured zero and never "not measured". `build`
+> consumes only `d_total` either way.
+>
+> Entries written before this distinction existed carry a literal `0` in all four.
+> A nonzero total cannot hold zero in *both* pools, so that combination is
+> recognised as unpopulated and cleared to "unknown" on read (a per-entry schema
+> version does not exist; `_box.json`'s `written_by` is box-level).
 
 **Consumer rule (build):** for each model, compute its param-hash from the *current*
-config, read `measurements/<id>.json`, and select `measurements[hash]`. Hand-set
-proxy entries not in the config worklist fall back to their sole `ok` measurement.
+config, read `measurements/<id>.json`, and select `measurements[hash]`.
+
+**A hash miss is a miss.** The param-hash covers every flag known to affect the
+footprint, so an entry under a *different* hash was measured under different memory
+flags and is not this model's footprint: reusing it would report a cache hit,
+skip the re-measure, and plan the knapsack against a stale number (the exact
+under-count §1 and §6 exist to prevent). The sole exception is a **hand-set proxy
+entry**: a model typed `tts-proxy`, which is excluded from the measure worklist and
+so is keyed by hand rather than by a config-derived hash (§6). Such an entry
+resolves without a hash match, and only when it is the model's *only* `ok` entry.
+The carve-out is on the model's **type**, never on "this model happens to have one
+measurement".
+
 Use `d_total` for fit math, `load_s` for eviction cost. `FAILED` entries carry no
-footprint and are excluded. A model with no `ok` measurement at the current hash is
-skipped with a warning — the build runs on partial data; **missing is never treated
-as fits.**
+footprint and are excluded (including at a matching hash). A model with no `ok`
+measurement at the current hash is skipped with a warning: the build runs on
+partial data; **missing is never treated as fits.**
 
 **Retention & prune:** nothing is auto-deleted — a model removed from the config
 keeps its file (re-adding hits the cache). Pruning is **explicit only**
@@ -141,7 +161,10 @@ keeps its file (re-adding hits the cache). Pruning is **explicit only**
 **Migration:** a legacy single `measurements.json` (one blob, `models`/`baseline`/
 `additivity_check` at top level) is read and split into the per-model layout on
 first write; a legacy flat (one-measurement-per-model) entry is re-keyed under the
-model's current param-hash.
+model's current param-hash. The reference tooling read both memory pools directly,
+so **migrated entries usually carry a real VRAM/GTT split even where a
+llama-matrix-written entry beside them has none**: a difference in provenance, not
+in write path.
 
 ---
 
@@ -292,6 +315,44 @@ that will 400 on params still triggers the load.
 Adding a new type = add a row here (endpoint + minimal body) and, if it lives on a
 different service/port, point the trigger there. The measurement math is
 type-agnostic; only the load trigger differs.
+
+### 7.1 Serving cross-check (the loaded cmd must be the hashed cmd)
+
+`measure` derives the param-hash and `params` from the config **file**, but the load
+runs through llama-swap, which serves whatever config **it** last hot-reloaded. When
+those disagree (the file was edited underneath it, the reload hasn't landed, or
+`--config` points at a copy), the footprint would be filed under the new hash while
+describing a command that never ran: wrong data that never self-corrects, because
+the hash then looks present.
+
+No llama-swap endpoint reports a model's `cmd` (checked against v247), so the served
+command is confirmed through the loaded server itself: `GET /upstream/<id>/props`
+returns llama.cpp's `default_generation_settings.n_ctx` and `total_slots`.
+
+**`-c` is not always the same quantity**, which the comparison has to respect.
+Measured on one llama-swap v247 against one llama.cpp build:
+
+| config | reported `n_ctx` | `total_slots` |
+|---|---|---|
+| `-c 262144 -np 2` | `131072` (`-c` divided by slots) | 2 |
+| `-c 8192`, no `-np` | `8192` (`-c` itself) | 4 |
+
+So the declared `-c` is accepted when it matches **either** the per-slot figure or
+the reconstructed total (`n_ctx x total_slots`, allowing `slots - 1` tokens for the
+integer division), and `total_slots` is compared **only** when the command states
+`-np` (its default is neither 1 nor derivable from the command). That is still
+decisive for the failure being guarded: any change to `-c` makes both readings wrong
+at once.
+
+- **Mismatch** → record nothing and report the model as failed with both numbers.
+  Storing it is the one outcome that must not happen (§1 of `PRINCIPLES.md`).
+- **Unconfirmable** → measure and record, but list the model in the summary's
+  `unverified_serving`. There is no `/props` on an image or STT backend, and none to
+  compare against when the command says `-c 0` (resolved from the model at load).
+  Reported rather than passed off as verified (fail loud, never silent).
+
+A model id missing from `GET /v1/models` is a **hint** only, used to explain a failed
+load: an `unlisted` model is absent from that roster and still loadable (§8).
 
 ## 8. Server control endpoints (llama-swap)
 

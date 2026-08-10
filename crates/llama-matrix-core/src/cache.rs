@@ -11,6 +11,8 @@ use anyhow::{Context, Result};
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
+use crate::model::ModelType;
+
 /// The reserved box-level file name inside `measurements/`.
 pub const BOX_FILE: &str = "_box.json";
 
@@ -68,22 +70,28 @@ pub struct AdditivityCheck {
 }
 
 /// One measured footprint, keyed in a model's file by its param-hash.
+///
+/// The per-pool fields (`d_vram`/`d_gtt`/`abs_vram`/`abs_gtt`) are `Option`: a
+/// backend with one pool (or a unified one, where the split has no meaning) omits
+/// them rather than writing `0`, so a recorded zero always means *measured zero*
+/// and never *not measured*. See [`ModelStore::normalize_pool_split`] for the
+/// entries written before that distinction existed.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Measurement {
     /// "ok" | "FAILED".
     pub status: String,
     #[serde(default)]
     pub d_total: f64,
-    #[serde(default)]
-    pub d_vram: f64,
-    #[serde(default)]
-    pub d_gtt: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub d_vram: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub d_gtt: Option<f64>,
     #[serde(default)]
     pub abs_total: f64,
-    #[serde(default)]
-    pub abs_vram: f64,
-    #[serde(default)]
-    pub abs_gtt: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub abs_vram: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub abs_gtt: Option<f64>,
     #[serde(default)]
     pub load_s: f64,
     /// The hashed (memory) command, human-readable.
@@ -108,6 +116,45 @@ pub struct ModelStore {
     pub file: Option<String>,
     #[serde(default)]
     pub measurements: IndexMap<String, Measurement>,
+}
+
+impl ModelStore {
+    /// Is this a hand-set proxy entry (a fronted service with a placeholder `cmd`,
+    /// typed `tts-proxy`)? Such models are excluded from the measure worklist, so
+    /// their footprint is written by hand under a key of the operator's choosing
+    /// rather than a param-hash: the one case [`Store::select`] may resolve without
+    /// a hash match. See SPEC.md §2, §6.
+    fn is_hand_set_proxy(&self) -> bool {
+        self.model_type == ModelType::TtsProxy.as_str()
+    }
+
+    /// Rewrite a `0`/`0` pool split as "not measured" (`None`).
+    ///
+    /// Before the per-pool fields became `Option`, every entry this tool wrote
+    /// carried a literal `0.0` in all four, because the sensor has only ever
+    /// reported summed occupancy. A model that occupies a nonzero total cannot in
+    /// fact hold zero in *both* pools, so that pattern is unambiguously an
+    /// unpopulated field rather than a reading, and is safe to clear on read. This
+    /// makes a persisted zero mean measured-zero for good, without needing a
+    /// per-entry schema version (the store's `written_by` stamp is box-level).
+    fn normalize_pool_split(&mut self) {
+        for measurement in self.measurements.values_mut() {
+            if measurement.d_total > 0.0
+                && measurement.d_vram == Some(0.0)
+                && measurement.d_gtt == Some(0.0)
+            {
+                measurement.d_vram = None;
+                measurement.d_gtt = None;
+            }
+            if measurement.abs_total > 0.0
+                && measurement.abs_vram == Some(0.0)
+                && measurement.abs_gtt == Some(0.0)
+            {
+                measurement.abs_vram = None;
+                measurement.abs_gtt = None;
+            }
+        }
+    }
 }
 
 /// The legacy single-file schema (the reference tooling's `measurements.json`):
@@ -183,8 +230,9 @@ impl Store {
         }
         let json = std::fs::read_to_string(&path)
             .with_context(|| format!("reading {}", path.display()))?;
-        let store =
+        let mut store: ModelStore =
             serde_json::from_str(&json).with_context(|| format!("parsing {}", path.display()))?;
+        store.normalize_pool_split();
         Ok(Some(store))
     }
 
@@ -225,26 +273,46 @@ impl Store {
             ..Default::default()
         })?;
         for (id, model_store) in &legacy.models {
-            self.write_model(id, model_store)?;
+            // The reference tooling read both pools, so migrated entries usually
+            // carry a real split; the ones it left at 0/0 are cleared, same as on read.
+            let mut model_store = model_store.clone();
+            model_store.normalize_pool_split();
+            self.write_model(id, &model_store)?;
         }
         Ok(legacy.models.len())
     }
 
-    /// The `ok` measurement for `(id, param_hash)`. Falls back to a model's sole
-    /// `ok` measurement (hand-set proxy entries not tied to a live config hash).
+    /// The `ok` measurement for `(id, param_hash)`, or `None`.
+    ///
+    /// **A hash miss is a miss.** The param-hash covers every flag known to affect
+    /// the footprint, so an entry stored under a different hash was measured under
+    /// different memory flags and is not this model's footprint. Returning it would
+    /// be a wrong cache hit: `measure` would report `cached` and skip the
+    /// re-measure, and `build` would plan the knapsack against a stale number, which
+    /// is exactly the under-count that Principle 1 (never OOM) and Principle 6 (a
+    /// changed flag costs at most a harmless re-measure, never a wrong reuse) exist
+    /// to prevent. A `FAILED` entry at the matching hash is a miss for the same
+    /// reason: it carries no footprint.
+    ///
+    /// The single documented exception is a **hand-set proxy entry** (see
+    /// [`ModelStore::is_hand_set_proxy`]): excluded from the measure worklist, so its
+    /// footprint is keyed by hand and can never match a config-derived hash. That is
+    /// resolvable without guessing because such an entry is not a measurement of
+    /// flags that could have changed, and it is still required to be the model's
+    /// *only* `ok` entry, so there is nothing to choose between.
     pub fn select(&self, id: &str, param_hash: &str) -> Result<Option<Measurement>> {
         let Some(store) = self.read_model(id)? else {
             return Ok(None);
         };
         if let Some(measurement) = store.measurements.get(param_hash) {
-            if measurement.is_ok() {
-                return Ok(Some(measurement.clone()));
-            }
+            return Ok(measurement.is_ok().then(|| measurement.clone()));
         }
-        let ok_measurements: Vec<&Measurement> =
-            store.measurements.values().filter(|entry| entry.is_ok()).collect();
-        if ok_measurements.len() == 1 {
-            return Ok(Some(ok_measurements[0].clone()));
+        if store.is_hand_set_proxy() {
+            let hand_set: Vec<&Measurement> =
+                store.measurements.values().filter(|entry| entry.is_ok()).collect();
+            if let [only] = hand_set[..] {
+                return Ok(Some(only.clone()));
+            }
         }
         Ok(None)
     }
@@ -316,9 +384,130 @@ mod tests {
 
         // exact hash hit
         assert_eq!(store.select("coder-70b", "abc123").unwrap().unwrap().d_total, 49.0);
-        // sole-ok fallback on a hash miss
-        assert_eq!(store.select("coder-70b", "other").unwrap().unwrap().d_total, 49.0);
         assert_eq!(store.list_ids(), vec!["coder-70b".to_string()]);
+    }
+
+    /// Build a store holding one model with `entries` of `(hash, status, d_total)`.
+    fn store_with(
+        dir: &std::path::Path,
+        model_type: &str,
+        entries: &[(&str, &str, f64)],
+    ) -> Store {
+        let store = Store::new(dir.join("measurements"));
+        let mut measurements = IndexMap::new();
+        for (hash, status, d_total) in entries {
+            measurements.insert(
+                (*hash).to_string(),
+                Measurement {
+                    status: (*status).to_string(),
+                    d_total: *d_total,
+                    ..Default::default()
+                },
+            );
+        }
+        store
+            .write_model(
+                "m",
+                &ModelStore {
+                    model_type: model_type.to_string(),
+                    file: Some("/m.gguf".into()),
+                    measurements,
+                },
+            )
+            .unwrap();
+        store
+    }
+
+    /// A hash miss must never resolve to a footprint measured under other flags.
+    /// The `-c`/`-np`/quant change that produces a new hash is exactly when a stale
+    /// reuse would under-count the matrix and OOM the box (Principles 1 and 6).
+    #[test]
+    fn a_hash_miss_is_a_miss() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Exactly one ok entry: the case that used to fall back to it regardless of
+        // the requested hash, so the first memory-flag change on any model was
+        // silently skipped. This is the regression.
+        let one = store_with(dir.path(), "llm", &[("hash-c8192", "ok", 7.0)]);
+        assert!(one.select("m", "hash-c8191").unwrap().is_none());
+        assert_eq!(one.select("m", "hash-c8192").unwrap().unwrap().d_total, 7.0);
+
+        // Two or more ok entries: also a miss, and each stored hash still hits.
+        let two = store_with(
+            dir.path(),
+            "llm",
+            &[("hash-c262144", "ok", 24.61), ("hash-c524288", "ok", 28.26)],
+        );
+        assert!(two.select("m", "hash-c393216").unwrap().is_none());
+        assert_eq!(two.select("m", "hash-c262144").unwrap().unwrap().d_total, 24.61);
+        assert_eq!(two.select("m", "hash-c524288").unwrap().unwrap().d_total, 28.26);
+
+        // A FAILED entry carries no footprint: a miss at its own hash, and no reason
+        // to reach for another entry either.
+        let failed = store_with(
+            dir.path(),
+            "llm",
+            &[("hash-bad", "FAILED", 0.0), ("hash-good", "ok", 12.0)],
+        );
+        assert!(failed.select("m", "hash-bad").unwrap().is_none());
+    }
+
+    /// The one documented exception: a `tts-proxy` entry is hand-keyed (it is never
+    /// measured, so it has no config-derived hash to match) and must still resolve,
+    /// or every pack containing a fronted service would silently lose it.
+    #[test]
+    fn a_hand_set_proxy_entry_resolves_without_a_hash_match() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let proxy = store_with(dir.path(), "tts-proxy", &[("manual-kokoro", "ok", 0.1)]);
+        assert_eq!(proxy.select("m", "any-config-hash").unwrap().unwrap().d_total, 0.1);
+
+        // The carve-out is typed, not a general "sole entry" rule: the same shape
+        // typed `llm` stays a miss.
+        let llm = store_with(dir.path(), "llm", &[("manual-kokoro", "ok", 0.1)]);
+        assert!(llm.select("m", "any-config-hash").unwrap().is_none());
+
+        // And it never *chooses*: two hand-set ok entries is ambiguous, so a miss.
+        let ambiguous =
+            store_with(dir.path(), "tts-proxy", &[("a", "ok", 0.1), ("b", "ok", 0.2)]);
+        assert!(ambiguous.select("m", "any-config-hash").unwrap().is_none());
+    }
+
+    /// A `0`/`0` split against a nonzero total is an unpopulated field, not a
+    /// reading, and is cleared on read so a stored zero always means measured zero.
+    /// Pins the schema half of the per-pool fix; `measure` writes the split itself.
+    #[test]
+    fn an_unpopulated_pool_split_reads_as_unknown() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().join("measurements"));
+        std::fs::create_dir_all(store.dir()).unwrap();
+        std::fs::write(
+            store.dir().join("m.json"),
+            r#"{"type":"llm","file":"/m.gguf","measurements":{
+                 "zeroed": {"status":"ok","d_total":28.26,"d_vram":0.0,"d_gtt":0.0,
+                            "abs_total":28.43,"abs_vram":0.0,"abs_gtt":0.0},
+                 "real":   {"status":"ok","d_total":24.61,"d_vram":24.07,"d_gtt":0.54,
+                            "abs_total":24.77,"abs_vram":24.23,"abs_gtt":0.54}}}"#,
+        )
+        .unwrap();
+
+        let zeroed = store.select("m", "zeroed").unwrap().unwrap();
+        assert_eq!(zeroed.d_vram, None, "0/0 against a 28.26 GB total is not a reading");
+        assert_eq!(zeroed.d_gtt, None);
+        assert_eq!(zeroed.abs_vram, None);
+        assert_eq!(zeroed.d_total, 28.26, "the total is untouched");
+
+        // A genuine split survives verbatim.
+        let real = store.select("m", "real").unwrap().unwrap();
+        assert_eq!(real.d_vram, Some(24.07));
+        assert_eq!(real.d_gtt, Some(0.54));
+
+        // An omitted split is absent from the JSON, never written back as 0.
+        let rewritten = store.read_model("m").unwrap().unwrap();
+        store.write_model("m", &rewritten).unwrap();
+        let json = std::fs::read_to_string(store.dir().join("m.json")).unwrap();
+        assert!(!json.contains("\"d_vram\": 0.0"), "an unknown split must not persist as 0");
+        assert!(json.contains("\"d_vram\": 24.07"), "a real split must persist");
     }
 
     #[test]

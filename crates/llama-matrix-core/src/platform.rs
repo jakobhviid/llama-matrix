@@ -24,6 +24,18 @@ pub trait GpuMemory {
     fn total_gb(&self) -> Result<f64>;
     /// Currently occupied, in GB.
     fn used_gb(&self) -> Result<f64>;
+    /// The `(vram, gtt)` breakdown of [`GpuMemory::used_gb`], for a device with
+    /// distinct pools.
+    ///
+    /// `None` means "this backend cannot report a split", never "the split is
+    /// zero": unified memory is one pool by construction, and a discrete NVIDIA
+    /// card is all VRAM. `measure` records the split only when it is present, so a
+    /// per-pool `0` in the store is always a real reading (see
+    /// `cache::Measurement`). Defaults to `None` so a new backend has to opt in
+    /// rather than silently report zeros.
+    fn used_split_gb(&self) -> Option<(f64, f64)> {
+        None
+    }
 }
 
 /// AMD `amdgpu` sysfs backend. Unified-memory APUs expose a VRAM carve-out plus a
@@ -81,6 +93,14 @@ impl GpuMemory for AmdSysfs {
         let vram = self.read_bytes("mem_info_vram_used")?;
         let gtt = self.read_bytes_or_zero("mem_info_gtt_used");
         Ok((vram + gtt) as f64 / BYTES_PER_GIB)
+    }
+
+    /// Both counters are already read for the sum, so the split costs nothing
+    /// extra. A discrete card has no GTT pool, and reads a true 0.
+    fn used_split_gb(&self) -> Option<(f64, f64)> {
+        let vram = self.read_bytes("mem_info_vram_used").ok()?;
+        let gtt = self.read_bytes_or_zero("mem_info_gtt_used");
+        Some((vram as f64 / BYTES_PER_GIB, gtt as f64 / BYTES_PER_GIB))
     }
 }
 
@@ -266,6 +286,31 @@ mod tests {
         let amd = AmdSysfs::at(device);
         assert!((amd.total_gb().unwrap() - 112.0).abs() < 1e-6);
         assert!((amd.used_gb().unwrap() - 11.0).abs() < 1e-6);
+
+        // The per-pool split is reported too, and sums to the total occupancy.
+        let (vram, gtt) = amd.used_split_gb().expect("amdgpu exposes both pools");
+        assert!((vram - 10.0).abs() < 1e-6, "vram {vram}");
+        assert!((gtt - 1.0).abs() < 1e-6, "gtt {gtt}");
+        assert!((vram + gtt - amd.used_gb().unwrap()).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_backend_without_pools_reports_no_split() {
+        // The trait default: a backend that cannot separate pools returns None, so
+        // `measure` omits the fields rather than writing zeros into them.
+        struct Unified;
+        impl GpuMemory for Unified {
+            fn label(&self) -> String {
+                "unified".into()
+            }
+            fn total_gb(&self) -> Result<f64> {
+                Ok(48.0)
+            }
+            fn used_gb(&self) -> Result<f64> {
+                Ok(12.0)
+            }
+        }
+        assert_eq!(Unified.used_split_gb(), None);
     }
 
     #[cfg(target_os = "macos")]

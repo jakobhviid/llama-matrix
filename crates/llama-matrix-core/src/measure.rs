@@ -3,7 +3,7 @@
 //! baseline into the per-model store, keyed by param-hash. GPU-touching, slow,
 //! and lockfile-guarded. See ARCHITECTURE.md §2.1.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -45,6 +45,11 @@ pub struct MeasureSummary {
     pub cached: Vec<String>,
     pub failed: Vec<Failure>,
     pub skipped_missing: Vec<String>,
+    /// Models whose footprint was recorded without confirming that llama-swap
+    /// actually loaded the command we hashed (the backend exposes no `/props`, or
+    /// the endpoint predates it). Reported rather than silently implied to be
+    /// verified: Principle 7.
+    pub unverified_serving: Vec<String>,
     pub baseline: f64,
     pub detected_total: f64,
 }
@@ -125,6 +130,147 @@ fn running(agent: &ureq::Agent, endpoint: &str) -> HashMap<String, String> {
         }
     }
     states
+}
+
+/// The model ids llama-swap currently advertises, from `GET /v1/models`.
+///
+/// Only ever used to *explain* a failed load, never to skip one: an `unlisted` model
+/// is hidden from this roster and still perfectly loadable (SPEC §8), so absence is
+/// a hint, not a verdict. `None` when the roster can't be read at all.
+fn served_ids(agent: &ureq::Agent, endpoint: &str) -> Option<HashSet<String>> {
+    let text = agent.get(&format!("{endpoint}/v1/models")).call().ok()?.into_string().ok()?;
+    let json: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let entries = json.get("data")?.as_array()?;
+    Some(
+        entries
+            .iter()
+            .filter_map(|entry| entry.get("id")?.as_str().map(str::to_string))
+            .collect(),
+    )
+}
+
+/// The `(context_per_slot, slots)` the **running** server actually allocated, read
+/// from the model's own `/props` through llama-swap's `/upstream/<id>/` route.
+///
+/// This is the only way to see the live launch flags: no llama-swap endpoint (as of
+/// v247) reports a model's `cmd`, so the served command has to be inferred from what
+/// the loaded server says it did. `None` for a backend with no `/props` (an image or
+/// STT server) or a shape we don't recognize.
+fn served_context(agent: &ureq::Agent, endpoint: &str, model: &str) -> Option<(u64, u64)> {
+    let url = format!("{endpoint}/upstream/{model}/props");
+    let text = agent.get(&url).call().ok()?.into_string().ok()?;
+    let json: serde_json::Value = serde_json::from_str(&text).ok()?;
+    // `total_slots` is `-np`; a server built without it runs a single slot.
+    let slots = json.get("total_slots").and_then(serde_json::Value::as_u64).unwrap_or(1);
+    // Per-slot context. Older builds expose it only at the top level.
+    let context = json
+        .pointer("/default_generation_settings/n_ctx")
+        .and_then(serde_json::Value::as_u64)
+        .or_else(|| json.get("n_ctx").and_then(serde_json::Value::as_u64))?;
+    Some((context, slots))
+}
+
+/// The `(context, slots)` a launch command declares, where `slots` is `None` when
+/// `-np` is absent (llama.cpp then picks its own default, which is **not** 1 and is
+/// not knowable from the command).
+///
+/// `None` when there is nothing to compare: no `-c`, or `-c 0` ("take the model's
+/// trained context", which only the loaded server can resolve).
+fn declared_context(cmd: &str) -> Option<(u64, Option<u64>)> {
+    let tokens: Vec<&str> = cmd.split_whitespace().collect();
+    let value_of = |names: &[&str]| -> Option<u64> {
+        let index = tokens.iter().position(|token| names.contains(token))?;
+        tokens.get(index + 1)?.parse().ok()
+    };
+    let context = value_of(&["-c", "--ctx-size"])?;
+    let slots = value_of(&["-np", "--parallel"]).filter(|slots| *slots > 0);
+    (context > 0).then_some((context, slots))
+}
+
+/// Whether the model llama-swap loaded is the one whose command we hashed.
+#[derive(Debug, PartialEq, Eq)]
+enum Serving {
+    /// The live server's context matches the config's.
+    Confirmed,
+    /// It does not: llama-swap is serving a different command than the config
+    /// declares, so the footprint about to be recorded belongs to neither. Both
+    /// sides are rendered for the failure message.
+    Mismatch { declared: String, served: String },
+    /// Nothing to compare against, so the recording is unconfirmed (not wrong).
+    Unconfirmed,
+}
+
+/// Cross-check the loaded server against the config we hashed.
+///
+/// `measure` derives the param-hash and `params` from the config file on disk, but
+/// the load runs through llama-swap, which serves whatever config **it** last
+/// hot-reloaded. When the two disagree (the file was edited underneath it, the
+/// reload hasn't landed, or `--config` points at a copy), the footprint would be
+/// stored under the new hash while describing a command that never ran. That entry
+/// never self-corrects, because the hash then looks present.
+fn check_serving(
+    agent: &ureq::Agent,
+    endpoint: &str,
+    record: &ModelRecord,
+) -> Serving {
+    // Only llama.cpp servers answer /props; image and STT backends do not, and a
+    // proxy never loads at all.
+    if !matches!(record.model_type, ModelType::Llm | ModelType::Embed | ModelType::Rerank) {
+        return Serving::Unconfirmed;
+    }
+    let Some(declared) = declared_context(&record.cmd) else {
+        return Serving::Unconfirmed;
+    };
+    let Some(served) = served_context(agent, endpoint, &record.id) else {
+        return Serving::Unconfirmed;
+    };
+    compare_context(declared, served)
+}
+
+/// The pure half of [`check_serving`]: does a `(context, explicit_slots)`
+/// declaration match the `(per_slot_context, slots)` a live server reports?
+///
+/// Deliberately agnostic about whether `-c` means the total context or the per-slot
+/// context, because **it is both**, depending on flags. Measured against one
+/// llama-swap v247 with one llama.cpp build:
+///
+/// | config | reported `n_ctx` | `total_slots` |
+/// |---|---|---|
+/// | `-c 262144 -np 2` | 131072 (`-c` / slots) | 2 |
+/// | `-c 8192` (no `-np`) | 8192 (`-c` itself) | 4 |
+///
+/// So the declared context is accepted when it matches **either** the per-slot
+/// figure or the reconstructed total, and the slot count is only compared when the
+/// command states `-np` (its default is neither 1 nor derivable). This still catches
+/// what matters: any change to `-c` makes both candidates wrong at once, which is
+/// the whole failure mode (a footprint filed under a command that never ran).
+fn compare_context(declared: (u64, Option<u64>), served: (u64, u64)) -> Serving {
+    let (declared_context, declared_slots) = declared;
+    let (served_per_slot, served_slots) = served;
+    let served_total = served_per_slot.saturating_mul(served_slots);
+    let rendered = |context: u64, slots: Option<u64>| match slots {
+        Some(slots) => format!("-c {context} -np {slots}"),
+        None => format!("-c {context}"),
+    };
+    let mismatch = || Serving::Mismatch {
+        declared: rendered(declared_context, declared_slots),
+        served: format!("{served_per_slot} per slot across {served_slots} slot(s)"),
+    };
+
+    if let Some(slots) = declared_slots {
+        if slots != served_slots {
+            return mismatch();
+        }
+    }
+    // A per-slot figure derived by division can fall short of the total by at most
+    // `slots - 1` tokens; the per-slot reading itself is exact.
+    let matches_total = served_total.abs_diff(declared_context) <= served_slots.saturating_sub(1);
+    let matches_per_slot = served_per_slot == declared_context;
+    if matches_total || matches_per_slot {
+        Serving::Confirmed
+    } else {
+        mismatch()
+    }
 }
 
 /// Unload everything and wait until `/running` is empty, then settle.
@@ -238,9 +384,16 @@ pub fn sweep(
         ..Default::default()
     };
 
-    // empty baseline
+    // empty baseline (with its per-pool split, when the device has one, so the
+    // recorded deltas can be split the same way)
     unload_all(&agent, &options.endpoint, Duration::from_secs(4));
     summary.baseline = gpu.used_gb()?;
+    let baseline_split = gpu.used_split_gb();
+
+    // The roster llama-swap is actually serving. A model the config declares but
+    // llama-swap doesn't know is the loud half of a config mismatch: measuring it
+    // would load nothing (or something else).
+    let served = served_ids(&agent, &options.endpoint);
 
     let only = options.only.as_ref();
     for record in records {
@@ -284,23 +437,75 @@ pub fn sweep(
                     measured_at: today.clone(),
                     ..Default::default()
                 };
+                // An id llama-swap doesn't advertise is the likeliest cause worth
+                // naming: it usually means it is serving a different config than the
+                // one being measured. Only a hint, since an `unlisted` model is
+                // absent from the roster and still loadable (SPEC §8).
+                let unknown_to_llama_swap =
+                    served.as_ref().is_some_and(|ids| !ids.contains(&record.id));
                 summary.failed.push(Failure {
                     id: record.id.clone(),
-                    reason: "load timed out or exited".to_string(),
+                    reason: if unknown_to_llama_swap {
+                        "load timed out or exited, and llama-swap does not list this model \
+                         id - it may be serving a different config than the one being \
+                         measured (reload it, or point --config at the file it loaded)"
+                            .to_string()
+                    } else {
+                        "load timed out or exited".to_string()
+                    },
                 });
                 failed
             }
             Some(load) => {
+                // Is the server that just loaded running the command we hashed? On a
+                // mismatch the reading belongs to neither command, so nothing is
+                // recorded: a wrong footprint stored under a right-looking hash would
+                // never self-correct (Principle 2, and Principle 1 downstream).
+                match check_serving(&agent, &options.endpoint, record) {
+                    Serving::Mismatch { declared, served } => {
+                        summary.failed.push(Failure {
+                            id: record.id.clone(),
+                            reason: format!(
+                                "llama-swap loaded {served} while this config declares \
+                                 {declared}, so it is serving a different command - no \
+                                 footprint recorded (reload llama-swap, or measure the \
+                                 config it actually loaded)"
+                            ),
+                        });
+                        drop(handle);
+                        unload_all(&agent, &options.endpoint, Duration::from_secs(2));
+                        continue;
+                    }
+                    Serving::Unconfirmed => summary.unverified_serving.push(record.id.clone()),
+                    Serving::Confirmed => {}
+                }
+
                 let used = stabilize(gpu.as_ref(), Duration::from_secs(30), 0.03, 2);
+                // Read the split at the same settled point as the total. Both are
+                // None on a device with a single (or unified) pool, and are then
+                // omitted from the store rather than written as zeros.
+                let (d_vram, d_gtt, abs_vram, abs_gtt) =
+                    match (gpu.used_split_gb(), baseline_split) {
+                        (Some((vram, gtt)), Some((base_vram, base_gtt))) => (
+                            Some(round2(vram - base_vram)),
+                            Some(round2(gtt - base_gtt)),
+                            Some(round2(vram)),
+                            Some(round2(gtt)),
+                        ),
+                        _ => (None, None, None, None),
+                    };
                 summary.measured.push(record.id.clone());
                 Measurement {
                     status: "ok".to_string(),
                     d_total: round2(used - summary.baseline),
                     abs_total: round2(used),
+                    d_vram,
+                    d_gtt,
+                    abs_vram,
+                    abs_gtt,
                     load_s: round1(load),
                     params: memory_cmd(&record.cmd),
                     measured_at: today.clone(),
-                    ..Default::default()
                 }
             }
         };
@@ -399,6 +604,64 @@ mod tests {
         let guard = LockGuard::acquire(dir.path()).expect("a stale lock must be reclaimed");
         drop(guard); // Drop removes the lock on a clean exit
         assert!(!lock.exists(), "Drop should remove the lock file");
+    }
+
+    #[test]
+    fn declared_context_reads_c_and_np() {
+        let cmd = "/app/llama-server -m /m.gguf -ngl 99 -c 524288 -np 2 -fa on";
+        assert_eq!(declared_context(cmd), Some((524288, Some(2))));
+        assert_eq!(
+            declared_context("/app/llama-server -m /m.gguf --ctx-size 4096 --parallel 4"),
+            Some((4096, Some(4)))
+        );
+        // An absent `-np` stays absent: llama.cpp's default is not 1 (it was 4 on the
+        // build this was validated against), so it must not be assumed.
+        assert_eq!(declared_context("/app/llama-server -m /m.gguf -c 8192"), Some((8192, None)));
+        // Nothing to compare: no `-c`, or `-c 0` (resolved from the model at load).
+        assert_eq!(declared_context("/app/llama-server -m /m.gguf -ngl 99"), None);
+        assert_eq!(declared_context("/app/llama-server -m /m.gguf -c 0 -fa on"), None);
+    }
+
+    /// Cases taken from a live llama-swap v247, so the two `-c` semantics are pinned
+    /// by observation rather than by reading the flag documentation.
+    #[test]
+    fn a_served_context_that_differs_is_a_mismatch() {
+        // Live: `-c 262144 -np 2` loads as 131072 per slot across 2 slots, so here
+        // `-c` is the total.
+        assert_eq!(compare_context((262144, Some(2)), (131072, 2)), Serving::Confirmed);
+        // Live: `-c 8192` with no `-np` loads as 8192 per slot across 4 slots, so here
+        // the same flag is the per-slot value. Assuming either reading alone would
+        // fail one of these two.
+        assert_eq!(compare_context((8192, None), (8192, 4)), Serving::Confirmed);
+
+        // The failure this exists for: the config said `-c 393216 -np 2` while
+        // llama-swap was still serving `-c 524288 -np 2`, and the 524288 footprint
+        // was filed under the 393216 hash. Neither reading of 393216 fits.
+        assert_eq!(
+            compare_context((393216, Some(2)), (262144, 2)),
+            Serving::Mismatch {
+                declared: "-c 393216 -np 2".into(),
+                served: "262144 per slot across 2 slot(s)".into(),
+            }
+        );
+        // A one-token change is caught too (the reported reproduction).
+        assert_eq!(
+            compare_context((8191, None), (8192, 4)),
+            Serving::Mismatch {
+                declared: "-c 8191".into(),
+                served: "8192 per slot across 4 slot(s)".into(),
+            }
+        );
+        // An explicitly declared slot count that the server did not honour.
+        assert_eq!(
+            compare_context((524288, Some(2)), (131072, 4)),
+            Serving::Mismatch {
+                declared: "-c 524288 -np 2".into(),
+                served: "131072 per slot across 4 slot(s)".into(),
+            }
+        );
+        // Integer division of an odd total across slots is not a mismatch.
+        assert_eq!(compare_context((8191, Some(2)), (4095, 2)), Serving::Confirmed);
     }
 
     #[test]

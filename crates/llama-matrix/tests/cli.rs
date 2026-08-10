@@ -6,17 +6,23 @@ use std::fs;
 use std::path::Path;
 
 use assert_cmd::Command;
+use llama_matrix_core::param_hash::param_hash;
+
+const CHAT_CMD: &str = "/app/llama-server -m /models/chat.gguf -ngl 99 -c 4096 -fa on";
+const EMBED_CMD: &str = "/app/llama-server -m /models/e.gguf --embedding --pooling last -c 8192";
 
 fn write_working_dir(dir: &Path) {
     fs::write(
         dir.join("config.yaml"),
-        r#"
+        format!(
+            r#"
 models:
   "chat":
-    cmd: "/app/llama-server -m /models/chat.gguf -ngl 99 -c 4096 -fa on"
+    cmd: "{CHAT_CMD}"
   "embed":
-    cmd: "/app/llama-server -m /models/e.gguf --embedding --pooling last -c 8192"
-"#,
+    cmd: "{EMBED_CMD}"
+"#
+        ),
     )
     .unwrap();
     fs::write(dir.join("llama-matrix.toml"), "budget = 100.0\n").unwrap();
@@ -28,14 +34,23 @@ models:
         r#"{"baseline":0.16,"detected_total":100.0}"#,
     )
     .unwrap();
+    // Key each entry under the hash of its own command, exactly as `measure` does:
+    // `build` selects by the *current* config's param-hash, and a hash miss is a
+    // miss, so a placeholder key here would leave both models unmeasured.
     fs::write(
         measurements.join("chat.json"),
-        r#"{"type":"llm","file":"/models/chat.gguf","measurements":{"x":{"status":"ok","d_total":30.0,"load_s":20.0}}}"#,
+        format!(
+            r#"{{"type":"llm","file":"/models/chat.gguf","measurements":{{"{}":{{"status":"ok","d_total":30.0,"load_s":20.0}}}}}}"#,
+            param_hash(CHAT_CMD)
+        ),
     )
     .unwrap();
     fs::write(
         measurements.join("embed.json"),
-        r#"{"type":"embed","file":"/models/e.gguf","measurements":{"x":{"status":"ok","d_total":7.0,"load_s":6.0}}}"#,
+        format!(
+            r#"{{"type":"embed","file":"/models/e.gguf","measurements":{{"{}":{{"status":"ok","d_total":7.0,"load_s":6.0}}}}}}"#,
+            param_hash(EMBED_CMD)
+        ),
     )
     .unwrap();
 }

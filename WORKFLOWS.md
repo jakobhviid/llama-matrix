@@ -87,6 +87,13 @@ feed to the next.
 A non-memory edit (port, reasoning toggle, comments, TTL) doesn't change the
 param-hash → no re-measure and the matrix is identical, so no regeneration needed.
 
+`measure` does not take the hot-reload on trust: before recording, it confirms that
+the server llama-swap actually loaded is running the command it just hashed. If you
+measure a config llama-swap hasn't picked up yet (or a copy of one), the model is
+reported as failed with both context sizes rather than filed under a footprint it
+never had. So there is no need to pass `--force` after a memory-flag change: a
+changed flag is a new hash, and a new hash is measured.
+
 Removing a model: drop it from `config.yaml`; its `measurements/<id>.json` is
 **kept** (cheap, and re-adding is then an instant hit). Nothing is auto-deleted —
 run `llama-matrix prune --yes` to clear entries whose weights are gone (a bare

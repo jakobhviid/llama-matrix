@@ -59,9 +59,17 @@ Roughly in order of value-to-effort:
 12. **Readable output (short vars / set names).** Mint the reserved `vars` aliases
     (and/or shorter set names) so the block reads `+g_gemma` rather than
     `+g_gemma_4_26b_a4b_q4qat`. Cosmetic — full ids work as-is on llama-swap v243+.
-13. **Per-pool VRAM/GTT split.** The `GpuMemory` trait reports summed occupancy, so
-    `d_vram`/`d_gtt` are recorded as 0. Expose the split (the AMD sysfs backend
-    already reads both pools) for per-pool insight — `build` uses only `d_total`.
+13. **Per-pool VRAM/GTT split beyond AMD.** Shipped for AMD `amdgpu` sysfs
+    (`GpuMemory::used_split_gb`, which reads both counters it already sums); NVIDIA
+    and Apple Silicon report no split, and omit the fields rather than writing zeros.
+    Remaining: a per-pool read for the other backends where the concept applies, and
+    a consumer for it (`build` still uses only `d_total`, so the split is recorded
+    for insight and to feed item 11's per-device budgets).
+
+14. **Recover a renamed model's footprint.** A measurement file is opened by model
+    id, so renaming an id in the config orphans its file and re-measures under the
+    new name. Scan the store for a file holding a matching param-hash before
+    measuring, and adopt it (a rename is not a new footprint).
 
 ## House-style conformance backlog
 
