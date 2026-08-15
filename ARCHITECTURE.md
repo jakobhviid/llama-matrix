@@ -261,8 +261,8 @@ The block is a set of named DSL expressions (see `SPEC.md` §3 for the grammar):
 - one `pack*` per maximal fitting combination of logical models (`&`, + `+aux`).
 - one `llmimg_*` per logical model with the largest image subset that still fits.
 - one `heavy_*` per heavy unit.
-- `evict_costs` (higher = costlier to evict = prefer to keep; derived from load
-  time, tunable). No `vars:` are emitted — sets use full model ids (see `SPEC.md` §3).
+- `evict_costs` (one per model, ranked by role, §4.7). No `vars:` are emitted: sets
+  use full model ids (see `SPEC.md` §3).
 
 llama-swap caps expansion at **1000 combinations per expression** (the product of a
 set's `|`-group sizes). After generation the tool counts every expression's fan-out
@@ -301,6 +301,47 @@ not only in the sweep that recorded it.
 For **every** emitted set: `baseline + Σ(members at max quant) + aux_cost ≤
 ceiling`. A violation means the generator is unsafe — the build fails rather than
 emit it.
+
+### 4.7 Eviction costs: which model the solver keeps
+
+Fitting decides what *may* co-reside; eviction cost decides what survives when two
+declared sets both satisfy a request. llama-swap picks the set minimizing the summed
+cost of the running models it would evict, so a cost is a **keep** weight. Costs are a
+tie-break among sets that already fit; the fit predicate and the knapsack never see
+them.
+
+The load-bearing consequence is that a *uniform* cost turns that comparison into a
+body count, and small models are numerous. On a roster of two chat models plus four
+image servers, a set keeping the chat pair evicts four bodies while a set keeping the
+image pool evicts one, so the solver drops the model in active use and the pair
+thrashes on every alternating request, paying a full reload each time, while an image
+pool nothing has touched for hours stays resident.
+
+So the costs are **tiered by role**: `image` < `aux` < `llm`, with the `llm` tier
+derived as `Σ image costs + 1` (floored at 10). Two properties are deliberate:
+
+- **Role, not load time.** A load-proportional scale does not fix this: an image
+  server loads in ~10 s and a 28 GB LLM in ~14 s, so four images still outweigh one
+  LLM. The axis that separates them is what the model is *for*, not how long it takes
+  to come back.
+- **Scaled to the pool, not to a constant.** The guarantee wanted is "keeping a second
+  conversational model beats keeping the entire idle image pool", which is a fact about
+  the pool's size. A constant would hold for four image servers and fail for twelve.
+
+A heavy takes the llm tier like any other conversational model. It appears in exactly
+one declared set, so for every request that does not name it its cost is a constant
+added to all candidates and cannot change the argmin; the one case where it *does*
+decide something is a request for an image beside it, and there the llm tier is
+already the value that keeps it.
+
+Every model in the matrix is emitted with a cost, not only the non-default tiers, so
+the block is readable as a statement of policy. A model excluded as unrunnable gets
+none: nothing can evict what cannot load. The operator overrides both the tiers and
+individual ids in `[evict_costs]` (`SPEC.md` §1.3).
+
+What this **cannot** express is recency. Static weights rank roles; they cannot say
+"the one I used 30 seconds ago", so two same-tier models that do not fit together still
+alternate. That is `ROADMAP.md` #7.
 
 ---
 
@@ -342,15 +383,15 @@ crates/llama-matrix/            # thin CLI: clap, --json/--llm/-v, delegates to 
 crates/llama-matrix-core/
   src/lib.rs
   src/config.rs                 # parse llama-swap config.yaml (roster + cmds); macro expansion
-  src/policy.rs                 # llama-matrix.toml: budget/margin/strategy/roles/groups/paths
+  src/policy.rs                 # llama-matrix.toml: budget/margin/strategy/roles/groups/paths/evict_costs
   src/settings.rs               # `configure` get/set/unset/list/keys (SETTINGS table)
   src/model.rs                  # per-model record: id, cmd, type, file, mem_cmd, param_hash
   src/param_hash.rs             # strip-list → hash
   src/platform.rs               # GpuMemory trait + AMD sysfs / NVIDIA / Apple Silicon backends
   src/measure.rs                # phase 1: trigger→ready→stabilize; lockfile; failures
   src/cache.rs                  # measurements/ per-model store + retention + migrate
-  src/build.rs                  # variant-collapse, roles, knapsack, heavy classification
-  src/matrix.rs                 # DSL emission + 1000-combo guard + evict_costs
+  src/build.rs                  # variant-collapse, roles, knapsack, heavy classification, evict costs
+  src/matrix.rs                 # DSL emission + 1000-combo guard
   src/apply.rs                  # backup → splice → reload wait → verify → rollback
   src/ui.rs                     # stdout/stderr discipline + colour
 ```
@@ -368,7 +409,8 @@ profiles (Principle #8).
 - **Scalars** (`config`, `endpoint`, `budget`, `margin`, `strategy`, `on_overflow`)
   are managed through `llama-matrix configure get/set/unset/list/keys` — a validated,
   shell-completable, comment-preserving surface (never hand-edit guesswork).
-- **Structured tables** (`[paths]`, `[roles]`, `[groups]`) are hand-edited.
+- **Structured tables** (`[paths]`, `[roles]`, `[groups]`, `[evict_costs]`) are
+  hand-edited.
 
 `llama-matrix setup` provisions the file on first run: it discovers the llama-swap
 config, sets the endpoint, probes the GPU to auto-detect the total, and writes a

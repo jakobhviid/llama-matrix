@@ -42,8 +42,12 @@ Roughly in order of value-to-effort:
    re-measuring, and answer "does pack Y still fit if I bump X to 128k?"
 6. **KV-quant sensitivity.** Record footprint under q8 vs f16 KV so the tool can
    advise "switch this model to q8 KV to unlock pack Y."
-7. **evict_cost from telemetry.** Derive keep/evict weights from real llama-swap
-   request frequency/recency instead of load-time heuristics.
+7. **evict_cost from telemetry.** The `[evict_costs]` table ranks models by *role*,
+   which is the axis static config can express and is enough to stop an idle image
+   pool outvoting the model in use. It cannot express **recency**: two same-tier models
+   that do not fit together still alternate. Derive keep/evict weights from real
+   llama-swap request frequency/recency, layered over the static tiers rather than
+   replacing them (the operator's declared priorities should still win).
 8. **Dynamic margin.** Scale the safety margin per-combo (more co-resident models →
    more compute-buffer slack) or from measured additivity variance, instead of a
    flat value.

@@ -213,6 +213,33 @@ mod tests {
         assert_eq!(get(&file, "budget").unwrap(), "(auto-detect)");
     }
 
+    /// `configure` writes scalars; the hand-edited tables beside them are not its
+    /// business, and a scalar write must leave them (and their comments) untouched.
+    #[test]
+    fn a_hand_written_table_survives_a_scalar_write() {
+        use crate::policy::Policy;
+
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("llama-matrix.toml");
+        std::fs::write(
+            &file,
+            "margin = 4.0\n\n[evict_costs]\n# keep the coder over the image pool\nllm = 12\n\
+             image = 1\n\n[evict_costs.models]\n\"coder-30b\" = 40\n",
+        )
+        .unwrap();
+
+        set(&file, "budget", "111.5").unwrap();
+
+        let policy = Policy::load(&file).unwrap();
+        assert_eq!(policy.budget, Some(111.5));
+        assert_eq!(policy.evict_costs.llm, Some(12));
+        assert_eq!(policy.evict_costs.image, Some(1));
+        assert_eq!(policy.evict_costs.models["coder-30b"], 40);
+        assert!(std::fs::read_to_string(&file)
+            .unwrap()
+            .contains("# keep the coder over the image pool"));
+    }
+
     #[test]
     fn rejects_bad_key_and_values() {
         let dir = tempfile::tempdir().unwrap();

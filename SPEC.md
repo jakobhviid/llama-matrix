@@ -39,6 +39,14 @@ images = ["image-a", "image-b"]
 [groups]                   # only consulted by reduction strategies / on_overflow.
 # A named group of DISTINCT model ids treated as one mutually-exclusive unit.
 gemma = ["gemma-27b-q4", "gemma-27b-q4-nothink", "gemma-27b-abliterated-q5"]
+
+[evict_costs]              # which model the solver keeps under pressure (§1.3).
+llm   = 10                 # per-role tiers; higher = costlier to evict = prefer to keep
+image = 1
+aux   = 5
+
+[evict_costs.models]       # per-model-id overrides, which win over the role tier.
+"qwen3-coder-30b" = 40
 ```
 
 ### 1.1 Scalar semantics
@@ -69,8 +77,41 @@ llama-matrix configure unset budget    # revert to default (auto-detect)
 
 Values accept friendly forms (enums case-insensitive; floats plain). Writes use a
 comment-preserving TOML editor, so hand-written comments and the `[paths]`/`[roles]`/
-`[groups]` tables survive. Structured tables are **not** settable here — edit them
-directly.
+`[groups]`/`[evict_costs]` tables survive. Structured tables are **not** settable here;
+edit them directly.
+
+### 1.3 `[evict_costs]`: which model the solver keeps
+
+llama-swap answers a request by picking the declared set that minimizes the summed
+cost of the running models it would have to evict (§3), so a cost is a **keep**
+weight: higher = costlier to evict = prefer to keep. Positive integers only.
+
+Every model in the matrix is emitted with a cost, resolved in this order:
+
+1. a `[evict_costs.models]` entry for that exact model id;
+2. the tier for its role (`llm` / `image` / `aux`, matching the `[roles]` split);
+3. the built-in for that role.
+
+| role | built-in | why |
+|---|---|---|
+| `image` | `1` | a diffusion server reloads in seconds and is used in bursts, so it is the natural eviction victim |
+| `aux` | `5` | reserved in nearly every set, so rarely a candidate for eviction at all |
+| `llm` | `max(10, Σ image costs + 1)` | must outweigh the **whole** idle image pool, or a large enough pool wins on count alone |
+
+The `llm` tier scales with the image pool rather than resting on a constant, because
+the guarantee wanted is "keeping a second conversational model beats keeping the
+entire idle image pool" - which is a fact about the pool's size, not about any one
+number. A **heavy** is an llm and takes the llm tier: it occupies exactly one declared
+set, so a tier of its own would change the solver's answer only when an image is
+requested beside it, and there the llm tier is already the one that keeps it.
+
+Costs are keyed by **model id**, not by logical unit, so an override on one quant of a
+collapsed model leaves its twins on the role tier. A `[evict_costs.models]` key naming
+no model in the matrix is a warning (a typo, or a model that is unmeasured or excluded);
+a `0` or a value above 1000000 is rejected when the policy is read.
+
+Costs are a tie-break among sets that **already fit** - they never affect the fit
+predicate or the knapsack.
 
 ---
 
@@ -206,7 +247,9 @@ A `matrix:` block has three sub-keys:
   **llama-matrix currently emits none** — sets reference full model ids directly
   (valid on v243+). The `vars:` sub-key is reserved for a future readability pass.
 - **`evict_costs`** — positive integers, default 1. Higher = costlier to evict =
-  prefer to keep.
+  prefer to keep. llama-matrix emits one for **every** model in the matrix, so the
+  block states what the solver will do rather than leaving it to be re-derived; the
+  numbers come from `[evict_costs]` (§1.3).
 - **`sets`** — named **DSL strings** (not lists).
 
 **Operators:**

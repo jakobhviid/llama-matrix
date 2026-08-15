@@ -16,7 +16,7 @@ use anyhow::{bail, Result};
 use crate::cache::Store;
 use crate::config;
 use crate::model::ModelType;
-use crate::policy::{OnOverflow, OnUnconfirmed, Policy, Strategy};
+use crate::policy::{CostRole, OnOverflow, OnUnconfirmed, Policy, Strategy};
 
 /// Work budget for maximal-pack enumeration. Enumerating maximal fitting packs is
 /// worst-case exponential in the light-unit count, so the recursion runs under a
@@ -41,8 +41,6 @@ pub struct ModelFootprint {
     pub primary_file: Option<String>,
     /// GB delta over baseline — the footprint.
     pub d_total: f64,
-    /// Seconds to load (feeds evict_costs).
-    pub load_s: f64,
 }
 
 /// A logical model: one or more interchangeable variants, sized by the largest.
@@ -54,8 +52,6 @@ struct Unit {
     ids: Vec<String>,
     /// Footprint = the largest member's `d_total` (so any quant mix fits).
     size: f64,
-    /// Largest member load time (for evict_costs).
-    max_load_s: f64,
 }
 
 impl Unit {
@@ -189,7 +185,6 @@ pub fn resolve_plan(
             model_type: record.model_type,
             primary_file: record.primary_file.clone(),
             d_total: measurement.d_total,
-            load_s: measurement.load_s,
         });
     }
 
@@ -291,12 +286,10 @@ fn collapse_units(llm_models: &[&ModelFootprint], policy: &Policy) -> Vec<Unit> 
             let members = &by_file[file_key];
             let ids: Vec<String> = members.iter().map(|model| model.id.clone()).collect();
             let size = members.iter().map(|model| model.d_total).fold(0.0_f64, f64::max);
-            let max_load_s = members.iter().map(|model| model.load_s).fold(0.0_f64, f64::max);
             Unit {
                 key: safe_key(&ids[0]),
                 ids,
                 size,
-                max_load_s,
             }
         })
         .collect();
@@ -315,7 +308,6 @@ fn apply_groups(units: Vec<Unit>, policy: &Policy) -> Vec<Unit> {
         let group_set: BTreeSet<&str> = group_ids.iter().map(String::as_str).collect();
         let mut ids: Vec<String> = Vec::new();
         let mut size = 0.0_f64;
-        let mut max_load_s = 0.0_f64;
         for (index, unit) in units.iter().enumerate() {
             if consumed.contains(&index) {
                 continue;
@@ -324,7 +316,6 @@ fn apply_groups(units: Vec<Unit>, policy: &Policy) -> Vec<Unit> {
                 consumed.insert(index);
                 ids.extend(unit.ids.iter().cloned());
                 size = size.max(unit.size);
-                max_load_s = max_load_s.max(unit.max_load_s);
             }
         }
         if !ids.is_empty() {
@@ -332,7 +323,6 @@ fn apply_groups(units: Vec<Unit>, policy: &Policy) -> Vec<Unit> {
                 key: safe_key(group_name),
                 ids,
                 size,
-                max_load_s,
             });
         }
     }
@@ -679,19 +669,47 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
         });
     }
 
-    // ---- evict_costs: protect expensive-to-reload tiers ----
+    // ---- evict_costs: which model the solver keeps when it has to choose ----
+    // llama-swap answers a request by picking the declared set that minimizes the
+    // summed cost of the running models it would evict. Leave the costs uniform and
+    // that comparison is a body count, so a pile of idle image servers outvotes the
+    // model in active use. The tiers therefore rank by role (image < aux < llm), with
+    // the llm tier derived from the image pool it has to outweigh (ARCHITECTURE §4.7).
+    // Every model carries one, not just the non-default tiers, so the block states what
+    // the solver will do rather than leaving it to be re-derived.
+    let costs = &policy.evict_costs;
+    let image_pool: u64 = image_models
+        .iter()
+        .map(|model| costs.of(&model.id, CostRole::Image, 0) as u64)
+        .sum();
     let mut evict_costs: Vec<(String, u32)> = Vec::new();
-    for model in &aux_models {
-        evict_costs.push((model.id.clone(), 5));
+    for model in models {
+        // Nothing can evict what cannot load.
+        if excluded.contains(&model.id) {
+            continue;
+        }
+        let role = if is_aux(model) {
+            CostRole::Aux
+        } else if is_image(model) {
+            CostRole::Image
+        } else {
+            CostRole::Llm
+        };
+        evict_costs.push((model.id.clone(), costs.of(&model.id, role, image_pool)));
     }
-    for &index in &heavy_indices {
-        if baseline + units[index].size > ceiling {
-            continue; // excluded (can't run) — no evict cost
-        }
-        let cost = ((units[index].max_load_s / 4.0).round() as i64).clamp(15, 50) as u32;
-        for id in &units[index].ids {
-            evict_costs.push((id.clone(), cost));
-        }
+    let unknown: Vec<&str> = costs
+        .models
+        .keys()
+        .map(String::as_str)
+        .filter(|id| !models.iter().any(|model| model.id == *id))
+        .collect();
+    if !unknown.is_empty() {
+        warnings.push(format!(
+            "`[evict_costs.models]` names {} model id(s) the matrix has no cost for: {}. Check \
+             the spelling, or whether the model is unmeasured or excluded",
+            unknown.len(),
+            unknown.join(", ")
+        ));
     }
 
     // ---- guard 1: the fit invariant (Principle #1) — always fatal ----
@@ -936,14 +954,12 @@ mod tests {
         model_type: ModelType,
         file: Option<&str>,
         d_total: f64,
-        load_s: f64,
     ) -> ModelFootprint {
         ModelFootprint {
             id: id.to_string(),
             model_type,
             primary_file: file.map(String::from),
             d_total,
-            load_s,
         }
     }
 
@@ -951,18 +967,18 @@ mod tests {
     /// a same-file `-nothink` twin. Asserts the core fit invariant on every set.
     fn scenario() -> Vec<ModelFootprint> {
         vec![
-            footprint("embed", ModelType::Embed, Some("/e.gguf"), 7.0, 6.0),
-            footprint("rerank", ModelType::Rerank, Some("/r.gguf"), 7.0, 6.0),
-            footprint("img-a", ModelType::Image, Some("/ia.gguf"), 4.0, 2.0),
-            footprint("img-b", ModelType::Image, Some("/ib.gguf"), 9.0, 2.0),
-            footprint("small-a", ModelType::Llm, Some("/sa.gguf"), 20.0, 10.0),
-            footprint("small-b", ModelType::Llm, Some("/sb.gguf"), 25.0, 12.0),
-            footprint("mid", ModelType::Llm, Some("/mid.gguf"), 40.0, 30.0),
+            footprint("embed", ModelType::Embed, Some("/e.gguf"), 7.0),
+            footprint("rerank", ModelType::Rerank, Some("/r.gguf"), 7.0),
+            footprint("img-a", ModelType::Image, Some("/ia.gguf"), 4.0),
+            footprint("img-b", ModelType::Image, Some("/ib.gguf"), 9.0),
+            footprint("small-a", ModelType::Llm, Some("/sa.gguf"), 20.0),
+            footprint("small-b", ModelType::Llm, Some("/sb.gguf"), 25.0),
+            footprint("mid", ModelType::Llm, Some("/mid.gguf"), 40.0),
             // twin: two ids share one weight file -> one logical unit
-            footprint("twin", ModelType::Llm, Some("/twin.gguf"), 20.0, 15.0),
-            footprint("twin-nothink", ModelType::Llm, Some("/twin.gguf"), 20.0, 15.0),
+            footprint("twin", ModelType::Llm, Some("/twin.gguf"), 20.0),
+            footprint("twin-nothink", ModelType::Llm, Some("/twin.gguf"), 20.0),
             // heavy: cannot co-reside with even the smallest other unit
-            footprint("huge", ModelType::Llm, Some("/huge.gguf"), 85.0, 70.0),
+            footprint("huge", ModelType::Llm, Some("/huge.gguf"), 85.0),
         ]
     }
 
@@ -1029,10 +1045,10 @@ mod tests {
         // separate. Under `family` with a [groups] declaration they collapse into
         // one mutually-exclusive unit, sized by the larger (23).
         let models = vec![
-            footprint("embed", ModelType::Embed, Some("/e.gguf"), 5.0, 6.0),
-            footprint("gemma-q4", ModelType::Llm, Some("/g4.gguf"), 20.0, 10.0),
-            footprint("gemma-abliterated", ModelType::Llm, Some("/gab.gguf"), 23.0, 12.0),
-            footprint("other", ModelType::Llm, Some("/o.gguf"), 25.0, 15.0),
+            footprint("embed", ModelType::Embed, Some("/e.gguf"), 5.0),
+            footprint("gemma-q4", ModelType::Llm, Some("/g4.gguf"), 20.0),
+            footprint("gemma-abliterated", ModelType::Llm, Some("/gab.gguf"), 23.0),
+            footprint("other", ModelType::Llm, Some("/o.gguf"), 25.0),
         ];
         let mut policy = Policy {
             strategy: Strategy::Family,
@@ -1093,7 +1109,6 @@ mod tests {
                     ModelType::Llm,
                     Some(&format!("/{group}-{index}.gguf")),
                     1.0,
-                    5.0,
                 ));
             }
         }
@@ -1159,8 +1174,8 @@ mod tests {
         // A roster with no embed/rerank/stt/tts must never emit a `+aux` reference
         // (there's no `aux` set to point at) — that would be an invalid block.
         let models = vec![
-            footprint("model-a", ModelType::Llm, Some("/a.gguf"), 20.0, 10.0),
-            footprint("model-b", ModelType::Llm, Some("/b.gguf"), 25.0, 12.0),
+            footprint("model-a", ModelType::Llm, Some("/a.gguf"), 20.0),
+            footprint("model-b", ModelType::Llm, Some("/b.gguf"), 25.0),
         ];
         // roomy budget: both are light, packs get emitted
         let plan = build(&BuildInput {
@@ -1200,7 +1215,6 @@ mod tests {
                 ModelType::Llm,
                 Some(&format!("/m{index}.gguf")),
                 4.0, // 20 × 4 = 80 GB, all fit under a 96 GB ceiling
-                5.0,
             ));
         }
         let plan = build(&BuildInput {
@@ -1233,7 +1247,6 @@ mod tests {
                 ModelType::Llm,
                 Some(&format!("/m{index}.gguf")),
                 8.0, // 40 × 8 = 320 GB ≫ ceiling, but any ~11 co-reside → huge C(40,11)
-                5.0,
             ));
         }
         let plan = build(&BuildInput {
@@ -1265,7 +1278,6 @@ mod tests {
                 ModelType::Llm,
                 Some(&format!("/m{index}.gguf")),
                 8.0,
-                5.0,
             ));
         }
         let policy = Policy {
@@ -1284,14 +1296,157 @@ mod tests {
         );
     }
 
+    /// The cost of a model in a built plan, or `None` if none was emitted for it.
+    fn cost_of(plan: &MatrixPlan, id: &str) -> Option<u32> {
+        plan.evict_costs
+            .iter()
+            .find(|(model, _)| model == id)
+            .map(|(_, cost)| *cost)
+    }
+
+    /// Every model that can run carries a cost, ranked image < aux < llm, so the
+    /// solver never has to compare body counts. A heavy is an llm: it sits in exactly
+    /// one declared set, so a tier of its own would only change the answer when an
+    /// image is requested beside it, and there the llm tier is already the right one.
+    #[test]
+    fn every_runnable_model_gets_a_role_ranked_cost() {
+        let plan = build(&BuildInput {
+            models: &scenario(),
+            policy: &Policy::default(),
+            baseline: 0.16,
+            budget: 100.0,
+        })
+        .unwrap();
+
+        for image in ["img-a", "img-b"] {
+            assert_eq!(cost_of(&plan, image), Some(1), "{image}");
+        }
+        for aux in ["embed", "rerank"] {
+            assert_eq!(cost_of(&plan, aux), Some(5), "{aux}");
+        }
+        // …including both halves of a collapsed twin, and the heavy.
+        for llm in ["small-a", "small-b", "mid", "twin", "twin-nothink", "huge"] {
+            assert_eq!(cost_of(&plan, llm), Some(10), "{llm}");
+        }
+        assert_eq!(plan.evict_costs.len(), scenario().len(), "every model, exactly once");
+    }
+
+    /// The reported failure: an idle image pool outvoting the model in use. With
+    /// uniform costs, keeping four images (4) beat keeping one LLM (1), so the solver
+    /// evicted the LLM and the pair thrashed. Keeping either LLM must now cost strictly
+    /// more than keeping the whole pool.
+    #[test]
+    fn one_llm_outweighs_the_whole_idle_image_pool() {
+        let mut models = vec![
+            footprint("chat-a", ModelType::Llm, Some("/a.gguf"), 28.0),
+            footprint("chat-b", ModelType::Llm, Some("/b.gguf"), 26.0),
+            footprint("embed", ModelType::Embed, Some("/e.gguf"), 4.0),
+        ];
+        for index in 0..4 {
+            models.push(footprint(
+                &format!("img-{index}"),
+                ModelType::Image,
+                Some(&format!("/i{index}.gguf")),
+                8.0,
+            ));
+        }
+        let plan = build(&BuildInput {
+            models: &models,
+            policy: &Policy::default(),
+            baseline: 0.16,
+            budget: 111.5,
+        })
+        .unwrap();
+
+        let pool: u32 = (0..4).map(|index| cost_of(&plan, &format!("img-{index}")).unwrap()).sum();
+        for llm in ["chat-a", "chat-b"] {
+            assert!(
+                cost_of(&plan, llm).unwrap() > pool,
+                "keeping {llm} ({:?}) must beat keeping the {pool}-cost image pool",
+                cost_of(&plan, llm)
+            );
+        }
+        // …and it scales with the pool rather than resting on a magic number: a
+        // dearer image tier lifts the llm tier with it.
+        let dear_images = Policy {
+            evict_costs: crate::policy::EvictCosts {
+                image: Some(6),
+                ..Default::default()
+            },
+            ..Policy::default()
+        };
+        let plan = build(&BuildInput {
+            models: &models,
+            policy: &dear_images,
+            baseline: 0.16,
+            budget: 111.5,
+        })
+        .unwrap();
+        assert_eq!(cost_of(&plan, "img-0"), Some(6));
+        assert_eq!(cost_of(&plan, "chat-a"), Some(25), "4 x 6 + 1");
+    }
+
+    /// Per-id override beats the role tier; an override naming nothing in the matrix
+    /// is a typo the operator has to be told about, not a silent no-op.
+    #[test]
+    fn a_per_id_override_wins_and_an_unknown_id_warns() {
+        let mut costs = crate::policy::EvictCosts {
+            aux: Some(2),
+            ..Default::default()
+        };
+        costs.models.insert("small-a".to_string(), 99);
+        costs.models.insert("smal-a".to_string(), 99);
+        let policy = Policy {
+            evict_costs: costs,
+            ..Policy::default()
+        };
+
+        let plan = build(&BuildInput {
+            models: &scenario(),
+            policy: &policy,
+            baseline: 0.16,
+            budget: 100.0,
+        })
+        .unwrap();
+
+        assert_eq!(cost_of(&plan, "small-a"), Some(99), "the override wins");
+        assert_eq!(cost_of(&plan, "small-b"), Some(10), "its neighbour keeps the tier");
+        assert_eq!(cost_of(&plan, "embed"), Some(2), "the configured aux tier wins");
+        assert!(cost_of(&plan, "smal-a").is_none(), "an unknown id emits nothing");
+        assert!(
+            plan.warnings.iter().any(|warning| warning.contains("smal-a")),
+            "expected a typo warning, got {:?}",
+            plan.warnings
+        );
+    }
+
+    #[test]
+    fn a_model_too_big_to_run_gets_no_cost() {
+        let models = vec![
+            footprint("chat", ModelType::Llm, Some("/c.gguf"), 20.0),
+            footprint("giant", ModelType::Llm, Some("/g.gguf"), 200.0),
+        ];
+        let plan = build(&BuildInput {
+            models: &models,
+            policy: &Policy::default(),
+            baseline: 0.16,
+            budget: 100.0,
+        })
+        .unwrap();
+
+        assert!(plan.excluded.contains(&"giant".to_string()));
+        assert!(cost_of(&plan, "giant").is_none(), "nothing can evict what cannot load");
+        assert_eq!(cost_of(&plan, "chat"), Some(10));
+    }
+
     #[test]
     fn heavy_that_fits_with_aux_keeps_aux() {
         // ceiling 92. heavy(75): base+75+small(15)+aux(5) = 95.16 > 92 → heavy,
         // but base+75+aux(5) = 80.16 ≤ 92 → it keeps `+aux`.
         let models = vec![
-            footprint("embed", ModelType::Embed, Some("/e.gguf"), 5.0, 6.0),
-            footprint("small", ModelType::Llm, Some("/s.gguf"), 15.0, 10.0),
-            footprint("heavy", ModelType::Llm, Some("/h.gguf"), 75.0, 60.0),
+            footprint("embed", ModelType::Embed, Some("/e.gguf"), 5.0),
+            footprint("small", ModelType::Llm, Some("/s.gguf"), 15.0),
+            footprint("heavy", ModelType::Llm, Some("/h.gguf"), 75.0),
         ];
         let plan = build(&BuildInput {
             models: &models,

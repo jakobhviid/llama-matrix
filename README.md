@@ -90,6 +90,9 @@ small aux services fit together, but a 122B model can't:
 
 ```yaml
 matrix:
+  evict_costs:                               # what to keep when something has to go
+    gemma: 10                                #   chat models outrank the image pool…
+    z-image-turbo: 1                         #   …which reloads in seconds
   sets:
     aux:    "embed & rerank & whisper"       # small services; ride along with every set
     pack1:  "gemma & glm-flash & +aux"       # three models co-resident, under budget
@@ -105,6 +108,11 @@ margin`). (Interchangeable quant/`-nothink` variants of one model collapse into 
 `+g_<name>` "pick one" helper.) The payoff: instead of one model at a time,
 llama-swap keeps each declared combination resident and evicts only when an
 incompatible model is requested — never OOMing.
+
+**Eviction costs** decide *which* model goes when something has to. The defaults rank
+by role (an image model is the cheapest thing to drop; a chat model outranks the whole
+image pool), and you can retune a tier or pin a single model in `[evict_costs]`
+(`SPEC.md` §1.3).
 
 ## Commands
 

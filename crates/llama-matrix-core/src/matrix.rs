@@ -40,7 +40,11 @@ pub fn render(plan: &MatrixPlan) -> String {
     }
 
     if !plan.evict_costs.is_empty() {
-        lines.push("  evict_costs:   # higher = costlier reload = prefer to keep".to_string());
+        lines.push(
+            "  evict_costs:   # higher = costlier to evict = prefer to keep; set in \
+             [evict_costs] (llama-matrix.toml)"
+                .to_string(),
+        );
         for (id, cost) in &plan.evict_costs {
             lines.push(format!("    {id}: {cost}"));
         }
@@ -71,14 +75,12 @@ mod tests {
                 model_type: ModelType::Embed,
                 primary_file: Some("/e.gguf".into()),
                 d_total: 7.0,
-                load_s: 6.0,
             },
             ModelFootprint {
                 id: "chat".into(),
                 model_type: ModelType::Llm,
                 primary_file: Some("/c.gguf".into()),
                 d_total: 30.0,
-                load_s: 20.0,
             },
         ];
         let plan = build(&BuildInput {
@@ -95,9 +97,16 @@ mod tests {
         assert!(text.contains("  sets:"));
         assert!(text.contains("aux:"));
         assert!(text.ends_with('\n'));
+        // Both models carry a cost, and the block says where the numbers come from.
+        assert!(text.contains("  evict_costs:"));
+        assert!(text.contains("[evict_costs]"));
+        for (id, cost) in &plan.evict_costs {
+            assert!(text.contains(&format!("    {id}: {cost}")), "{id} missing a cost line");
+        }
         // Every rendered set line stays inside a quoted expression.
         for set in &plan.sets {
             assert!(text.contains(&format!("{}: \"", set.name)));
         }
     }
 }
+

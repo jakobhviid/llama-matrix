@@ -178,6 +178,45 @@ do this by hand:
 
 ---
 
+## Loop 7 - The wrong model keeps getting evicted
+
+Symptom: two models you use together alternate on every request, each swap paying a
+full reload, while models you have not touched in hours stay resident. Read the
+`matrix:` decision line in the llama-swap log:
+
+```
+matrix: model=<requested> set=<chosen> evict=[<what it dropped>] cost=<n>
+```
+
+`cost` is the summed eviction cost of what the chosen set drops, and llama-swap picks
+the cheapest. If it dropped the model you were using, that model was priced too low
+relative to what it kept. Retune the tier, or pin the one model, in
+`llama-matrix.toml`:
+
+```toml
+[evict_costs]
+image = 1                    # the whole image pool is cheap to drop
+llm   = 20                   # …and any chat model outranks all of it
+
+[evict_costs.models]
+"qwen3-coder-30b" = 40       # this one outranks even the other chat models
+```
+
+Then `llama-matrix build --apply` and re-request the model: the decision line should
+name a set that keeps it. Costs are a tie-break among combinations that **already
+fit**, so retuning them can never make a set unsafe.
+
+Two things this cannot fix, so check them first:
+
+- **Capacity, not policy.** If two models plus aux exceed the ceiling, no cost
+  assignment holds both - they share no declared set. `llama-matrix build` shows which
+  sets exist; if the pair appears in none, you need a smaller quant or a bigger budget.
+- **Recency.** Costs rank *roles*, not "the model I used 30 seconds ago". Two
+  equally-priced models that do not fit together will still alternate; price one of
+  them above the other to break it.
+
+---
+
 ## Agent recipe (fully non-interactive)
 
 ```
