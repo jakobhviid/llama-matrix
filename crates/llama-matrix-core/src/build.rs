@@ -402,16 +402,41 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
     } = *input;
     let ceiling = budget - policy.margin;
 
-    // ---- roles (type-derived, with policy overrides) ----
+    // ---- roles (type-derived; a NON-EMPTY `[roles]` list is AUTHORITATIVE) ----
+    // An explicit list REPLACES the derivation for that role instead of adding to
+    // it, which is the only way an operator can take a type-derived model OUT of a
+    // pool. That is the case that matters: `aux` is reserved in every emitted set,
+    // so a large-but-rarely-used embed/rerank model taxes every combination, and the
+    // operator needs to be able to demote it to an ordinary evictable unit.
+    //
+    // This was `override || derived` until 2026-08-28 — purely additive, so it could
+    // only ever ADD a model to a pool and silently ignored any attempt to narrow one.
+    // The docs advertise `[roles]` as an override, and AUX_EVICT_COST even reasons
+    // about "the few cases where a `[roles]` override leaves an aux model out of some
+    // sets" — an outcome the additive form could never produce. Parsing was covered
+    // by a test; the *effect* was not, which is how it shipped. See the tests below.
+    //
+    // Trade-off of authoritative-when-non-empty: a list written to PROMOTE one extra
+    // model into a pool must now also name the models that would otherwise be
+    // derived, or they leave it. That is the honest reading of a table documented as
+    // an override, and it fails VISIBLY (the emitted set changes) rather than
+    // silently, which is what the additive form did.
     let is_aux = |model: &ModelFootprint| {
-        policy.roles.aux.contains(&model.id)
-            || matches!(
+        if policy.roles.aux.is_empty() {
+            matches!(
                 model.model_type,
                 ModelType::Embed | ModelType::Rerank | ModelType::Stt | ModelType::TtsProxy
             )
+        } else {
+            policy.roles.aux.contains(&model.id)
+        }
     };
     let is_image = |model: &ModelFootprint| {
-        policy.roles.images.contains(&model.id) || model.model_type == ModelType::Image
+        if policy.roles.images.is_empty() {
+            model.model_type == ModelType::Image
+        } else {
+            policy.roles.images.contains(&model.id)
+        }
     };
 
     let aux_models: Vec<&ModelFootprint> = models.iter().filter(|model| is_aux(model)).collect();
@@ -841,6 +866,57 @@ mod tests {
             on_unconfirmed,
             ..Policy::default()
         }
+    }
+
+    /// A non-empty `[roles] aux` REPLACES the type derivation. Without this, the
+    /// only expressible change is adding a model to the pool, and the case operators
+    /// actually need — dropping a big, rarely-used embed/rerank model out of `aux` so
+    /// its footprint stops being reserved in every single set — is silently ignored.
+    #[test]
+    fn a_non_empty_roles_aux_list_can_remove_a_type_derived_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config_path, store) = store_and_config(dir.path(), &[]);
+
+        let mut policy = budgeted(OnUnconfirmed::Warn);
+        policy.roles.aux = vec!["chat".to_string()]; // deliberately NOT the embed model
+
+        let plan = resolve_plan(&config_path, &policy, None, &store).unwrap();
+        let aux = plan
+            .sets
+            .iter()
+            .find(|set| set.name == "aux")
+            .expect("an aux set is still emitted");
+
+        assert!(
+            aux.expr.contains("chat"),
+            "the explicit list promotes `chat` into aux: {}",
+            aux.expr
+        );
+        assert!(
+            !aux.expr.contains("embed"),
+            "and it must DEMOTE the type-derived `embed`, which the old additive \
+             `override || derived` form could never do: {}",
+            aux.expr
+        );
+    }
+
+    /// The default path must be untouched: an absent/empty table still derives roles
+    /// from model type, so existing configs keep their behaviour.
+    #[test]
+    fn an_empty_roles_table_still_derives_aux_from_model_type() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config_path, store) = store_and_config(dir.path(), &[]);
+
+        let plan =
+            resolve_plan(&config_path, &budgeted(OnUnconfirmed::Warn), None, &store).unwrap();
+        let aux = plan
+            .sets
+            .iter()
+            .find(|set| set.name == "aux")
+            .expect("aux is derived with no override");
+
+        assert!(aux.expr.contains("embed"), "derived from type: {}", aux.expr);
+        assert!(!aux.expr.contains("chat"), "an llm is not aux: {}", aux.expr);
     }
 
     /// Under the default `warn` the footprint is still packed, so the warning has to

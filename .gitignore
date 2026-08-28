@@ -1,4 +1,6 @@
 /target
+# cargo output from the containerised build (this host has no cc)
+/target-container
 .claude/
 .DS_Store
 *.swp
