@@ -33,6 +33,9 @@ probe_image_size = "1024x1024"           # WxH the image load-trigger generates 
 "/sd-models" = "/srv/llama/sd-models"
 
 [roles]                    # override the type-derived role assignment.
+# A NON-EMPTY list REPLACES the derivation for that role -- it is the COMPLETE set,
+# so a type-derived model not named here is demoted to an ordinary unit. Omit or
+# leave empty to derive from model type. See ADOPT.md.
 aux    = ["embed-id", "rerank-id", "whisper-id", "tts-id"]
 images = ["image-a", "image-b"]
 
@@ -278,6 +281,7 @@ capped at 1000 combinations per expression** — the product of that expression'
 | set | form | meaning |
 |---|---|---|
 | `aux` | `embed & rerank & whisper` | ride-along pool (`&`) |
+
 | `g_<name>` helper | `(q4 \| q6 \| q8)` | a logical model's quant alternatives (`\|`), referenced by `+g_<name>` — emitted **only** for a model with more than one variant |
 | `images` | `img1 & img2 & +aux` | all image models co-resident (`&`), any subset valid |
 | `pack<N>` | `single-a & +g_multi-b & +aux` | a maximal fitting combination of logical models |

@@ -159,6 +159,8 @@ models physically fit together — and that's the gap llama-matrix fills.
   written to be driven by a human or an agent.
 - **`PRINCIPLES.md`** — the design rules (never OOM, measure reality, fail loud, …).
 - **`ROADMAP.md`** — v1.0 scope and deferred work.
+- **`ADOPT.md`** — behaviour changes an existing config must know about, and how
+  to check whether one affects yours. Read before upgrading.
 
 All of the above are compiled into `llama-matrix --llm`.
 
