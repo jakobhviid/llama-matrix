@@ -114,3 +114,101 @@ config. It fails safe — the old behaviour is strictly more conservative and ca
 OOM — but it costs co-residency with no warning. If you pin llama-matrix anywhere
 (a Homebrew formula, CI, a second host), move them together, or leave `[roles]`
 unset until they are aligned.
+
+---
+
+## Footprints are GPU-only: host RAM is not modelled (open gap, not yet fixed)
+
+**Nothing has changed in the tool.** This entry records a limitation that the
+`[roles]` change above makes materially easier to hit, so an existing config can plan
+around it until the tool covers it. Filed from a live box, 2026-08-29.
+
+### The gap
+
+`measure` records `d_vram`, `d_gtt` and `d_total`: memory the GPU driver reports.
+It records nothing about **host RAM**, so `build` packs against the GPU budget alone.
+A pack that fits the ceiling can still exhaust the box it runs on.
+
+Recent llama.cpp (upstream PR 16391; observed on b10644) ships a host-RAM prompt
+cache, `-cram` / `--cache-ram`, **on by default at 8192 MiB per llama-server
+process**. It is anonymous, private-dirty memory: the kernel cannot reclaim it, and
+llama.cpp evicts only against its own cap, never against host pressure. Nothing in a
+llama-swap `cmd` has to mention the flag for the process to take the memory, which is
+why it is easy to miss.
+
+Measured on the box that surfaced this (unified memory, 96 GB carved out as VRAM,
+leaving 31.7 GB of host RAM, no swap, no zram):
+
+| | |
+|---|---|
+| host RAM total | 31.7 GB |
+| two resident LLMs, anonymous RSS | 9.84 GB + 9.18 GB |
+| available | 2.5 GB |
+
+Both processes were sitting at the 8 GiB cap and thrashing it:
+
+```
+W srv alloc: - making room for prompt cache entry, removing oldest entry (size = 2183.906 MiB)
+```
+
+So the per-LLM host cost is roughly `8 GiB cache + 0.6-1.3 GB baseline`, and it is
+invisible to the matrix. Note it is largely a flat per-process constant set by
+`-cram`, not a function of model size, so the tool does not need a per-model
+measurement to bound it usefully.
+
+### Why the `[roles]` change sharpens it
+
+Narrowing `aux` took that box from 90 packs / 3 LLMs to 205 packs / 5 LLMs. On the
+GPU that is sound and was verified live at 98.05 GB against a 107.5 GB ceiling. But
+the same widening multiplies the *host* cost by the number of co-resident LLMs, and
+nothing bounds it:
+
+| co-resident LLMs | host RAM needed | on a 31.7 GB box |
+|---|---|---|
+| 2 | ~19 GB | fits (this is what was verified) |
+| 3 | ~28.5 GB, plus 2.2 GB for a TTS sidecar | no headroom (187 of the 205 packs) |
+| 4 | ~38 GB | over budget (3 of the 205 packs) |
+
+The entry above frames the risk of narrowing `aux` purely as a GPU commitment
+planned against `d_total`. That framing is incomplete: it is also a host-RAM
+commitment that no measurement covers.
+
+With no cgroup cap on the container, the failure mode is the host OOM killer picking
+the largest RSS, which is a llama-server. It presents as an unexplained upstream
+death, not as a matrix error, so it will not be traced back here on its own.
+
+### What an operator should do today
+
+Bound it in the `cmd`, because the tool will not:
+
+```
+-cram 4096      # per LLM entry; 4 co-resident LLMs then need ~21 GB, not ~38 GB
+```
+
+Choose the value as `(host RAM - OS - non-LLM services) / max co-resident LLMs`, less
+headroom. `-cram 0` disables the cache outright, which is usually the wrong trade:
+the cache is what avoids reprocessing a long prompt when a third conversation switches
+back in, and prompt reprocessing is exactly the cost the matrix exists to avoid.
+
+Budget one re-measure per entry when you do. `-cram` is not on the `STRIP_WITH_VALUE`
+allowlist in `param_hash.rs`, so it stays in the hash and adding it produces a new
+key. The conservative default behaves correctly here (an unknown flag is assumed to
+matter), but the resulting measurement is close to pure waste: it will record the
+same GPU footprint as the old key, because the only thing `-cram` moved was host RAM,
+which nothing samples. That is the gap stated from the other direction. The strip-list
+doc comment reasons entirely in GPU terms ("never a wrong cache hit, which would
+under-count the matrix and could OOM"), and for a host-RAM flag both branches of that
+argument are silent about the memory that actually changed.
+
+To confirm the attribution on your own box, set `-cram` on one entry, reload, and
+compare `Anonymous` in `/proc/<pid>/smaps_rollup` before and after.
+
+### If the tool were to cover it
+
+Sketch, not a commitment. `measure` already owns the model load, so the sample point
+exists: record the process anonymous RSS alongside the GPU delta. `llama-matrix.toml`
+would need a `host_budget` (with the same explicit-scalar escape hatch `budget` has,
+since the sensor question is easier here), and the knapsack would need a second
+dimension. A cruder first cut that would still have caught this: a configurable flat
+`host_gb_per_llm`, checked against `host_budget` when emitting each pack, warning
+rather than excluding.
