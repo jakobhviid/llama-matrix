@@ -463,7 +463,7 @@ fn cmd_measure(
     json: bool,
 ) -> Result<()> {
     use llama_matrix_core::measure::{
-        sweep, MeasureOptions, DEFAULT_LOAD_TIMEOUT, DEFAULT_TRIGGER_TIMEOUT,
+        sweep, MeasureOptions, Progress, DEFAULT_LOAD_TIMEOUT, DEFAULT_TRIGGER_TIMEOUT,
     };
 
     let policy = Policy::load(PathBuf::from("llama-matrix.toml"))?;
@@ -492,7 +492,22 @@ fn cmd_measure(
             options.endpoint
         ));
     }
-    let summary = sweep(&parsed.models, &store, &policy, &options)?;
+    // Progress goes to stderr, so a `--json` pipe stays clean (Principle 9) and a
+    // sweep that spends 75 s inside one load does not look hung.
+    let show_progress = |progress: Progress| {
+        if json {
+            return;
+        }
+        match progress {
+            Progress::Loading { index, total, id } => {
+                ui::info(&format!("[{index}/{total}] loading {id} …"))
+            }
+            Progress::Done { index, total, id, outcome } => {
+                ui::info(&format!("[{index}/{total}] {id}: {outcome}"))
+            }
+        }
+    };
+    let summary = sweep(&parsed.models, &store, &policy, &options, &show_progress)?;
 
     if json {
         // The summary *is* the report (collect/render split, D16): serialize it.

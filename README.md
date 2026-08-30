@@ -16,7 +16,8 @@ Two phases, two subcommands:
 
 - **`measure`** — load each model alone, read real GPU memory occupancy after it
   stabilizes, and cache the footprint (keyed by the memory-affecting launch flags,
-  so a non-memory config edit never forces a re-measure).
+  so a non-memory config edit never forces a re-measure). Host RAM is read the same
+  way, because a combination that fits the GPU can still exhaust the box.
 - **`build`** — a pure knapsack over your models that emits only combinations whose
   measured footprints sum under the ceiling, then (with `--apply`) splices the
   `matrix:` block into your `config.yaml`.
@@ -137,12 +138,19 @@ settles, caching the delta over an empty baseline in a per-model measurement sto
 load-bearing: llama-swap reports a model ready when its server answers, which for an
 image backend is *before* it has allocated anything (the generation is the
 allocation), so `measure` waits for the load-trigger to finish, then for occupancy to
-go quiet, and records whether it got that confirmation. `build` collapses each model's
+go quiet, and records whether it got that confirmation. A footprint is a *solo*
+footprint, so the sweep also checks that nothing else was in the pool: it waits for
+occupancy to settle after each unload rather than trusting the proxy's bookkeeping,
+reads each model's baseline immediately before it loads, and reports a reading another
+model could have contaminated. `build` collapses each model's
 interchangeable quant/`-nothink` variants into one unit, then finds every *maximal*
 combination that fits under `ceiling = budget − margin` — because llama-swap treats
 any subset of a declared set as valid, declaring the maximal groups licenses all the
-smaller ones too. The default strategy declares everything that fits (maximum
-flexibility); grouping to shrink the matrix is opt-in. `build --apply` backs up your
+smaller ones too. Each combination is totalled against **host RAM** as well, since
+llama.cpp holds a host-side prompt cache of 8192 MiB per server by default and four
+co-resident LLMs can exhaust a 32 GB box while sitting comfortably inside VRAM. The
+default strategy declares everything that fits (maximum flexibility); grouping to
+shrink the matrix is opt-in. `build --apply` backs up your
 config, splices on a generated marker, waits for the hot-reload, verifies, and rolls
 back on any anomaly.
 
@@ -184,6 +192,13 @@ All of the above are compiled into `llama-matrix --llm`.
   `configure set on_unconfirmed exclude` (leave those models out) or `error` (refuse
   to build). An unconfirmed footprint is re-measured on the next sweep rather than
   reused, so a store that holds none sweeps in full.
+- The **host-RAM** check needs one assumed number: how much prompt cache a
+  llama-server holds when its command does not state `-cram`. It defaults to 8 GB,
+  llama.cpp's own per-process default, and sets that exceed the host ceiling are named
+  rather than dropped (`configure set on_host_overflow exclude` to drop them). Set
+  `-cram <MiB>` per entry and nothing is assumed; set `host_cache_gb 0` if your
+  llama.cpp has no such cache. A store measured before host RAM was recorded gets no
+  host check, and `build` says so.
 - Model **type** is inferred from the launch command (`sd-server` → image,
   `whisper-server` → stt, `--embedding`/`--reranking` → embed/rerank, else llm). An
   unusual backend binary falls back to `llm`; if its load-trigger then doesn't fit

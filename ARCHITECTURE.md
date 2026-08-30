@@ -80,6 +80,11 @@ file — the pure half never needs a sensor.
 
 ### 2.1 Phase 1 — measure
 
+A full sweep loads every model in turn and can run for the better part of an hour,
+most of it inside one wait for `ready`. `sweep` therefore takes a progress callback
+and reports each model as it starts and finishes; the core never prints (the CLI puts
+those lines on stderr, so a `--json` pipe stays clean - Principle 9).
+
 For each model in the config worklist:
 
 1. Unload everything (`POST /api/models/unload`; `GET /unload` is a legacy

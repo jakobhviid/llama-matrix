@@ -86,6 +86,22 @@ pub struct MeasureOptions {
     pub probe_image_size: String,
 }
 
+/// A sweep's progress, for a frontend that wants to show it.
+///
+/// A full sweep loads every model in turn and can run for the better part of an
+/// hour, most of it inside one `wait_ready`. Reporting nothing until the summary is
+/// indistinguishable from being hung, and the operator's only recourse is to watch
+/// the GPU from another terminal. The core does not print (Principle 9 puts progress
+/// on stderr and keeps `--json` clean), so it hands the frontend these instead.
+#[derive(Debug)]
+pub enum Progress<'a> {
+    /// About to load model `index` of `total` (both 1-based counts of the worklist).
+    Loading { index: usize, total: usize, id: &'a str },
+    /// Finished with it. `outcome` is a rendered one-liner ("19.41 GB in 12.0 s",
+    /// "cached", "FAILED").
+    Done { index: usize, total: usize, id: &'a str, outcome: String },
+}
+
 /// One model that could not be measured, and why (surfaced in the `--json` report
 /// and the human failure list).
 #[derive(Debug, Clone, Serialize)]
@@ -826,11 +842,15 @@ fn store_measurement(store: &Store, record: &ModelRecord, measurement: Measureme
 }
 
 /// Run the sweep. Detects the GPU (errors if none — measure needs a sensor).
+///
+/// `progress` is called as each model starts and finishes; pass `&|_| {}` to ignore
+/// it. See [`Progress`] for why the core reports rather than prints.
 pub fn sweep(
     records: &[ModelRecord],
     store: &Store,
     policy: &Policy,
     options: &MeasureOptions,
+    progress: &dyn Fn(Progress),
 ) -> Result<MeasureSummary> {
     let gpu = platform::detect().context("measure needs a GPU sensor")?;
     let _lock = LockGuard::acquire(store.dir())?;
@@ -865,22 +885,30 @@ pub fn sweep(
     // would load nothing (or something else).
     let served = served_ids(&agent, &options.endpoint);
 
-    let only = options.only.as_ref();
-    for record in records {
-        if record.model_type == ModelType::TtsProxy {
-            continue; // proxy entries allocate no GPU; footprint is hand-set
-        }
-        if let Some(only) = only {
-            if !only.contains(&record.id) {
-                continue;
-            }
-        }
+    // The worklist, resolved before the loop so progress can count against a total
+    // the operator recognises. A proxy entry allocates no GPU and its footprint is
+    // hand-set, so it is not work; nor is a model `--only` excludes.
+    let worklist: Vec<&ModelRecord> = records
+        .iter()
+        .filter(|record| record.model_type != ModelType::TtsProxy)
+        .filter(|record| {
+            options.only.as_ref().is_none_or(|only| only.contains(&record.id))
+        })
+        .collect();
+    let total = worklist.len();
+
+    for (position, record) in worklist.iter().enumerate() {
+        let index = position + 1;
+        let report = |outcome: String| {
+            progress(Progress::Done { index, total, id: &record.id, outcome });
+        };
 
         // pre-check the weight file exists on the host (skip a doomed load)
         if let Some(container_path) = &record.primary_file {
             let host_path = policy.to_host(container_path);
             if !Path::new(&host_path).exists() {
                 summary.skipped_missing.push(record.id.clone());
+                report("skipped, weight file missing".to_string());
                 continue;
             }
         }
@@ -893,12 +921,18 @@ pub fn sweep(
         let stored = store.select(&record.id, &record.param_hash)?;
         if !options.force && stored.as_ref().is_some_and(Measurement::is_confirmed) {
             summary.cached.push(record.id.clone());
+            report(format!(
+                "cached, {:.2} GB",
+                stored.as_ref().map_or(0.0, |entry| entry.d_total)
+            ));
             continue;
         }
 
         // Weights on disk: a floor on the footprint of a fully offloaded model, and
         // the one cross-check that needs no GPU and no cooperation from the backend.
         let weights = weights_gb(record, policy);
+
+        progress(Progress::Loading { index, total, id: &record.id });
 
         // This model's own baseline, read after the pool is verifiably empty. Per
         // model rather than once per sweep: a baseline that still counts a previous
@@ -1205,6 +1239,16 @@ pub fn sweep(
             },
         };
 
+        report(match &recorded {
+            Some(measurement) if measurement.is_ok() => format!(
+                "{:.2} GB in {:.1} s{}",
+                measurement.d_total,
+                measurement.load_s,
+                if measurement.contended == Some(true) { " (contended)" } else { "" }
+            ),
+            Some(_) => "FAILED".to_string(),
+            None => "nothing recorded".to_string(),
+        });
         if let Some(measurement) = recorded {
             store_measurement(store, record, measurement)?;
         }

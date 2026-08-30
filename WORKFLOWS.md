@@ -67,6 +67,8 @@ llama-matrix build --apply --no-verify   # …or a pure backup-and-splice (no ne
   exception: an entry whose allocation was never **confirmed** is re-measured rather
   than reused. A store holding no confirmations therefore sweeps in full (budget the
   time for it); one holding them re-loads only what is suspect.
+- A sweep reports each model as it starts and finishes (`[3/26] loading x …`) on
+  stderr, so a long one is visibly alive and `--json` is unaffected.
 - **Quiesce the box before a sweep.** A footprint is a *solo* footprint, and any
   client that asks llama-swap for a model during a sample window puts its memory in
   someone else's number. Go looking for the periodic callers specifically: health
