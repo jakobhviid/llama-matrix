@@ -67,11 +67,12 @@ llama-matrix build --apply --no-verify   # …or a pure backup-and-splice (no ne
   exception: an entry whose allocation was never **confirmed** is re-measured rather
   than reused. A store holding no confirmations therefore sweeps in full (budget the
   time for it); one holding them re-loads only what is suspect.
-- Read the sweep's warnings before building. Two are new and mean different things:
+- Read the sweep's warnings before building. Two of them mean different things:
   *recorded WITHOUT confirming the allocation finished* is actionable (the number may
   be short - re-measure, and check the model's trigger works), while *recorded without
-  confirming llama-swap loaded the measured command* is permanent for backends with no
-  `/props` and is informational.
+  confirming llama-swap loaded the measured command* is informational, and on a
+  llama-swap that does not report the command it launched it can be permanent for a
+  backend with no `/props`.
 - `build` selects each model's *current-config* footprint, collapses variants,
   runs the knapsack, and emits the block. Always preview before `--apply`. If the
   header carries an *unconfirmed footprint* warning, the sets it names are the ones

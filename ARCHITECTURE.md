@@ -90,10 +90,13 @@ For each model in the config worklist:
    `starting` means wait; `stopping`/`stopped`/`shutdown` mean do-not-sample (a
    tearing-down model's reading is meaningless).
 4. **Cross-check** that the server which just loaded is running the command we
-   hashed, by reading its own `/props` through llama-swap's `/upstream/<id>/` route:
-   llama-swap serves whatever config *it* last reloaded, which is not necessarily the
-   file we parsed. A mismatch records nothing and fails the model; an unconfirmable
-   backend (image, STT) is measured and reported as unverified (SPEC §7.1).
+   hashed: llama-swap serves whatever config *it* last reloaded, which is not
+   necessarily the file we parsed. `/running` carries the command llama-swap
+   launched, and that is compared on its memory tokens; where it is absent, the
+   served command is inferred from the loaded server's own `/props` through the
+   `/upstream/<id>/` route. A mismatch records nothing and fails the model; where
+   neither source can decide, the model is measured and reported as unverified
+   (SPEC §7.1).
 5. **Await the trigger.** `ready` means the upstream answers HTTP, which for a
    lazily-allocating backend is long before its weights are resident: sd-server
    allocates when a generation actually runs, so the trigger's own completion is the

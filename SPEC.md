@@ -404,9 +404,20 @@ those disagree (the file was edited underneath it, the reload hasn't landed, or
 describing a command that never ran: wrong data that never self-corrects, because
 the hash then looks present.
 
-No llama-swap endpoint reports a model's `cmd` (checked against v247), so the served
-command is confirmed through the loaded server itself: `GET /upstream/<id>/props`
-returns llama.cpp's `default_generation_settings.n_ctx` and `total_slots`.
+Two sources answer this, strongest first.
+
+**`GET /running` reports the command llama-swap launched** (v251+). That settles the
+question outright, and for *every* backend: an image or STT server has no `/props`,
+but llama-swap knows what it started. The comparison runs on the **memory command**
+(the param-hash's token set, §3), so the port llama-swap assigns and the
+footprint-neutral flags never raise a false mismatch, while any flag the hash is
+built from does. A side still carrying an unexpanded `${...}` is not compared:
+llama-swap substitutes `${PORT}`/`${PID}` at launch and the config file never can.
+A mismatch names the tokens that moved, not both whole commands.
+
+**Otherwise the served command is inferred from the loaded server**, via
+`GET /upstream/<id>/props`, which returns llama.cpp's
+`default_generation_settings.n_ctx` and `total_slots`.
 
 **`-c` is not always the same quantity**, which the comparison has to respect.
 Measured on one llama-swap v247 against one llama.cpp build:
@@ -426,9 +437,11 @@ at once.
 - **Mismatch** → record nothing and report the model as failed with both numbers.
   Storing it is the one outcome that must not happen (§1 of `PRINCIPLES.md`).
 - **Unconfirmable** → measure and record, but list the model in the summary's
-  `unverified_serving`. There is no `/props` on an image or STT backend, and none to
-  compare against when the command says `-c 0` (resolved from the model at load).
-  Reported rather than passed off as verified (fail loud, never silent).
+  `unverified_serving`. That is where a llama-swap reporting no launched command
+  lands when `/props` also has nothing to compare: an image or STT backend answers
+  no `/props` at all, and a command saying `-c 0` (resolved from the model at load)
+  offers nothing to compare against. Reported rather than passed off as verified
+  (fail loud, never silent).
 
 A model id missing from `GET /v1/models` is a **hint** only, used to explain a failed
 load: an `unlisted` model is absent from that roster and still loadable (§8).
@@ -448,7 +461,8 @@ The trigger's completion is the signal, because for such a backend **the trigger
 is the allocation**:
 
 1. Fire the trigger (§7), poll `/running` for `ready`, cross-check the served command
-   (§7.1).
+   (§7.1) - which `/running` itself carries, so it is read at the moment the model is
+   ready rather than from a second request that could catch it being evicted.
 2. **Await the trigger.** A 2xx means the work that allocates has finished. A non-2xx or
    a transport failure means the model may be half-loaded or already tearing down, so
    nothing is recorded beyond a `FAILED` entry naming the status. Overrunning the wait

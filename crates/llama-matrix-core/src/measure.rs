@@ -168,8 +168,21 @@ fn poll_agent() -> ureq::Agent {
     ureq::builder().timeout(Duration::from_secs(10)).build()
 }
 
-/// `{model: state}` from `GET /running` (empty on any error).
-fn running(agent: &ureq::Agent, endpoint: &str) -> HashMap<String, String> {
+/// One `GET /running` entry: what llama-swap says about a model it has loaded.
+#[derive(Debug, Clone, Default)]
+struct Running {
+    /// `ready` | `starting` | `stopping` | ... (empty when the field is absent).
+    state: String,
+    /// The command llama-swap **launched**, when it reports one. This is the
+    /// ground truth the serving cross-check wants: it is the served command
+    /// itself, not an inference from what the loaded server says it did. Absent on
+    /// a llama-swap too old to report it, which is why [`check_serving`] keeps the
+    /// `/props` path as a fallback.
+    cmd: Option<String>,
+}
+
+/// `{model: entry}` from `GET /running` (empty on any error).
+fn running(agent: &ureq::Agent, endpoint: &str) -> HashMap<String, Running> {
     let url = format!("{endpoint}/running");
     let Ok(response) = agent.get(&url).call() else {
         return HashMap::new();
@@ -177,19 +190,37 @@ fn running(agent: &ureq::Agent, endpoint: &str) -> HashMap<String, String> {
     let Ok(text) = response.into_string() else {
         return HashMap::new();
     };
-    let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else {
-        return HashMap::new();
+    parse_running(&text)
+}
+
+/// The pure half of [`running`]: `GET /running`'s body into `{model: entry}`.
+fn parse_running(body: &str) -> HashMap<String, Running> {
+    let mut entries = HashMap::new();
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(body) else {
+        return entries;
     };
-    let mut states = HashMap::new();
-    if let Some(entries) = json.get("running").and_then(|value| value.as_array()) {
-        for entry in entries {
+    if let Some(array) = json.get("running").and_then(|value| value.as_array()) {
+        for entry in array {
             if let Some(model) = entry.get("model").and_then(|value| value.as_str()) {
-                let state = entry.get("state").and_then(|value| value.as_str()).unwrap_or("");
-                states.insert(model.to_string(), state.to_string());
+                entries.insert(
+                    model.to_string(),
+                    Running {
+                        state: entry
+                            .get("state")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        cmd: entry
+                            .get("cmd")
+                            .and_then(|value| value.as_str())
+                            .map(str::to_string)
+                            .filter(|cmd| !cmd.trim().is_empty()),
+                    },
+                );
             }
         }
     }
-    states
+    entries
 }
 
 /// The model ids llama-swap currently advertises, from `GET /v1/models`.
@@ -250,12 +281,12 @@ fn declared_context(cmd: &str) -> Option<(u64, Option<u64>)> {
 /// Whether the model llama-swap loaded is the one whose command we hashed.
 #[derive(Debug, PartialEq, Eq)]
 enum Serving {
-    /// The live server's context matches the config's.
+    /// The served command matches the config's, on the memory tokens.
     Confirmed,
     /// It does not: llama-swap is serving a different command than the config
-    /// declares, so the footprint about to be recorded belongs to neither. Both
-    /// sides are rendered for the failure message.
-    Mismatch { declared: String, served: String },
+    /// declares, so the footprint about to be recorded belongs to neither.
+    /// `detail` names both sides of the disagreement for the failure message.
+    Mismatch { detail: String },
     /// Nothing to compare against, so the recording is unconfirmed (not wrong).
     Unconfirmed,
 }
@@ -268,11 +299,24 @@ enum Serving {
 /// reload hasn't landed, or `--config` points at a copy), the footprint would be
 /// stored under the new hash while describing a command that never ran. That entry
 /// never self-corrects, because the hash then looks present.
+///
+/// Two sources, strongest first. `GET /running` reports the command llama-swap
+/// launched, which settles the question outright and for **every** backend: an
+/// image or STT server has no `/props`, but llama-swap knows what it started. When
+/// that field is absent (an older llama-swap), the served command is inferred from
+/// what the loaded llama.cpp server says it did, via `/props`.
 fn check_serving(
     agent: &ureq::Agent,
     endpoint: &str,
     record: &ModelRecord,
+    served_cmd: Option<&str>,
 ) -> Serving {
+    if let Some(served_cmd) = served_cmd {
+        match compare_commands(&record.cmd, served_cmd) {
+            Serving::Unconfirmed => {} // an unexpanded placeholder; fall through
+            decided => return decided,
+        }
+    }
     // Only llama.cpp servers answer /props; image and STT backends do not, and a
     // proxy never loads at all.
     if !matches!(record.model_type, ModelType::Llm | ModelType::Embed | ModelType::Rerank) {
@@ -285,6 +329,59 @@ fn check_serving(
         return Serving::Unconfirmed;
     };
     compare_context(declared, served)
+}
+
+/// Compare the command the config declares against the one llama-swap launched,
+/// on the **memory** tokens only ([`memory_cmd`]).
+///
+/// Comparing the memory command rather than the raw string is what makes this
+/// usable: llama-swap assigns the port, and a `--reasoning`/`--jinja` difference is
+/// footprint-neutral by construction. What is left is exactly the set of tokens the
+/// param-hash is built from, so "these differ" and "the footprint would be filed
+/// under a hash that never ran" are the same statement.
+///
+/// `Unconfirmed` when either side still carries an unexpanded `${...}`: llama-swap
+/// substitutes `${PORT}`/`${PID}` at launch and the config file never can, so a
+/// difference there says nothing about the memory flags.
+fn compare_commands(declared_cmd: &str, served_cmd: &str) -> Serving {
+    let declared = memory_cmd(declared_cmd);
+    let served = memory_cmd(served_cmd);
+    if declared.contains("${") || served.contains("${") {
+        return Serving::Unconfirmed;
+    }
+    if declared == served {
+        return Serving::Confirmed;
+    }
+    Serving::Mismatch {
+        detail: format!(
+            "this config declares `{}` where llama-swap launched `{}`",
+            token_difference(&declared, &served),
+            token_difference(&served, &declared)
+        ),
+    }
+}
+
+/// The tokens of `left` that `right` does not have, rendered for a message.
+///
+/// A whole 20-token command on each side of a mismatch buries the one flag that
+/// moved; the difference is the part an operator can act on. `(nothing)` when the
+/// two sides differ only by the *other* direction's extra tokens.
+fn token_difference(left: &str, right: &str) -> String {
+    let mut remaining: Vec<&str> = right.split_whitespace().collect();
+    let mut only_in_left: Vec<&str> = Vec::new();
+    for token in left.split_whitespace() {
+        match remaining.iter().position(|other| *other == token) {
+            Some(index) => {
+                remaining.remove(index);
+            }
+            None => only_in_left.push(token),
+        }
+    }
+    if only_in_left.is_empty() {
+        "(nothing)".to_string()
+    } else {
+        only_in_left.join(" ")
+    }
 }
 
 /// The pure half of [`check_serving`]: does a `(context, explicit_slots)`
@@ -313,8 +410,11 @@ fn compare_context(declared: (u64, Option<u64>), served: (u64, u64)) -> Serving 
         None => format!("-c {context}"),
     };
     let mismatch = || Serving::Mismatch {
-        declared: rendered(declared_context, declared_slots),
-        served: format!("{served_per_slot} per slot across {served_slots} slot(s)"),
+        detail: format!(
+            "this config declares `{}` but the loaded server reports {served_per_slot} per slot \
+             across {served_slots} slot(s)",
+            rendered(declared_context, declared_slots)
+        ),
     };
 
     if let Some(slots) = declared_slots {
@@ -485,17 +585,34 @@ fn await_allocation(trigger: &Trigger, gpu: &dyn GpuMemory, budget: Duration) ->
     }
 }
 
-/// Poll until the model is `ready` (returns load seconds) or gives up / tears down.
+/// The model reached `ready`: how long it took, and the command llama-swap reports
+/// having launched for it (`None` on a llama-swap that does not report one).
+struct Ready {
+    load_s: f64,
+    served_cmd: Option<String>,
+}
+
+/// Poll until the model is `ready` or gives up / tears down.
+///
+/// The served command is captured **here**, at the moment the model is ready, rather
+/// than re-read later: it is already in the response that settled the state, and a
+/// second request could catch a model llama-swap has begun to evict.
 fn wait_ready(
     agent: &ureq::Agent,
     endpoint: &str,
     model: &str,
     timeout: Duration,
-) -> Option<f64> {
+) -> Option<Ready> {
     let start = Instant::now();
     while start.elapsed() < timeout {
-        match running(agent, endpoint).get(model).map(String::as_str) {
-            Some("ready") => return Some(start.elapsed().as_secs_f64()),
+        let entries = running(agent, endpoint);
+        match entries.get(model).map(|entry| entry.state.as_str()) {
+            Some("ready") => {
+                return Some(Ready {
+                    load_s: start.elapsed().as_secs_f64(),
+                    served_cmd: entries.get(model).and_then(|entry| entry.cmd.clone()),
+                })
+            }
             Some("stopping") | Some("stopped") | Some("shutdown") => return None,
             _ => {}
         }
@@ -664,14 +781,14 @@ pub fn sweep(
 
         unload_all(&agent, &options.endpoint, Duration::from_secs(2));
         let fired = trigger(&record.id, record.model_type, options);
-        let load_seconds = wait_ready(&agent, &options.endpoint, &record.id, options.load_timeout);
+        let ready = wait_ready(&agent, &options.endpoint, &record.id, options.load_timeout);
 
         // Every path below yields at most one measurement and then falls through to a
         // single store-and-unload. `None` means record nothing at all, which is
         // reserved for a serving mismatch: that reading describes neither the config's
         // command nor the served one, so storing it is the one outcome that must not
         // happen (it would look like a present hash forever after).
-        let recorded: Option<Measurement> = match load_seconds {
+        let recorded: Option<Measurement> = match ready {
             None => {
                 // The trigger may still be in flight. Wait it out (bounded) so a
                 // request from this model can never allocate during the next model's
@@ -713,15 +830,19 @@ pub fn sweep(
             // Is the server that just loaded running the command we hashed? On a
             // mismatch the reading belongs to neither command (Principle 2, and
             // Principle 1 downstream).
-            Some(load) => match check_serving(&agent, &options.endpoint, record) {
-                Serving::Mismatch { declared, served } => {
+            Some(Ready { load_s: load, served_cmd }) => match check_serving(
+                &agent,
+                &options.endpoint,
+                record,
+                served_cmd.as_deref(),
+            ) {
+                Serving::Mismatch { detail } => {
                     summary.failed.push(Failure {
                         id: record.id.clone(),
                         reason: format!(
-                            "llama-swap loaded {served} while this config declares \
-                             {declared}, so it is serving a different command - no \
-                             footprint recorded (reload llama-swap, or measure the \
-                             config it actually loaded)"
+                            "llama-swap is serving a different command than the one being \
+                             measured ({detail}) - no footprint recorded (reload llama-swap, \
+                             or measure the config it actually loaded)"
                         ),
                     });
                     None
@@ -1149,28 +1270,114 @@ mod tests {
         assert_eq!(
             compare_context((393216, Some(2)), (262144, 2)),
             Serving::Mismatch {
-                declared: "-c 393216 -np 2".into(),
-                served: "262144 per slot across 2 slot(s)".into(),
+                detail: "this config declares `-c 393216 -np 2` but the loaded server reports \
+                         262144 per slot across 2 slot(s)"
+                    .into(),
             }
         );
         // A one-token change is caught too (the reported reproduction).
         assert_eq!(
             compare_context((8191, None), (8192, 4)),
             Serving::Mismatch {
-                declared: "-c 8191".into(),
-                served: "8192 per slot across 4 slot(s)".into(),
+                detail: "this config declares `-c 8191` but the loaded server reports 8192 per \
+                         slot across 4 slot(s)"
+                    .into(),
             }
         );
         // An explicitly declared slot count that the server did not honour.
         assert_eq!(
             compare_context((524288, Some(2)), (131072, 4)),
             Serving::Mismatch {
-                declared: "-c 524288 -np 2".into(),
-                served: "131072 per slot across 4 slot(s)".into(),
+                detail: "this config declares `-c 524288 -np 2` but the loaded server reports \
+                         131072 per slot across 4 slot(s)"
+                    .into(),
             }
         );
         // Integer division of an odd total across slots is not a mismatch.
         assert_eq!(compare_context((8191, Some(2)), (4095, 2)), Serving::Confirmed);
+    }
+
+    /// llama-swap v251 reports the command it launched in `GET /running`. That is
+    /// the served command itself, so the cross-check no longer has to infer it from
+    /// what the loaded server says it did.
+    #[test]
+    fn running_carries_the_launched_command() {
+        let body = r#"{"running":[{"model":"embed","state":"ready",
+            "cmd":"/app/llama-server -m /m.gguf --port 9050 -c 8192\n"}]}"#;
+        let entries = parse_running(body);
+        assert_eq!(entries["embed"].state, "ready");
+        assert_eq!(
+            entries["embed"].cmd.as_deref(),
+            Some("/app/llama-server -m /m.gguf --port 9050 -c 8192\n")
+        );
+
+        // An older llama-swap reports no cmd; an empty one is the same as none, so a
+        // blank string can never be compared against and called a mismatch.
+        let older = parse_running(r#"{"running":[{"model":"embed","state":"ready"}]}"#);
+        assert_eq!(older["embed"].cmd, None);
+        let blank = parse_running(r#"{"running":[{"model":"embed","state":"ready","cmd":"  "}]}"#);
+        assert_eq!(blank["embed"].cmd, None);
+    }
+
+    /// The comparison runs on the *memory* command, so the tokens llama-swap owns
+    /// (the port) and the ones known to be footprint-neutral never raise a false
+    /// mismatch, while any flag the param-hash is built from does.
+    #[test]
+    fn a_served_command_is_compared_on_its_memory_tokens() {
+        let declared = "/app/llama-server -m /m.gguf --host 127.0.0.1 --port 9050 -ngl 99 \
+                        -c 8192 -fa on --jinja";
+        // llama-swap launched the same thing on another port, with a folded newline.
+        let served = "/app/llama-server -m /m.gguf --host 127.0.0.1 --port 9111 -ngl 99\n \
+                      -c 8192 -fa on --jinja";
+        assert_eq!(compare_commands(declared, served), Serving::Confirmed);
+
+        // A real memory flag moved: the footprint would be filed under a hash that
+        // never ran, which is the whole failure being guarded.
+        let restretched = declared.replace("-c 8192", "-c 262144");
+        let Serving::Mismatch { detail } = compare_commands(declared, &restretched) else {
+            panic!("a changed -c must be a mismatch");
+        };
+        assert!(detail.contains("`8192`"), "{detail}");
+        assert!(detail.contains("`262144`"), "{detail}");
+
+        // An unexpanded runtime placeholder is not evidence either way: llama-swap
+        // substitutes it at launch and the config file never can.
+        assert_eq!(
+            compare_commands("/app/llama-server -m /m.gguf -c ${CTX}", "/app/llama-server -m /m.gguf -c 8192"),
+            Serving::Unconfirmed
+        );
+    }
+
+    /// The mismatch message names the tokens that moved, not both whole commands:
+    /// a 20-token command on each side buries the one flag that changed.
+    #[test]
+    fn token_difference_names_only_what_moved() {
+        assert_eq!(token_difference("a -c 8192 b", "a -c 262144 b"), "8192");
+        assert_eq!(token_difference("a b", "a b c"), "(nothing)");
+        // A repeated token is matched by count, not by presence.
+        assert_eq!(token_difference("a a b", "a b"), "a");
+    }
+
+    /// The `/props` fallback still runs when llama-swap reports no command, and an
+    /// image backend (no `/props` at all) is then unconfirmable, as before.
+    #[test]
+    fn without_a_served_command_the_props_path_still_decides() {
+        // Confirmed straight from the command, whatever the backend: this is the
+        // path that gives an image or STT server a verdict for the first time.
+        let sd = ModelRecord::from_expanded(
+            "z-image",
+            "/opt/sdcpp/bin/sd-server --diffusion-model /sd/u.gguf --steps 8",
+        );
+        assert_eq!(
+            check_serving(&poll_agent(), "http://127.0.0.1:1", &sd, Some(&sd.cmd)),
+            Serving::Confirmed
+        );
+        // With no served command and no reachable `/props`, it stays unconfirmed
+        // rather than being passed off as verified.
+        assert_eq!(
+            check_serving(&poll_agent(), "http://127.0.0.1:1", &sd, None),
+            Serving::Unconfirmed
+        );
     }
 
     #[test]
