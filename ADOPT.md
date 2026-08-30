@@ -281,8 +281,10 @@ Four mechanisms, sized to the asymmetry (SPEC §7.3).
 - **A resident that *leaves* mid-window fails the model.** It was subtracted from the
   reading and is not in it, so the delta would be short. Nothing is recorded.
 - **A resident that *arrives* mid-window sets `contended: true`** and is reported by
-  `measure` and again by `build`. It gates nothing, because arriving memory can only
-  make a reading too high.
+  `measure` and again by `build`. It gates nothing in `build`, because arriving
+  memory can only make a reading too high, but it does stop that reading from
+  overwriting one already recorded as clean. Newer is not better when the newer
+  number is known to be contaminated.
 
 Two more numbers get checked because they were already on disk:
 

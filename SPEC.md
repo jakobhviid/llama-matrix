@@ -550,10 +550,18 @@ Contamination only ever adds occupancy, so the minimum is the best estimate of w
 the box holds with nothing loaded, which is what `build` uses as its always-resident
 floor.
 
-`contended` gates nothing, and that is deliberate: contamination *adds*, so a
-contended reading is over-measured, and over-measuring wastes packs but cannot OOM.
-It is reported so the operator can quiesce the box and `--force` the entries back.
-Compare `allocation_confirmed`, which is the opposite direction and does gate.
+`contended` gates nothing in `build`, and that is deliberate: contamination *adds*,
+so a contended reading is over-measured, and over-measuring wastes packs but cannot
+OOM. It is reported so the operator can quiesce the box and `--force` the entries
+back. Compare `allocation_confirmed`, which is the opposite direction and does gate.
+
+It does decide one thing: **a contended reading never overwrites one recorded as
+clean.** More recent is not better when the newer number is known to include memory
+that is not the model's, and the stored one was taken under conditions known to be
+better. The same rule that already stops a `FAILED` load from clobbering an `ok`
+footprint, for the same reason: a measurement is GPU time already paid for and
+nothing else deletes one. Only `contended: false` counts as clean; an entry written
+before the check existed claims nothing either way and is replaced as usual.
 
 **A re-measure that disagrees is reported.** When a fresh reading of an existing
 `(model, param-hash)` differs from the stored one by more than `max(0.25 GB, 2%)`,

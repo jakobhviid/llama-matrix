@@ -832,32 +832,48 @@ fn weights_gb(record: &ModelRecord, policy: &Policy) -> Option<f64> {
 }
 
 /// Upsert one measurement into the model's store file, refreshing the type/file the
-/// entry is filed under.
+/// entry is filed under. Returns whether it wrote.
 ///
-/// A `FAILED` result never overwrites an existing `ok` footprint at the same hash. A
-/// measurement is data the operator paid GPU time for, the store's rule is that nothing
-/// is auto-deleted (SPEC §2), and a bad load in this sweep (a rejected trigger, a
-/// timeout during a `--force` re-measure) is no evidence against the stored number,
-/// while clobbering it would silently drop the model out of every future matrix. The
-/// failure is reported in the sweep summary either way.
-fn store_measurement(store: &Store, record: &ModelRecord, measurement: Measurement) -> Result<()> {
+/// Two kinds of new reading are refused, both for the same reason: *more recent* is
+/// not *better* when the newer number is known to be worse evidence, and a
+/// measurement is GPU time the operator paid for that nothing else auto-deletes
+/// (SPEC §2). Both refusals are reported in the sweep summary.
+///
+/// - A **`FAILED`** result never overwrites an `ok` footprint at the same hash. A
+///   bad load in this sweep (a rejected trigger, a timeout during a `--force`
+///   re-measure) is no evidence against the stored number, and clobbering it would
+///   silently drop the model out of every future matrix.
+/// - A **contended** reading never overwrites a reading recorded as clean. Something
+///   else was in the pool, so the new number includes memory that is not this
+///   model's, and the stored one was taken under conditions known to be better. Only
+///   `contended: Some(false)` counts as clean: an entry written before the check
+///   existed says nothing either way and is replaced as usual.
+fn store_measurement(
+    store: &Store,
+    record: &ModelRecord,
+    measurement: Measurement,
+) -> Result<bool> {
     let mut model_store = store.read_model(&record.id)?.unwrap_or_else(|| ModelStore {
         model_type: record.model_type.as_str().to_string(),
         file: record.primary_file.clone(),
         measurements: Default::default(),
     });
-    if !measurement.is_ok()
-        && model_store
-            .measurements
-            .get(&record.param_hash)
-            .is_some_and(Measurement::is_ok)
-    {
-        return Ok(());
+    let existing = model_store.measurements.get(&record.param_hash);
+    let refuse = match existing {
+        Some(previous) if previous.is_ok() => {
+            !measurement.is_ok()
+                || (measurement.contended == Some(true) && previous.contended == Some(false))
+        }
+        _ => false,
+    };
+    if refuse {
+        return Ok(false);
     }
     model_store.model_type = record.model_type.as_str().to_string();
     model_store.file = record.primary_file.clone();
     model_store.measurements.insert(record.param_hash.clone(), measurement);
-    store.write_model(&record.id, &model_store)
+    store.write_model(&record.id, &model_store)?;
+    Ok(true)
 }
 
 /// Run the sweep. Detects the GPU (errors if none - measure needs a sensor).
@@ -1276,7 +1292,7 @@ pub fn sweep(
             },
         };
 
-        report(match &recorded {
+        let outcome = match &recorded {
             Some(measurement) if measurement.is_ok() => format!(
                 "{:.2} GB in {:.1} s{}",
                 measurement.d_total,
@@ -1285,10 +1301,19 @@ pub fn sweep(
             ),
             Some(_) => "FAILED".to_string(),
             None => "nothing recorded".to_string(),
+        };
+        // `None` means there was deliberately nothing to store (a serving mismatch, a
+        // departure mid-window), which the outcome text already says; only a reading
+        // the store *refused* needs the extra sentence.
+        let refused = match recorded {
+            Some(measurement) => !store_measurement(store, record, measurement)?,
+            None => false,
+        };
+        report(if refused {
+            format!("{outcome}, not stored (the better reading already on record is kept)")
+        } else {
+            outcome
         });
-        if let Some(measurement) = recorded {
-            store_measurement(store, record, measurement)?;
-        }
         // The trigger has been awaited (or waited out) by now, so nothing of this
         // model's is still allocating; release the channel. The pool is cleared at
         // the top of the next model's window, which is also where its baseline is
@@ -1767,6 +1792,64 @@ mod tests {
             entries.into_keys().filter(|id| id != "under-test").collect();
         others.sort();
         assert_eq!(others, vec!["aux-tts".to_string(), "rag-embed".to_string()]);
+    }
+
+    /// The store keeps the better evidence, not the newer. Both refusals share the
+    /// reason: a measurement is GPU time already paid for, and nothing else deletes
+    /// one.
+    #[test]
+    fn a_worse_reading_does_not_displace_a_better_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().join("measurements"));
+        let record = ModelRecord::from_expanded("m", "/app/llama-server -m /m.gguf -c 4096");
+        let stored = |hash: &str| {
+            store.read_model("m").unwrap().unwrap().measurements.get(hash).cloned().unwrap()
+        };
+
+        let clean = Measurement {
+            status: "ok".into(),
+            d_total: 16.12,
+            allocation_confirmed: Some(true),
+            contended: Some(false),
+            ..Default::default()
+        };
+        assert!(store_measurement(&store, &record, clean).unwrap());
+        assert_eq!(stored(&record.param_hash).d_total, 16.12);
+
+        // Contended: something else was in the pool, so this number includes memory
+        // that is not the model's. Exactly the 6.52 GB an embedding model added to a
+        // 16.12 GB image server on the box that raised this.
+        let contended = Measurement {
+            status: "ok".into(),
+            d_total: 22.64,
+            allocation_confirmed: Some(true),
+            contended: Some(true),
+            ..Default::default()
+        };
+        assert!(!store_measurement(&store, &record, contended.clone()).unwrap());
+        assert_eq!(stored(&record.param_hash).d_total, 16.12);
+
+        // A failed load is no evidence against a stored footprint either.
+        let failed = Measurement { status: "FAILED".into(), ..Default::default() };
+        assert!(!store_measurement(&store, &record, failed).unwrap());
+        assert_eq!(stored(&record.param_hash).d_total, 16.12);
+
+        // But an entry written before the check existed claims nothing about
+        // contention, so it is replaced as usual rather than treated as clean.
+        let unchecked = Measurement {
+            status: "ok".into(),
+            d_total: 16.12,
+            allocation_confirmed: Some(true),
+            contended: None,
+            ..Default::default()
+        };
+        let other = ModelRecord::from_expanded("n", "/app/llama-server -m /n.gguf -c 4096");
+        assert!(store_measurement(&store, &other, unchecked).unwrap());
+        assert!(store_measurement(&store, &other, contended).unwrap());
+        assert_eq!(
+            store.read_model("n").unwrap().unwrap().measurements[&other.param_hash].d_total,
+            22.64
+        );
     }
 
     #[test]
