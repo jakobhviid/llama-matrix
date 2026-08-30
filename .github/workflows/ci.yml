@@ -1,26 +1,29 @@
-# The green gate, run BEFORE merge.
+# Checks that are not the release gate.
 #
-# release.yml runs the same clippy + test on push to main, but that is after the
-# merge: a red gate there means no release is cut and the breakage is already on the
-# branch. This runs the identical two commands on the pull request, so the same
-# failure is found while it is still a proposal.
+# release.yml already runs clippy + test on every push to `main`, and `main` is where
+# this repository is developed: there are no pull requests to gate. So this workflow
+# covers the two cases that leaves uncovered, and deliberately nothing else.
 #
-# Deliberately separate from release.yml rather than a `pull_request` trigger added
-# to it: a release workflow that can run without releasing is a workflow whose
-# purpose has to be re-derived from its `if:` conditions every time it is read.
+#   - `gate` runs the identical clippy + test on a push to any OTHER branch, so
+#     branch work is checked without waiting to be merged. It is skipped on `main`
+#     rather than duplicating a job that is already deciding the release.
+#   - `deny` answers the supply-chain question everywhere. It lives here, not in
+#     release.yml, precisely so it can never block a release: a licence or source
+#     finding is something to look at, not a reason to stop shipping a fix.
 name: ci
 
 on:
-  pull_request:
+  push:
   workflow_dispatch:
 
-# A new push to a PR makes the previous run's answer irrelevant.
+# A newer push makes the previous run's answer irrelevant.
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   gate:
+    if: github.ref != 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -28,19 +31,16 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      # The same two commands release.yml gates on. Keep them identical: a gate that
-      # differs from the one that decides a release is a gate that can pass and still
-      # block the release.
+      # The same two commands release.yml gates on. Keep them identical: a check that
+      # differs from the one deciding the release can pass and still block it.
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
 
-  # Licenses and sources only; deny.toml explains why advisories are not here.
-  # Separate from `gate` so a supply-chain answer is legible on its own, and so it
-  # never sits between a green test run and a merge.
   deny:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
+          # Licences and sources only; deny.toml explains why advisories are not here.
           command: check licenses sources
