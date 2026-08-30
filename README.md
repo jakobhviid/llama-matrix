@@ -134,27 +134,28 @@ command plus the design) - readable by a human *or* an LLM/agent. See
 
 ## How it works
 
-`measure` loads each model alone and reads live GPU occupancy after allocation
-settles, caching the delta over an empty baseline in a per-model measurement store
-(keyed so that flipping a non-memory flag never re-measures). "Settles" is
-load-bearing: llama-swap reports a model ready when its server answers, which for an
-image backend is *before* it has allocated anything (the generation is the
+`measure` loads each model alone and reads live GPU occupancy once the allocation
+settles, caching the delta in a per-model store keyed so that flipping a non-memory
+flag never re-measures. Two words there are load-bearing.
+
+*Settles*: llama-swap reports a model ready when its server answers, which for an
+image backend is *before* it has allocated anything (the generation **is** the
 allocation), so `measure` waits for the load-trigger to finish, then for occupancy to
-go quiet, and records whether it got that confirmation. A footprint is a *solo*
-footprint, so the sweep also checks that nothing else was in the pool: it waits for
-occupancy to settle after each unload rather than trusting the proxy's bookkeeping,
-reads each model's baseline immediately before it loads, and reports a reading another
-model could have contaminated. `build` collapses each model's
-interchangeable quant/`-nothink` variants into one unit, then finds every *maximal*
-combination that fits under `ceiling = budget − margin` - because llama-swap treats
-any subset of a declared set as valid, declaring the maximal groups licenses all the
-smaller ones too. Each combination is totalled against **host RAM** as well, since
-llama.cpp holds a host-side prompt cache of 8192 MiB per server by default and four
-co-resident LLMs can exhaust a 32 GB box while sitting comfortably inside VRAM. The
-default strategy declares everything that fits (maximum flexibility); grouping to
-shrink the matrix is opt-in. `build --apply` backs up your
-config, splices on a generated marker, waits for the hot-reload, verifies, and rolls
-back on any anomaly.
+go quiet, and records whether it got that confirmation. *Alone*: a footprint is a
+**solo** footprint, so the sweep waits for occupancy to settle after each unload
+rather than trusting the proxy's bookkeeping, reads each model's baseline immediately
+before that model loads, and refuses or flags a reading something else was in.
+
+`build` collapses each model's interchangeable quant/`-nothink` variants into one
+unit, then finds every *maximal* combination that fits under
+`ceiling = budget − margin` - because llama-swap treats any subset of a declared set
+as valid, declaring the maximal groups licenses all the smaller ones too. Each
+combination is totalled against **host RAM** as well, since llama.cpp holds a
+host-side prompt cache of 8192 MiB per server by default and four co-resident LLMs
+can exhaust a 32 GB box while sitting comfortably inside VRAM. The default strategy
+declares everything that fits (maximum flexibility); grouping to shrink the matrix is
+opt-in. `build --apply` backs up your config, splices on a generated marker, waits
+for the hot-reload, verifies, and rolls back on any anomaly.
 
 Every footprint is measured **alone** and then summed, so `validate` is the step that
 tests whether that sum holds on your box: it loads one declared combination for real
