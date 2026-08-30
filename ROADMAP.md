@@ -56,9 +56,38 @@ Roughly in order of value-to-effort:
    that do not fit together still alternate. Derive keep/evict weights from real
    llama-swap request frequency/recency, layered over the static tiers rather than
    replacing them (the operator's declared priorities should still win).
+
+   **The data source exists.** `GET /api/metrics/activity` (llama-swap v251) returns
+   per-request records carrying exactly what this needs:
+
+   ```json
+   {"data": [{"id": 4235, "timestamp": "2026-08-30T19:48:32Z",
+              "model": "qwen3-embedding-4b-q8", "req_path": "/v1/embeddings",
+              "resp_status_code": 200, "duration_ms": 31, "tokens": {…}}]}
+   ```
+
+   So the open questions are design, not discovery: how far back to look, how to decay
+   recency into a weight, and how to combine it with a declared tier without letting a
+   busy hour override a deliberate `[evict_costs.models]` pin. Note the emitted costs
+   would then change whenever traffic does, which turns `build` from pure-over-the-
+   store into pure-over-the-store-and-a-time-window; `drift` would report a difference
+   after nothing but usage. That interaction needs settling before the arithmetic does.
 8. **Dynamic margin.** Scale the safety margin per-combo (more co-resident models →
    more compute-buffer slack) or from measured additivity variance, instead of a
    flat value.
+
+   `validate` now supplies the measurement this would be scaled from, and the first
+   two readings are strikingly tight: -0.09 GB on 6 models at 107.5 GB, and -0.10 GB
+   on 7 models (five of them diffusion servers) at 92 GB. Both *negative*, i.e. the
+   models share rather than compete.
+
+   That is **not** a licence to shrink the default margin, and the item should not be
+   read as one. Two samples on one box, one backend mix, one driver, with the pool
+   loaded in one order. The margin also absorbs the transient generation peak (item 9,
+   up to 0.73 GB), footprint drift between measure and use, and whatever a different
+   load order fragments. What the numbers do justify is the shape of the feature:
+   derive the margin from *this box's* measured error rather than from a constant, and
+   require several validations before trusting it.
 9. **Generation-peak budgeting.** Image servers transiently allocate more during a
    diffusion step than they leave resident; budget that peak when co-running image
    generation near the ceiling. `measure` already records the highest delta seen while
