@@ -773,6 +773,15 @@ answer: the load-trigger's one tiny prompt leaves it at the 1.64 GB end.
 compared against `host_ceiling = host_budget - host_margin`, exactly mirroring the
 GPU arithmetic. `on_host_overflow` decides the outcome (§1.1).
 
+**What it reports.** Every over-ceiling set is broken into the terms that decided it:
+the box `baseline`, the `measured` part (Σ `d_host`), the `caches` (Σ declared or
+assumed `-cram`), how many `holders` that is across, and the heaviest members by host
+cost. Alongside it, `host_over_shape` gives what the over sets have in **common** -
+the range they span, a shared cache-holder count if they all have one, and any model
+present in all of them (aux excluded, since it rides in everything and so
+distinguishes nothing). With two hundred sets over, the shape is the actionable part
+and a list of names is not.
+
 **And it prescribes.** Everything in a set except its prompt caches is fixed, so the
 largest `-cram` that set can afford is `(host_ceiling - fixed) / holders`, and the
 largest uniform one that fixes the whole matrix is the tightest of those, rounded down

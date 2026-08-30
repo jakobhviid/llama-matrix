@@ -31,8 +31,13 @@ pub struct BuildPreview {
     /// The host-RAM ceiling each set was checked against, when the box could report
     /// one; `null` means the host dimension was not checked (SPEC §7.4).
     pub host_ceiling: Option<f64>,
-    /// Sets whose host cost is over that ceiling, as `[name, gb]`.
-    pub host_over: Vec<(String, f64)>,
+    /// Sets whose host cost is over that ceiling, each broken down into the baseline,
+    /// the measured part, the prompt caches and the heaviest members - so a consumer
+    /// can see *why* without re-joining expressions to the store by hand.
+    pub host_over: Vec<crate::build::HostOver>,
+    /// What those sets have in common, which is the actionable part when there are
+    /// hundreds: a shared cache-holder count, and the models present in every one.
+    pub host_over_shape: Option<crate::build::HostOverShape>,
     /// The largest uniform `-cram` (GB) that would bring them all under it, when one
     /// exists. `null` with a non-empty `host_over` means no `-cram` can: the overrun
     /// is in measured memory, not in the prompt caches.
@@ -58,6 +63,7 @@ impl BuildPreview {
             unconfirmed: plan.unconfirmed.clone(),
             host_ceiling: plan.host_ceiling,
             host_over: plan.host_over.clone(),
+            host_over_shape: plan.host_over_shape.clone(),
             host_cram_gb: plan.host_cram_gb,
             caps: plan.caps,
             cheaper: plan.cheaper.clone(),

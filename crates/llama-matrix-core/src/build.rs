@@ -175,6 +175,48 @@ impl Slots {
     }
 }
 
+/// One set that costs more host RAM than the ceiling, broken down.
+///
+/// The bare `(name, GB)` it replaced said *which* sets were over and never *why*,
+/// leaving the operator to split each expression and join every member back to its
+/// `d_host` by hand. Every term here is already computed to decide the set was over.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct HostOver {
+    pub set: String,
+    /// Total host RAM the set costs.
+    pub needed: f64,
+    /// The box's floor, present in every set.
+    pub baseline: f64,
+    /// Sum of the members' measured `d_host`.
+    pub measured: f64,
+    /// Sum of the members' prompt caches, declared or assumed.
+    pub caches: f64,
+    /// How many members hold one: what a `-cram` would divide.
+    pub holders: usize,
+    /// The heaviest members by host cost, largest first.
+    pub top: Vec<(String, f64)>,
+}
+
+/// What the over-ceiling sets have in common, which is the actionable part when
+/// there are two hundred of them.
+///
+/// A list of eight arbitrary names followed by "and 200 more" is the least useful
+/// truncation available: the names are interchangeable, the *pattern* is the
+/// information. Every over set holding the same number of cache holders says the
+/// cap is the lever; the same two models appearing in all of them says those two
+/// are.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct HostOverShape {
+    pub sets: usize,
+    /// Cache-holder count, when every over set has the same one.
+    pub common_holders: Option<usize>,
+    /// Models present in *every* over set.
+    pub always_present: Vec<String>,
+    /// Smallest and largest host cost among them, so the spread is visible.
+    pub needed_min: f64,
+    pub needed_max: f64,
+}
+
 /// The per-set cardinality caps in force, and the largest set actually emitted, so a
 /// reader can tell whether a cap is binding or merely set.
 #[derive(Debug, Clone, Copy, serde::Serialize)]
@@ -254,8 +296,10 @@ pub struct MatrixPlan {
     /// The cardinality caps in force and how close the emitted block came to them;
     /// `None` when neither cap is set.
     pub caps: Option<SetCaps>,
-    /// Sets whose host cost exceeds `host_ceiling`, with what they need.
-    pub host_over: Vec<(String, f64)>,
+    /// Sets whose host cost exceeds `host_ceiling`, broken down.
+    pub host_over: Vec<HostOver>,
+    /// What those sets have in common; `None` when none are over.
+    pub host_over_shape: Option<HostOverShape>,
     /// The largest uniform `-cram` (in GB) that would bring every over-budget set
     /// under the host ceiling, when one exists. `None` means either nothing is over,
     /// or no `-cram` can fix it because the overrun is not in the caches.
@@ -622,6 +666,12 @@ fn push_unique(ids: &mut Vec<String>, id: &str) {
     if !id.is_empty() && !ids.iter().any(|seen| seen == id) {
         ids.push(id.to_string());
     }
+}
+
+/// Two decimals, so a reported figure reads as a measurement rather than as float
+/// noise. (`measure` has its own; this is the pure half of the crate.)
+fn round2(value: f64) -> f64 {
+    (value * 100.0).round() / 100.0
 }
 
 /// A cap for a message: the number, or "unset" for `usize::MAX`.
@@ -1463,15 +1513,70 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
     // llama-server, and presenting as an unexplained upstream death rather than as
     // anything the matrix reports. `warn` is the default because one term of the
     // host sum is a declared cap rather than a measurement (see `OnHostOverflow`).
-    let mut host_over: Vec<(String, f64)> = Vec::new();
+    let mut host_over: Vec<HostOver> = Vec::new();
+    let mut host_over_shape: Option<HostOverShape> = None;
     let mut host_cram_gb: Option<f64> = None;
     if let Some(host_ceiling) = host_ceiling {
+        let host_of_id: std::collections::HashMap<&str, f64> =
+            models.iter().map(|model| (model.id.as_str(), host_of(model))).collect();
+        let host_baseline = host.map_or(0.0, |host| host.baseline);
+        let mut all_members: Vec<Vec<String>> = Vec::new();
         for set in &sets {
-            if let Some(needed) = set.host_footprint {
-                if needed > host_ceiling {
-                    host_over.push((set.name.clone(), needed));
-                }
+            let Some(needed) = set.host_footprint.filter(|needed| *needed > host_ceiling) else {
+                continue;
+            };
+            let mut members: Vec<(String, f64)> = set_member_ids(&sets, set)
+                .into_iter()
+                .map(|id| {
+                    let cost = host_of_id.get(id.as_str()).copied().unwrap_or(0.0);
+                    (id, cost)
+                })
+                .collect();
+            members.sort_by(|left, right| {
+                right.1.partial_cmp(&left.1).unwrap_or(std::cmp::Ordering::Equal)
+            });
+            all_members.push(members.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>());
+            host_over.push(HostOver {
+                set: set.name.clone(),
+                needed: round2(needed),
+                baseline: round2(host_baseline),
+                measured: round2(needed - host_baseline - set.host_cache_gb),
+                caches: round2(set.host_cache_gb),
+                holders: set.host_cache_holders,
+                top: members.into_iter().take(3).map(|(id, gb)| (id, round2(gb))).collect(),
+            });
+        }
+        // What they have in common, which is what an operator can act on when there
+        // are two hundred of them.
+        if let Some(first) = host_over.first() {
+            // Intersect over EVERY member, not the three shown: a model in all of them
+            // that never ranks top-three is exactly the one worth naming, and one that
+            // tops a single set is not.
+            let mut always: Vec<String> = all_members.first().cloned().unwrap_or_default();
+            for members in &all_members {
+                always.retain(|id| members.contains(id));
             }
+            // …then drop the aux ride-alongs. They are in every over set because they
+            // are reserved in every set, full stop, which distinguishes nothing. What
+            // is wanted is what the over ones have that the others do not.
+            always.retain(|id| !aux_models.iter().any(|model| model.id == *id));
+            let holders = first.holders;
+            host_over_shape = Some(HostOverShape {
+                sets: host_over.len(),
+                common_holders: host_over
+                    .iter()
+                    .all(|entry| entry.holders == holders)
+                    .then_some(holders),
+                always_present: always,
+                needed_min: host_over
+                    .iter()
+                    .map(|entry| entry.needed)
+                    .fold(f64::INFINITY, f64::min),
+                needed_max: host_over
+                    .iter()
+                    .map(|entry| entry.needed)
+                    .fold(f64::NEG_INFINITY, f64::max),
+            });
         }
         // The largest uniform `-cram` that would bring every over-budget set under the
         // ceiling. Per set: everything except the prompt caches is fixed, so the
@@ -1502,16 +1607,28 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
         host_cram_gb = cram_gb;
 
         if !host_over.is_empty() {
-            let listed = name_list(
-                &host_over
-                    .iter()
-                    .map(|(name, needed)| format!("{name} needs {needed:.1} GB"))
-                    .collect::<Vec<_>>(),
-            );
+            // The *shape*, not a roll-call. Eight arbitrary set names followed by
+            // "and 200 more" is the least useful truncation available: the names are
+            // interchangeable and the pattern is the information.
+            let listed = match &host_over_shape {
+                Some(shape) => {
+                    let mut said = format!("{:.1} to {:.1} GB", shape.needed_min, shape.needed_max);
+                    if let Some(holders) = shape.common_holders {
+                        said.push_str(&format!(", every one of them holding {holders} prompt cache(s)"));
+                    }
+                    if !shape.always_present.is_empty() {
+                        said.push_str(&format!(
+                            ", and {} in all of them",
+                            name_list(&shape.always_present)
+                        ));
+                    }
+                    said
+                }
+                None => String::new(),
+            };
             let advice = format!(
                 "{} of the {} declared sets cost more HOST RAM than the {host_ceiling:.1} GB \
-                 ceiling: \
-                 {listed}. The GPU fit is unaffected; the risk is the host OOM killer picking a \
+                 ceiling, {listed}. The GPU fit is unaffected; the risk is the host OOM killer picking a \
                  llama-server, which presents as an unexplained upstream death. {}",
                 host_over.len(),
                 sets.len(),
@@ -1536,7 +1653,7 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
                 OnHostOverflow::Error => bail!("{advice}"),
                 OnHostOverflow::Exclude => {
                     let names: Vec<String> =
-                        host_over.iter().map(|(name, _)| name.clone()).collect();
+                        host_over.iter().map(|entry| entry.set.clone()).collect();
                     sets.retain(|set| !names.contains(&set.name));
                     warnings.push(format!("{advice} (excluded)"));
                 }
@@ -1571,6 +1688,7 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
         // Filled by `resolve_plan` when it is the reason the check did not run.
         host_skipped: None,
         host_over,
+        host_over_shape,
         host_cram_gb,
     })
 }
@@ -1898,9 +2016,21 @@ mod tests {
         // All three co-reside on the GPU, so there is one maximal pack, and it needs
         // 4 + 30 = 34 GB of host.
         assert_eq!(plan.n_packs, 1);
-        let (over, needed) = plan.host_over.first().expect("the pack is over the host ceiling");
-        assert_eq!(over, "pack1");
-        assert!((needed - 34.0).abs() < 0.01, "{needed}");
+        let over = plan.host_over.first().expect("the pack is over the host ceiling");
+        assert_eq!(over.set, "pack1");
+        assert!((over.needed - 34.0).abs() < 0.01, "{}", over.needed);
+        // The breakdown says *why*: a 4 GB floor, 6 GB measured, 24 GB of cache
+        // across three holders. Everything an operator would otherwise recompute.
+        assert!((over.baseline - 4.0).abs() < 0.01, "{}", over.baseline);
+        assert!((over.caches - 24.0).abs() < 0.01, "{}", over.caches);
+        assert!((over.measured - 6.0).abs() < 0.01, "{}", over.measured);
+        assert_eq!(over.holders, 3);
+        assert_eq!(over.top.len(), 3, "the heaviest members are named");
+
+        // …and the shape: all of them share a holder count, and name the same models.
+        let shape = plan.host_over_shape.clone().expect("a shape when anything is over");
+        assert_eq!(shape.common_holders, Some(3));
+        assert_eq!(shape.sets, plan.host_over.len());
         assert!(plan.sets.iter().any(|set| set.name == "pack1"), "warn still emits it");
         assert!(plan.warnings.iter().any(|warning| warning.contains("HOST RAM")));
         // The prescription, not just the diagnosis. Each of the three holds an
