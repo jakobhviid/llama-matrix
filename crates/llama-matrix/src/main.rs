@@ -699,6 +699,12 @@ fn cmd_build(
         for warning in &plan.warnings {
             ui::warn(warning);
         }
+        // Say plainly when the second budget was not checked. A matrix that fits the
+        // GPU can still exhaust the box, and "no host warnings" must not be readable
+        // as "the host was checked and is fine" (Principle 7).
+        if let Some(reason) = &plan.host_skipped {
+            ui::info(&format!("host RAM not budgeted: {reason}"));
+        }
     }
 
     if apply {
@@ -833,6 +839,7 @@ mod doc_tests {
             serving_verified: Some(true),
             peak_total: Some(49.60),
             weights_gb: Some(49.90),
+            d_host: Some(1.10),
             pool_baseline: Some(0.16),
             contended: Some(false),
             params: "/app/llama-server -m /m.gguf -c 4096".into(),

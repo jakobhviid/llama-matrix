@@ -89,6 +89,23 @@ pub fn weight_files(cmd: &str) -> Vec<String> {
     files
 }
 
+/// GB of host RAM a llama-server holds for its prompt cache, per the command.
+///
+/// `-cram` / `--cache-ram` takes MiB and caps llama.cpp's host-side prompt cache.
+/// The memory is anonymous and private-dirty: the kernel cannot reclaim it, and
+/// llama.cpp evicts only against this cap, never against host pressure. `-cram 0`
+/// disables the cache.
+///
+/// `None` when the command does not say, which is the common case and is not the
+/// same as zero: recent builds default to 8192 MiB without the flag appearing
+/// anywhere. The caller supplies what to assume then (`host_cache_gb`).
+pub fn declared_cache_ram_gb(cmd: &str) -> Option<f64> {
+    let tokens: Vec<&str> = cmd.split_whitespace().collect();
+    let index = tokens.iter().position(|token| matches!(*token, "-cram" | "--cache-ram"))?;
+    let mib: f64 = tokens.get(index + 1)?.parse().ok()?;
+    Some(mib * 1024.0 * 1024.0 / crate::platform::BYTES_PER_GIB)
+}
+
 /// Does this command look like a placeholder proxy rather than a real server
 /// (e.g. `sleep infinity`)? Such entries allocate no GPU and are excluded from
 /// the measure worklist.
@@ -190,6 +207,26 @@ mod tests {
         );
         // Non-weight tokens (an output path, a template) are not weights.
         assert!(weight_files("/app/llama-server -ngl 99 -o /tmp/out.png").is_empty());
+    }
+
+    /// `-cram` is in MiB and caps host RAM, not VRAM. An absent flag is not zero:
+    /// recent llama.cpp takes 8192 MiB without the flag appearing anywhere, so the
+    /// caller has to decide what to assume rather than read a 0 here.
+    #[test]
+    fn cache_ram_is_read_in_mib_and_absence_is_not_zero() {
+        assert_eq!(
+            declared_cache_ram_gb("/app/llama-server -m /m.gguf -cram 4096"),
+            Some(4.0)
+        );
+        assert_eq!(
+            declared_cache_ram_gb("/app/llama-server -m /m.gguf --cache-ram 8192 -c 4096"),
+            Some(8.0)
+        );
+        // Explicitly disabled is a real, declared zero.
+        assert_eq!(declared_cache_ram_gb("/app/llama-server -m /m.gguf -cram 0"), Some(0.0));
+        // Unstated, and a flag with nothing after it.
+        assert_eq!(declared_cache_ram_gb("/app/llama-server -m /m.gguf -c 4096"), None);
+        assert_eq!(declared_cache_ram_gb("/app/llama-server -m /m.gguf -cram"), None);
     }
 
     #[test]

@@ -71,12 +71,14 @@ mod tests {
     fn renders_a_well_formed_block() {
         let models = vec![
             ModelFootprint {
+                host_gb: None,
                 id: "embed".into(),
                 model_type: ModelType::Embed,
                 primary_file: Some("/e.gguf".into()),
                 d_total: 7.0,
             },
             ModelFootprint {
+                host_gb: None,
                 id: "chat".into(),
                 model_type: ModelType::Llm,
                 primary_file: Some("/c.gguf".into()),
@@ -84,6 +86,7 @@ mod tests {
             },
         ];
         let plan = build(&BuildInput {
+            host: None,
             models: &models,
             policy: &Policy::default(),
             baseline: 0.16,

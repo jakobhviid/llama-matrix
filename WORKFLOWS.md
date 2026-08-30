@@ -79,6 +79,13 @@ llama-matrix build --apply --no-verify   # …or a pure backup-and-splice (no ne
   confirming llama-swap loaded the measured command* is informational, and on a
   llama-swap that does not report the command it launched it can be permanent for a
   backend with no `/props`.
+- **Host RAM is a second budget.** `build` totals each declared set against the host
+  as well as the GPU, and a set that is over is named with the arithmetic (it is still
+  emitted; set `on_host_overflow = "exclude"` to leave it out). The dominant term is
+  llama.cpp's host-side prompt cache, 8192 MiB per llama-server whether or not `-cram`
+  appears in the command, so bounding it with `-cram <MiB>` is usually what turns a
+  warning off. A store with no `d_host` gets no host check and says so; re-measure to
+  enable it.
 - `build` selects each model's *current-config* footprint, collapses variants,
   runs the knapsack, and emits the block. Always preview before `--apply`. If the
   header carries an *unconfirmed footprint* warning, the sets it names are the ones

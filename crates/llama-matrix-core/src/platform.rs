@@ -248,6 +248,101 @@ fn sysctl_string(name: &str) -> Option<String> {
     (!value.is_empty()).then_some(value)
 }
 
+/// Host RAM, which is a different resource from the GPU pool even on a box where
+/// the two are carved out of the same chips.
+///
+/// `used` is `total - available`, not `total - free`: page cache the kernel can
+/// reclaim under pressure is not memory anyone is holding, and counting it would
+/// make every box look full. What is left is close to the sum of what processes
+/// have actually dirtied, which is the quantity an OOM kill is decided on.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HostMemory {
+    pub total_gb: f64,
+    pub used_gb: f64,
+}
+
+/// Read host RAM, or `None` where there is no way to (an unsupported OS, an
+/// unreadable `/proc`).
+///
+/// `None` is a first-class answer, not a failure: the host dimension is optional
+/// throughout, and a box that cannot report it gets no host budgeting rather than a
+/// guessed one (Principle 2).
+pub fn host_memory() -> Option<HostMemory> {
+    read_host_memory()
+}
+
+#[cfg(target_os = "linux")]
+fn read_host_memory() -> Option<HostMemory> {
+    parse_meminfo(&std::fs::read_to_string("/proc/meminfo").ok()?)
+}
+
+/// macOS has no `MemAvailable`. `hw.memsize` minus the pages `vm_stat` calls free,
+/// inactive, speculative and purgeable is the same idea: everything the kernel could
+/// hand out without evicting anyone's working set.
+#[cfg(target_os = "macos")]
+fn read_host_memory() -> Option<HostMemory> {
+    let total = phys_mem_bytes().ok()? as f64 / BYTES_PER_GIB;
+    let available = macos_available_bytes()? as f64 / BYTES_PER_GIB;
+    Some(HostMemory { total_gb: total, used_gb: (total - available).max(0.0) })
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn read_host_memory() -> Option<HostMemory> {
+    None
+}
+
+/// `MemTotal` and `MemAvailable` out of `/proc/meminfo` (both in kB) as GB.
+///
+/// `MemAvailable` is the kernel's own estimate of what can be handed out without
+/// swapping, which is exactly the question being asked and is not reconstructible
+/// from free + cached (some cache is not reclaimable). A kernel too old to publish
+/// it reports nothing rather than a worse substitute.
+#[cfg(target_os = "linux")]
+fn parse_meminfo(meminfo: &str) -> Option<HostMemory> {
+    let field = |name: &str| -> Option<f64> {
+        let line = meminfo.lines().find(|line| line.starts_with(name))?;
+        let kilobytes: f64 = line.split_whitespace().nth(1)?.parse().ok()?;
+        Some(kilobytes * 1024.0 / BYTES_PER_GIB)
+    };
+    let total = field("MemTotal:")?;
+    let available = field("MemAvailable:")?;
+    Some(HostMemory { total_gb: total, used_gb: (total - available).max(0.0) })
+}
+
+/// Reclaimable bytes from `vm_stat`: free + inactive + speculative + purgeable.
+#[cfg(target_os = "macos")]
+fn macos_available_bytes() -> Option<u64> {
+    let output = Command::new("vm_stat").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let page_size: u64 = text
+        .lines()
+        .next()?
+        .split("page size of ")
+        .nth(1)?
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()?;
+    let pages = |name: &str| -> u64 {
+        text.lines()
+            .find(|line| line.starts_with(name))
+            .and_then(|line| line.rsplit(':').next())
+            .map(|value| value.trim().trim_end_matches('.'))
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0)
+    };
+    Some(
+        (pages("Pages free")
+            + pages("Pages inactive")
+            + pages("Pages speculative")
+            + pages("Pages purgeable"))
+            * page_size,
+    )
+}
+
 /// Auto-select a backend: Apple Silicon (on macOS) first, then AMD sysfs, then
 /// NVIDIA. Errors if none is present (the caller should fall back to a
 /// configured/`--budget` value).

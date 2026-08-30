@@ -49,6 +49,15 @@ pub struct BoxMeta {
     /// Physical pool total in GB at sweep time (build may override via budget).
     #[serde(default)]
     pub detected_total: Option<f64>,
+    /// Host RAM total in GB, as distinct from the GPU pool even on a box where both
+    /// are carved out of the same chips. `None` where the box cannot report it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_total: Option<f64>,
+    /// Host RAM held with no model loaded, in GB: the OS plus everything else the
+    /// box runs. The floor a pack's host cost sits on top of, and measured for the
+    /// same reason `baseline` is, rather than assumed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_baseline: Option<f64>,
     /// Last sweep date (YYYY-MM-DD).
     #[serde(default)]
     pub date: Option<String>,
@@ -127,6 +136,17 @@ pub struct Measurement {
     /// previous model cannot silently shorten the delta.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pool_baseline: Option<f64>,
+    /// Host RAM this model added when it loaded, in GB.
+    ///
+    /// A **floor**, not the whole story, and the difference matters. It is what the
+    /// process had dirtied by the time it was serving: weights it copies to host,
+    /// its own allocations, the runtime. It cannot include the host-side prompt
+    /// cache (`-cram`, 8 GiB per llama-server by default), because that fills as
+    /// prompts are processed and the load-trigger processes one tiny prompt. `build`
+    /// adds the declared cache cap on top, reading it from the live command rather
+    /// than from here, which is why a `-cram` change needs no re-measure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub d_host: Option<f64>,
     /// Was anything other than this model in the pool during its measurement window?
     ///
     /// A footprint is a *solo* footprint, and nothing stops a client (a health probe,

@@ -16,7 +16,7 @@ use anyhow::{bail, Result};
 use crate::cache::Store;
 use crate::config;
 use crate::model::ModelType;
-use crate::policy::{CostRole, OnOverflow, OnUnconfirmed, Policy, Strategy};
+use crate::policy::{CostRole, OnHostOverflow, OnOverflow, OnUnconfirmed, Policy, Strategy};
 
 /// Work budget for maximal-pack enumeration. Enumerating maximal fitting packs is
 /// worst-case exponential in the light-unit count, so the recursion runs under a
@@ -41,6 +41,11 @@ pub struct ModelFootprint {
     pub primary_file: Option<String>,
     /// GB delta over baseline — the footprint.
     pub d_total: f64,
+    /// GB of host RAM this model costs while resident: what it was measured to add
+    /// (`d_host`), plus the prompt-cache cap its command declares or the policy
+    /// assumes. `None` where the store holds no host measurement, which disables the
+    /// host check rather than guessing at it.
+    pub host_gb: Option<f64>,
 }
 
 /// A logical model: one or more interchangeable variants, sized by the largest.
@@ -52,6 +57,8 @@ struct Unit {
     ids: Vec<String>,
     /// Footprint = the largest member's `d_total` (so any quant mix fits).
     size: f64,
+    /// Host cost = the largest member's, for the same reason.
+    host_size: Option<f64>,
 }
 
 impl Unit {
@@ -77,6 +84,9 @@ pub struct EmittedSet {
     pub comment: String,
     /// baseline + Σ members (at max quant) + aux_cost — must be ≤ ceiling.
     pub footprint: f64,
+    /// The same sum in host RAM: `host_baseline + Σ members + aux`. `None` when the
+    /// host dimension is not being checked (see `MatrixPlan::host_ceiling`).
+    pub host_footprint: Option<f64>,
     /// Product of the expression's `|`-group sizes — must be ≤ 1000.
     pub fanout: usize,
 }
@@ -101,6 +111,13 @@ pub struct MatrixPlan {
     pub aux_cost: f64,
     pub n_packs: usize,
     pub n_heavies: usize,
+    /// The host-RAM ceiling each set was checked against, when it was checked at
+    /// all. `None` means the check did not run, and `host_skipped` says why.
+    pub host_ceiling: Option<f64>,
+    /// Why the host check did not run, when it did not.
+    pub host_skipped: Option<String>,
+    /// Sets whose host cost exceeds `host_ceiling`, with what they need.
+    pub host_over: Vec<(String, f64)>,
 }
 
 /// Inputs to a build. `budget` is already resolved (policy override, else the
@@ -110,6 +127,19 @@ pub struct BuildInput<'a> {
     pub policy: &'a Policy,
     pub baseline: f64,
     pub budget: f64,
+    /// The host-RAM budget to check each set against. `None` skips the host check
+    /// entirely, which is what a box that cannot report host RAM gets.
+    pub host: Option<HostBudget>,
+}
+
+/// The host-RAM side of the fit: what the box has, and what it holds with nothing
+/// loaded. Both measured (SPEC §7.4); `Policy::host_budget` may override the total.
+#[derive(Debug, Clone, Copy)]
+pub struct HostBudget {
+    /// Host RAM held with no model loaded: the OS and everything else the box runs.
+    pub baseline: f64,
+    /// Host RAM to plan against.
+    pub total: f64,
 }
 
 /// Load the llama-swap config + measurement store and compute the plan. Shared by
@@ -148,6 +178,10 @@ pub fn resolve_plan(
     // only be too high, so they cost packs rather than risking a pack that does not
     // fit, and re-measuring on a quiet box is what recovers them.
     let mut contended: Vec<String> = Vec::new();
+    // Models with no recorded host footprint. One of these disables the host check
+    // for the whole plan: a partial host sum is not a smaller answer, it is a wrong
+    // one, and reporting it as a budget would be worse than reporting nothing.
+    let mut host_unmeasured: Vec<String> = Vec::new();
     for record in &parsed.models {
         let Some(measurement) = store.select(&record.id, &record.param_hash)? else {
             unmeasured.push(record.id.clone());
@@ -188,20 +222,60 @@ pub fn resolve_plan(
         if measurement.contended == Some(true) {
             contended.push(record.id.clone());
         }
+        // Host cost = what the load was measured to add, plus the prompt cache the
+        // process will fill on its own. The cap is read from the LIVE command, not
+        // from the measurement: `-cram` moves host RAM only, so a footprint taken at
+        // one value describes the GPU at any other, and changing it must not cost a
+        // re-measure. A backend that is not llama.cpp has no such cache.
+        let host_gb = measurement.d_host.map(|measured| {
+            let cache = match record.model_type {
+                ModelType::Llm | ModelType::Embed | ModelType::Rerank => {
+                    crate::model::declared_cache_ram_gb(&record.cmd)
+                        .unwrap_or(policy.host_cache_gb)
+                }
+                _ => 0.0,
+            };
+            measured + cache
+        });
+        if host_gb.is_none() {
+            host_unmeasured.push(record.id.clone());
+        }
         footprints.push(ModelFootprint {
             id: record.id.clone(),
             model_type: record.model_type,
             primary_file: record.primary_file.clone(),
             d_total: measurement.d_total,
+            host_gb,
         });
     }
+
+    let host = (box_meta.host_baseline, policy.host_budget.or(box_meta.host_total));
+    let host_budget = match host {
+        _ if !host_unmeasured.is_empty() => Err(format!(
+            "{} model(s) have no recorded host-RAM footprint, so a pack's host cost cannot be \
+             totalled: {}. Re-run `llama-matrix measure --force` to record it",
+            host_unmeasured.len(),
+            host_unmeasured.join(", ")
+        )),
+        (Some(baseline), Some(total)) => Ok(HostBudget { baseline, total }),
+        _ => Err(
+            "this box records no host-RAM total or baseline, so packs are checked against the \
+             GPU only. Re-run `llama-matrix measure` on a platform that can report host RAM, or \
+             set `host_budget`"
+                .to_string(),
+        ),
+    };
 
     let mut plan = build(&BuildInput {
         models: &footprints,
         policy,
         baseline: box_meta.baseline,
         budget,
+        host: host_budget.as_ref().ok().copied(),
     })?;
+    if let Err(reason) = host_budget {
+        plan.host_skipped = Some(reason);
+    }
     plan.excluded.extend(unmeasured);
     plan.warnings.extend(suspect);
     if !contended.is_empty() {
@@ -304,10 +378,17 @@ fn collapse_units(llm_models: &[&ModelFootprint], policy: &Policy) -> Vec<Unit> 
             let members = &by_file[file_key];
             let ids: Vec<String> = members.iter().map(|model| model.id.clone()).collect();
             let size = members.iter().map(|model| model.d_total).fold(0.0_f64, f64::max);
+            // The largest member decides the host cost too: a set naming a `|` group
+            // has to hold whichever member is loaded.
+            let host_size = members
+                .iter()
+                .map(|model| model.host_gb)
+                .try_fold(0.0_f64, |largest, host| Some(largest.max(host?)));
             Unit {
                 key: safe_key(&ids[0]),
                 ids,
                 size,
+                host_size,
             }
         })
         .collect();
@@ -326,6 +407,7 @@ fn apply_groups(units: Vec<Unit>, policy: &Policy) -> Vec<Unit> {
         let group_set: BTreeSet<&str> = group_ids.iter().map(String::as_str).collect();
         let mut ids: Vec<String> = Vec::new();
         let mut size = 0.0_f64;
+        let mut host_size = Some(0.0_f64);
         for (index, unit) in units.iter().enumerate() {
             if consumed.contains(&index) {
                 continue;
@@ -334,6 +416,10 @@ fn apply_groups(units: Vec<Unit>, policy: &Policy) -> Vec<Unit> {
                 consumed.insert(index);
                 ids.extend(unit.ids.iter().cloned());
                 size = size.max(unit.size);
+                host_size = match (host_size, unit.host_size) {
+                    (Some(largest), Some(host)) => Some(largest.max(host)),
+                    _ => None,
+                };
             }
         }
         if !ids.is_empty() {
@@ -341,6 +427,7 @@ fn apply_groups(units: Vec<Unit>, policy: &Policy) -> Vec<Unit> {
                 key: safe_key(group_name),
                 ids,
                 size,
+                host_size,
             });
         }
     }
@@ -417,8 +504,14 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
         policy,
         baseline,
         budget,
+        host,
     } = *input;
     let ceiling = budget - policy.margin;
+    // The host ceiling, when the box can report one. Same shape as the GPU ceiling
+    // so the two arithmetics read alike: a floor the box holds anyway, plus what
+    // each resident model costs, against a total less a margin.
+    let host_ceiling = host.map(|host| host.total - policy.host_margin);
+    let host_of = |model: &ModelFootprint| model.host_gb.unwrap_or(0.0);
 
     // ---- roles (type-derived; a NON-EMPTY `[roles]` list is AUTHORITATIVE) ----
     // An explicit list REPLACES the derivation for that role instead of adding to
@@ -468,6 +561,7 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
         .collect();
 
     let aux_cost: f64 = aux_models.iter().map(|model| model.d_total).sum();
+    let aux_host: f64 = aux_models.iter().map(|model| host_of(model)).sum();
     let has_aux = !aux_models.is_empty();
     // The ` & +aux` suffix is only valid when an `aux` set is actually emitted;
     // with no aux models it must be omitted, or the block would reference an
@@ -541,6 +635,12 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
         chosen
     };
 
+    // A set's host cost, or `None` when the host is not being checked: the floor the
+    // box holds anyway, plus each resident model's own host cost.
+    let host_footprint = |members: f64| -> Option<f64> {
+        host.map(|host| host.baseline + members)
+    };
+
     // ---- emit ----
     let mut sets: Vec<EmittedSet> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
@@ -580,6 +680,7 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
             expr,
             comment: format!("ride-along ({aux_cost:.1} GB)"),
             footprint: baseline + aux_cost,
+            host_footprint: host_footprint(aux_host),
             fanout: 1,
         });
     }
@@ -593,6 +694,7 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
                 expr: unit.expr(),
                 comment: format!("{:.1} GB (max variant)", unit.size),
                 footprint: baseline + unit.size + aux_cost,
+                host_footprint: host_footprint(unit.host_size.unwrap_or(0.0) + aux_host),
                 fanout: unit.fanout(),
             });
         }
@@ -613,6 +715,9 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
             expr,
             comment: "any image subset + aux".to_string(),
             footprint,
+            host_footprint: host_footprint(
+                aux_host + image_models.iter().map(|model| host_of(model)).sum::<f64>(),
+            ),
             fanout: 1,
         });
     }
@@ -633,6 +738,8 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
         let references: Vec<String> = unit_indices.iter().map(|&index| unit_reference(index)).collect();
         let expr = format!("{}{aux_ref}", references.join(" & "));
         let members_total: f64 = unit_indices.iter().map(|&index| units[index].size).sum();
+        let members_host: f64 =
+            unit_indices.iter().map(|&index| units[index].host_size.unwrap_or(0.0)).sum();
         let fanout: usize = unit_indices.iter().map(|&index| units[index].fanout()).product();
         let names: Vec<&str> = unit_indices.iter().map(|&index| units[index].key.as_str()).collect();
         sets.push(EmittedSet {
@@ -640,6 +747,7 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
             expr,
             comment: format!("{:.1} GB: {}", baseline + members_total + aux_cost, names.join("+")),
             footprint: baseline + members_total + aux_cost,
+            host_footprint: host_footprint(members_host + aux_host),
             fanout,
         });
     }
@@ -663,6 +771,11 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
                 expr,
                 comment: format!("{} + {} imgs", unit.key, fitting.len()),
                 footprint,
+                host_footprint: host_footprint(
+                    unit.host_size.unwrap_or(0.0)
+                        + aux_host
+                        + fitting.iter().map(|model| host_of(model)).sum::<f64>(),
+                ),
                 fanout: unit.fanout(),
             });
         }
@@ -708,6 +821,11 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
             expr: format!("{}{}{}", unit.expr(), images_suffix, aux_suffix),
             comment: format!("{:.1} GB + {} imgs{aux_note}", unit.size, fitting.len()),
             footprint,
+            host_footprint: host_footprint(
+                unit.host_size.unwrap_or(0.0)
+                    + if with_aux { aux_host } else { 0.0 }
+                    + fitting.iter().map(|model| host_of(model)).sum::<f64>(),
+            ),
             fanout: unit.fanout(),
         });
     }
@@ -795,6 +913,49 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
     }
     sets.retain(|set| !over_cap.contains(&set.name));
 
+    // ---- guard 3: the host-RAM budget ----
+    // A second, independent budget. The GPU fit is untouched by what happens here:
+    // what is at stake is the box's OOM killer picking the largest RSS, which is a
+    // llama-server, and presenting as an unexplained upstream death rather than as
+    // anything the matrix reports. `warn` is the default because one term of the
+    // host sum is a declared cap rather than a measurement (see `OnHostOverflow`).
+    let mut host_over: Vec<(String, f64)> = Vec::new();
+    if let Some(host_ceiling) = host_ceiling {
+        for set in &sets {
+            if let Some(needed) = set.host_footprint {
+                if needed > host_ceiling {
+                    host_over.push((set.name.clone(), needed));
+                }
+            }
+        }
+        if !host_over.is_empty() {
+            let listed = host_over
+                .iter()
+                .map(|(name, needed)| format!("{name} needs {needed:.1} GB"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let advice = format!(
+                "{} declared set(s) cost more HOST RAM than the {host_ceiling:.1} GB ceiling: \
+                 {listed}. The GPU fit is unaffected; the risk is the host OOM killer picking a \
+                 llama-server, which presents as an unexplained upstream death. Bound it with \
+                 `-cram <MiB>` on the llama-server entries (its default is 8192 MiB per process, \
+                 taken whether or not the flag appears), raise `host_budget`, or set \
+                 `on_host_overflow = \"exclude\"` to leave those sets out",
+                host_over.len()
+            );
+            match policy.on_host_overflow {
+                OnHostOverflow::Error => bail!("{advice}"),
+                OnHostOverflow::Exclude => {
+                    let names: Vec<String> =
+                        host_over.iter().map(|(name, _)| name.clone()).collect();
+                    sets.retain(|set| !names.contains(&set.name));
+                    warnings.push(format!("{advice} (excluded)"));
+                }
+                OnHostOverflow::Warn => warnings.push(advice),
+            }
+        }
+    }
+
     let n_packs = sets.iter().filter(|set| set.name.starts_with("pack")).count();
     let n_heavies = sets.iter().filter(|set| set.name.starts_with("heavy_")).count();
     Ok(MatrixPlan {
@@ -813,6 +974,10 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
         aux_cost,
         n_packs,
         n_heavies,
+        host_ceiling,
+        // Filled by `resolve_plan` when it is the reason the check did not run.
+        host_skipped: None,
+        host_over,
     })
 }
 
@@ -1050,6 +1215,7 @@ mod tests {
         d_total: f64,
     ) -> ModelFootprint {
         ModelFootprint {
+            host_gb: None,
             id: id.to_string(),
             model_type,
             primary_file: file.map(String::from),
@@ -1076,11 +1242,94 @@ mod tests {
         ]
     }
 
+    /// The host budget is a second, independent fit. Two 10 GB-host LLMs plus a
+    /// 4 GB baseline is 24 GB against a 31.7 GB box less a 4 GB margin: fine. Three
+    /// is 34 GB: not. The GPU says all three fit, and on the box that motivated this
+    /// the OOM killer disagreed.
+    #[test]
+    fn a_pack_over_the_host_ceiling_is_named_and_can_be_excluded() {
+        let with_host = |id: &str, file: &str, gpu: f64, host: f64| ModelFootprint {
+            host_gb: Some(host),
+            id: id.to_string(),
+            model_type: ModelType::Llm,
+            primary_file: Some(file.to_string()),
+            d_total: gpu,
+        };
+        let models = vec![
+            with_host("a", "/a.gguf", 20.0, 10.0),
+            with_host("b", "/b.gguf", 20.0, 10.0),
+            with_host("c", "/c.gguf", 20.0, 10.0),
+        ];
+        let host = Some(HostBudget { baseline: 4.0, total: 31.7 });
+        let mut policy = budgeted(OnUnconfirmed::Warn);
+        policy.budget = Some(111.5);
+
+        // warn (the default): the set is emitted, and named with the arithmetic.
+        let plan = build(&BuildInput {
+            models: &models,
+            policy: &policy,
+            baseline: 0.16,
+            budget: 111.5,
+            host,
+        })
+        .unwrap();
+        assert_eq!(plan.host_ceiling, Some(27.7));
+        // All three co-reside on the GPU, so there is one maximal pack, and it needs
+        // 4 + 30 = 34 GB of host.
+        assert_eq!(plan.n_packs, 1);
+        let (over, needed) = plan.host_over.first().expect("the pack is over the host ceiling");
+        assert_eq!(over, "pack1");
+        assert!((needed - 34.0).abs() < 0.01, "{needed}");
+        assert!(plan.sets.iter().any(|set| set.name == "pack1"), "warn still emits it");
+        assert!(plan.warnings.iter().any(|warning| warning.contains("HOST RAM")));
+
+        // exclude: the same set is left out, which is a safe under-declaration.
+        policy.on_host_overflow = OnHostOverflow::Exclude;
+        let excluded = build(&BuildInput {
+            models: &models,
+            policy: &policy,
+            baseline: 0.16,
+            budget: 111.5,
+            host,
+        })
+        .unwrap();
+        assert!(!excluded.sets.iter().any(|set| set.name == "pack1"));
+
+        // error: refuses outright.
+        policy.on_host_overflow = OnHostOverflow::Error;
+        assert!(build(&BuildInput {
+            models: &models,
+            policy: &policy,
+            baseline: 0.16,
+            budget: 111.5,
+            host,
+        })
+        .is_err());
+    }
+
+    /// With no host budget the plan is GPU-only and says so by leaving the host
+    /// fields empty, rather than reporting a ceiling nothing was checked against.
+    #[test]
+    fn without_a_host_budget_nothing_is_host_checked() {
+        let plan = build(&BuildInput {
+            models: &scenario(),
+            policy: &budgeted(OnUnconfirmed::Warn),
+            baseline: 0.16,
+            budget: 111.5,
+            host: None,
+        })
+        .unwrap();
+        assert_eq!(plan.host_ceiling, None);
+        assert!(plan.host_over.is_empty());
+        assert!(plan.sets.iter().all(|set| set.host_footprint.is_none()));
+    }
+
     #[test]
     fn fit_invariant_holds_for_every_set() {
         let models = scenario();
         let policy = Policy::default(); // margin 4.0, flat
         let plan = build(&BuildInput {
+            host: None,
             models: &models,
             policy: &policy,
             baseline: 0.16,
@@ -1105,6 +1354,7 @@ mod tests {
     fn twins_collapse_and_huge_is_heavy() {
         let models = scenario();
         let plan = build(&BuildInput {
+            host: None,
             models: &models,
             policy: &Policy::default(),
             baseline: 0.16,
@@ -1154,6 +1404,7 @@ mod tests {
         );
 
         let plan = build(&BuildInput {
+            host: None,
             models: &models,
             policy: &policy,
             baseline: 0.16,
@@ -1220,6 +1471,7 @@ mod tests {
         // group (default): the 1024-combo pack is omitted, and every surviving set
         // is within the cap — the emitted block is always valid.
         let plan = build(&BuildInput {
+            host: None,
             models: &models,
             policy: &group_policy,
             baseline: 0.16,
@@ -1238,6 +1490,7 @@ mod tests {
             ..group_policy.clone()
         };
         assert!(build(&BuildInput {
+            host: None,
             models: &models,
             policy: &error_policy,
             baseline: 0.16,
@@ -1250,6 +1503,7 @@ mod tests {
     fn a_fitting_pair_is_declared_and_a_too_big_one_is_not() {
         let models = scenario();
         let plan = build(&BuildInput {
+            host: None,
             models: &models,
             policy: &Policy::default(),
             baseline: 0.16,
@@ -1273,6 +1527,7 @@ mod tests {
         ];
         // roomy budget: both are light, packs get emitted
         let plan = build(&BuildInput {
+            host: None,
             models: &models,
             policy: &Policy::default(),
             baseline: 0.16,
@@ -1285,6 +1540,7 @@ mod tests {
         }
         // tight budget: both become heavies (also must not reference +aux)
         let tight = build(&BuildInput {
+            host: None,
             models: &models,
             policy: &Policy::default(),
             baseline: 0.16,
@@ -1312,6 +1568,7 @@ mod tests {
             ));
         }
         let plan = build(&BuildInput {
+            host: None,
             models: &models,
             policy: &Policy::default(),
             baseline: 0.16,
@@ -1344,6 +1601,7 @@ mod tests {
             ));
         }
         let plan = build(&BuildInput {
+            host: None,
             models: &models,
             policy: &Policy::default(),
             baseline: 0.16,
@@ -1380,6 +1638,7 @@ mod tests {
         };
         assert!(
             build(&BuildInput {
+            host: None,
                 models: &models,
                 policy: &policy,
                 baseline: 0.16,
@@ -1405,6 +1664,7 @@ mod tests {
     #[test]
     fn every_runnable_model_gets_a_role_ranked_cost() {
         let plan = build(&BuildInput {
+            host: None,
             models: &scenario(),
             policy: &Policy::default(),
             baseline: 0.16,
@@ -1445,6 +1705,7 @@ mod tests {
             ));
         }
         let plan = build(&BuildInput {
+            host: None,
             models: &models,
             policy: &Policy::default(),
             baseline: 0.16,
@@ -1470,6 +1731,7 @@ mod tests {
             ..Policy::default()
         };
         let plan = build(&BuildInput {
+            host: None,
             models: &models,
             policy: &dear_images,
             baseline: 0.16,
@@ -1496,6 +1758,7 @@ mod tests {
         };
 
         let plan = build(&BuildInput {
+            host: None,
             models: &scenario(),
             policy: &policy,
             baseline: 0.16,
@@ -1521,6 +1784,7 @@ mod tests {
             footprint("giant", ModelType::Llm, Some("/g.gguf"), 200.0),
         ];
         let plan = build(&BuildInput {
+            host: None,
             models: &models,
             policy: &Policy::default(),
             baseline: 0.16,
@@ -1543,6 +1807,7 @@ mod tests {
             footprint("heavy", ModelType::Llm, Some("/h.gguf"), 75.0),
         ];
         let plan = build(&BuildInput {
+            host: None,
             models: &models,
             policy: &Policy::default(),
             baseline: 0.16,

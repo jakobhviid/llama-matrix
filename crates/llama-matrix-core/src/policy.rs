@@ -40,6 +40,27 @@ pub enum OnOverflow {
     Error,
 }
 
+/// What `build` does with a declared set whose host-RAM cost exceeds the host
+/// ceiling. The GPU fit is unaffected; what is at stake is the box's OOM killer
+/// picking the largest RSS, which is a llama-server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OnHostOverflow {
+    /// Emit it, and name every set that is over with the arithmetic.
+    ///
+    /// The default is `warn` rather than `exclude` because the host cost is part
+    /// measurement and part *declaration*: `d_host` is measured, but the host-side
+    /// prompt cache is bounded by `-cram`, which the command may leave unstated, and
+    /// then [`Policy::host_cache_gb`] stands in for it. Silently deleting packs on
+    /// the strength of a stand-in would be the wrong trade; naming them is not.
+    #[default]
+    Warn,
+    /// Leave the set out of the matrix (a safe under-declaration).
+    Exclude,
+    /// Refuse to emit until the roster or the budget changes.
+    Error,
+}
+
 /// What `build` does with a footprint whose allocation was never confirmed (a
 /// measurement taken before the model finished allocating may be a mid-load plateau,
 /// which under-counts the matrix - see `cache::Measurement::is_confirmed`).
@@ -183,6 +204,29 @@ pub struct Policy {
     pub budget: Option<f64>,
     /// GB safety slack inside the budget (`ceiling = budget - margin`).
     pub margin: f64,
+    /// GB of **host** RAM llama-matrix may plan against; `None` = the total the
+    /// store recorded at sweep time. Host RAM is a second budget: a pack that fits
+    /// the GPU can still exhaust the box, and that failure presents as an
+    /// unexplained upstream death rather than as anything the matrix reports.
+    pub host_budget: Option<f64>,
+    /// GB safety slack inside the host budget. Mirrors `margin`, for the same
+    /// reason: the measured host baseline is a snapshot, and everything on the box
+    /// grows.
+    pub host_margin: f64,
+    /// GB of host RAM to assume a llama-server holds for its prompt cache when its
+    /// command does not say.
+    ///
+    /// llama.cpp's `-cram` / `--cache-ram` defaults to 8192 MiB **per process** on
+    /// builds that have it (upstream PR 16391), and the memory is anonymous and
+    /// private-dirty: the kernel cannot reclaim it, and llama.cpp evicts only
+    /// against its own cap, never against host pressure. Nothing in a llama-swap
+    /// `cmd` has to mention the flag for the process to take it.
+    ///
+    /// This is the one number in the host arithmetic that is assumed rather than
+    /// read, which is why it is a setting: a command that states `-cram` uses its
+    /// own value, and a build with no such cache takes `0`.
+    pub host_cache_gb: f64,
+    pub on_host_overflow: OnHostOverflow,
     pub strategy: Strategy,
     pub on_overflow: OnOverflow,
     pub on_unconfirmed: OnUnconfirmed,
@@ -206,6 +250,10 @@ impl Default for Policy {
             endpoint: "http://localhost:8080".to_string(),
             budget: None,
             margin: 4.0,
+            host_budget: None,
+            host_margin: 4.0,
+            host_cache_gb: 8.0,
+            on_host_overflow: OnHostOverflow::Warn,
             strategy: Strategy::Flat,
             on_overflow: OnOverflow::Group,
             on_unconfirmed: OnUnconfirmed::Warn,

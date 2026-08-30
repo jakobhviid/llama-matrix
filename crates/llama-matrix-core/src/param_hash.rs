@@ -25,6 +25,14 @@ const STRIP_WITH_VALUE: &[&str] = &[
     "--reasoning",
     "--chat-template-file",
     "--cache-reuse",
+    // llama.cpp's host-side prompt cache cap. It moves HOST RAM, never the GPU, and
+    // `build` reads the cap straight from the live command rather than from a
+    // measurement - so a footprint taken at one `-cram` describes the GPU at any
+    // other, and re-measuring on a change would record the identical number. This is
+    // the one entry justified by the flag being memory-affecting on an axis the
+    // measurement does not carry, rather than by it being memory-neutral.
+    "-cram",
+    "--cache-ram",
     // stable-diffusion.cpp sampling knobs: they change the work done per step, not
     // what stays resident.
     "--steps",

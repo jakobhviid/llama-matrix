@@ -21,6 +21,12 @@ endpoint    = "http://localhost:8080"  # llama-swap base URL
 budget      = 50.0                       # GB llama-matrix may plan against.
                                          #   Omit → auto-detect the physical total.
 margin      = 4.0                        # GB safety slack inside the budget.
+host_budget = 31.7                       # GB of HOST RAM to plan against (§7.4).
+                                         #   Omit → the total `measure` detected.
+host_margin = 4.0                        # GB safety slack inside the host budget.
+host_cache_gb = 8.0                      # GB of host prompt cache to assume per
+                                         #   llama-server when `-cram` is unstated.
+on_host_overflow = "warn"                # warn | exclude | error  (host-RAM overflow, §7.4)
 strategy    = "flat"                     # flat | family
 on_overflow = "group"                    # group | error  (over-cap / too-many-combos handling)
 on_unconfirmed  = "warn"                 # warn | exclude | error  (unconfirmed footprints, §7.2)
@@ -60,6 +66,10 @@ aux   = 5
 | `endpoint` | string (URL) | `http://localhost:8080` | llama-swap address; also `--endpoint` per run |
 | `budget` | float (GB) | *auto-detected total* | hard cap; resolution: `--budget` > this > detected total > **error** |
 | `margin` | float (GB) | `4.0` | `ceiling = budget − margin` |
+| `host_budget` | float (GB) | *the host total `measure` recorded* | the **host RAM** side of the fit (§7.4). A pack that fits the GPU can still exhaust the box |
+| `host_margin` | float (GB) | `4.0` | `host_ceiling = host_budget − host_margin` |
+| `host_cache_gb` | float (GB) | `8.0` | host prompt cache to assume per llama-server whose command does not state `-cram`. llama.cpp's own default is 8192 MiB **per process** and is taken whether or not the flag appears; a command that states `-cram` uses its own value, and a build with no such cache takes `0`. The one assumed term in the host arithmetic (§7.4) |
+| `on_host_overflow` | enum | `warn` | what `build` does with a set that costs more host RAM than the host ceiling. `warn` = emit it and name it with the arithmetic; `exclude` = leave it out (a safe under-declaration); `error` = refuse. `warn` is the default because one term of the sum is a declared cap rather than a measurement |
 | `strategy` | enum | `flat` | `flat` = no grouping (max flexibility); `family` = collapse `[groups]` |
 | `on_overflow` | enum | `group` | applies to **both** the 1000-combination cap and an intractably large maximal-pack enumeration. `group` = drop the over-cap set / keep the bounded packs + warn (a safe under-declaration); `error` = refuse |
 | `on_unconfirmed` | enum | `warn` | what `build` does with a footprint whose allocation was never confirmed (§7.2, and every entry written before that was recorded). `warn` = plan with it, but name it *and* the declared sets that depend on it; `exclude` = leave the model out of the matrix (a safe under-declaration); `error` = refuse to build |
@@ -139,6 +149,8 @@ property of `(model, box)`, so they must not travel with the weights).
 {
   "baseline": 0.16,           // GB, empty pool occupancy: the LOWEST settled reading of the sweep (§7.3)
   "detected_total": 111.5,    // GB physical pool at sweep time (build may override via budget)
+  "host_total": 31.7,         // GB host RAM on the box (§7.4); omitted where unreadable
+  "host_baseline": 4.2,       // GB host RAM held with nothing loaded (§7.4)
   "date": "2026-01-01",       // last sweep
   "additivity_check": { "combo": ["a","b","c"], "predicted": 73.15, "measured": 73.15, "error": 0.0 }
 }
@@ -163,6 +175,7 @@ one entry per distinct footprint it has been measured at:
       "serving_verified": true,       // did /props confirm the served cmd? (§7.1)
       "peak_total": 49.60,    // highest delta seen while allocating (insight only)
       "weights_gb": 49.90,    // total size of the weight files the cmd names
+      "d_host": 1.10,         // GB host RAM the load added — a floor, see §7.4
       "pool_baseline": 0.16,  // empty-pool occupancy this delta was taken against (§7.3)
       "contended": false,     // was anything else in the pool during the window? (§7.3)
       "params": "…the hashed (memory) cmd, human-readable…",
@@ -542,6 +555,52 @@ Compare `allocation_confirmed`, which is the opposite direction and does gate.
 the sweep names both numbers and the date of the old one. Same box, same flags, two
 answers: at most one is right, and the higher one is the likelier contaminated. The
 new value is still written - it is the more recent evidence - but never silently.
+
+### 7.4 Host RAM (the second budget)
+
+A pack that fits the GPU can still exhaust the box it runs on, and that failure does
+not present as anything the matrix reports: the host OOM killer picks the largest
+RSS, which is a llama-server, and it reads as an unexplained upstream death.
+
+Recent llama.cpp ships a host-side prompt cache, `-cram` / `--cache-ram`, **on by
+default at 8192 MiB per llama-server process** (upstream PR 16391). The memory is
+anonymous and private-dirty: the kernel cannot reclaim it, and llama.cpp evicts only
+against its own cap, never against host pressure. Nothing in a llama-swap `cmd` has
+to mention the flag for the process to take the memory, which is why it is easy to
+miss. On a 31.7 GB box, two resident LLMs sat at 9.84 GB and 9.18 GB anonymous RSS
+with 2.5 GB available, both thrashing the 8 GiB cap.
+
+**What is measured.** `measure` reads host RAM the same way it reads the GPU pool:
+`total - available` (not `total - free`; reclaimable page cache is not memory anyone
+is holding). With nothing loaded that is `host_baseline`, the OS and everything else
+the box runs; after a model loads, the delta is its `d_host`.
+
+**What is declared.** `d_host` is a **floor**. It is what the process had dirtied by
+the time it was serving, and it cannot include the prompt cache, because that fills
+as prompts are processed and the load-trigger processes one tiny prompt. The cache is
+bounded by `-cram` instead, which `build` reads from the **live command**, falling
+back to `host_cache_gb` when the command does not state it. Reading the cap from the
+command rather than from the store is what lets a `-cram` change cost no re-measure,
+and is why `-cram` is on the param-hash strip list (§4) despite affecting memory: it
+affects an axis the measurement does not carry.
+
+So, per model: `host_gb = d_host + (declared -cram, else host_cache_gb)`, and
+`host_cache_gb` is `0` for a backend that is not llama.cpp.
+
+**The check.** Each emitted set is totalled as `host_baseline + Σ members` and
+compared against `host_ceiling = host_budget - host_margin`, exactly mirroring the
+GPU arithmetic. `on_host_overflow` decides the outcome (§1.1).
+
+**When it does not run.** The host dimension is optional throughout and is skipped,
+with a stated reason, when the box cannot report host RAM at all or when any model in
+the plan has no recorded `d_host`. A partial host sum is not a smaller answer, it is
+a wrong one. `build` says so rather than leaving "no host warnings" to be read as
+"the host was checked and is fine".
+
+**Why `warn` and not `exclude` by default.** The GPU fit is a proof from
+measurements; the host fit contains one declared term. Silently deleting packs on the
+strength of a stand-in for a flag the operator never set would be the wrong trade.
+Naming them with the arithmetic is not, and `exclude` is one setting away.
 
 ## 8. Server control endpoints (llama-swap)
 

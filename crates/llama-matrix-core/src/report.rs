@@ -28,6 +28,11 @@ pub struct BuildPreview {
     /// sets containing them may not fit (SPEC §7.2). Machine-readable because the
     /// default `on_unconfirmed = "warn"` still emits them.
     pub unconfirmed: Vec<String>,
+    /// The host-RAM ceiling each set was checked against, when the box could report
+    /// one; `null` means the host dimension was not checked (SPEC §7.4).
+    pub host_ceiling: Option<f64>,
+    /// Sets whose host cost is over that ceiling, as `[name, gb]`.
+    pub host_over: Vec<(String, f64)>,
     pub warnings: Vec<String>,
 }
 
@@ -42,6 +47,8 @@ impl BuildPreview {
             sets: plan.sets.len(),
             excluded: plan.excluded.clone(),
             unconfirmed: plan.unconfirmed.clone(),
+            host_ceiling: plan.host_ceiling,
+            host_over: plan.host_over.clone(),
             warnings: plan.warnings.clone(),
         }
     }

@@ -147,6 +147,11 @@ pub struct MeasureSummary {
     pub baseline_was: Option<f64>,
     pub baseline: f64,
     pub detected_total: f64,
+    /// Host RAM with nothing loaded, and the box total, when the box can report
+    /// them. Recorded so `build` can check a pack against the host as well as the
+    /// GPU (SPEC §7.4); `None` on a box with no way to read it.
+    pub host_baseline: Option<f64>,
+    pub host_total: Option<f64>,
 }
 
 /// A re-measure that did not reproduce the stored footprint.
@@ -847,6 +852,13 @@ pub fn sweep(
     // emptied cannot quietly file a contaminated number as the box's floor.
     let mut empty_pool_floor: Option<f64> = None;
     note_floor(&mut empty_pool_floor, &clear_pool(&agent, &options.endpoint, gpu.as_ref()));
+    // Host RAM is a second, independent budget: a pack that fits the GPU can still
+    // exhaust the box it runs on, and the failure presents as an unexplained
+    // upstream death rather than as anything the matrix reports. Read the same way
+    // the GPU baseline is - with nothing loaded - so the two arithmetics match.
+    let host_baseline = platform::host_memory();
+    summary.host_baseline = host_baseline.map(|host| round2(host.used_gb));
+    summary.host_total = host_baseline.map(|host| round2(host.total_gb));
 
     // The roster llama-swap is actually serving. A model the config declares but
     // llama-swap doesn't know is the loud half of a config mismatch: measuring it
@@ -1119,6 +1131,15 @@ pub fn sweep(
                                     ),
                                     _ => (None, None, None, None),
                                 };
+                            // Host delta over the same empty-pool point. A floor:
+                            // the host-side prompt cache fills with use, not at
+                            // load, so `build` adds the declared `-cram` cap on top.
+                            let d_host = match (platform::host_memory(), host_baseline) {
+                                (Some(now), Some(base)) => {
+                                    Some(round2((now.used_gb - base.used_gb).max(0.0)))
+                                }
+                                _ => None,
+                            };
                             let d_total = round2(used - model_baseline);
                             let peak = trigger_peak.max(settled.peak) - model_baseline;
                             let measurement = Measurement {
@@ -1134,6 +1155,7 @@ pub fn sweep(
                                 serving_verified,
                                 peak_total: Some(round2(peak.max(d_total))),
                                 weights_gb: weights.map(round2),
+                                d_host,
                                 pool_baseline: Some(round2(model_baseline)),
                                 contended: Some(!contention.is_empty()),
                                 params: memory_cmd(&record.cmd),
@@ -1223,6 +1245,8 @@ pub fn sweep(
     store.write_box(&BoxMeta {
         baseline: round2(summary.baseline),
         detected_total: Some(round2(summary.detected_total)),
+        host_total: summary.host_total,
+        host_baseline: summary.host_baseline,
         date: Some(today),
         additivity_check: None,
         ..Default::default()

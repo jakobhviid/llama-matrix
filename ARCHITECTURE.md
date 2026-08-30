@@ -254,6 +254,21 @@ so the walk runs under a work budget; if it overruns, the packs found so far are
 kept (a safe under-declaration — a smaller matrix never OOMs) and the build fails
 over via `on_overflow` exactly as the 1000-combination cap does (§4.4).
 
+The GPU is not the only budget. Each emitted set is totalled a second time against
+host RAM:
+
+```
+host(units) := host_baseline + Σ host[u] ≤ host_budget − host_margin
+host[u]     := d_host[u] + (declared -cram, else host_cache_gb)
+```
+
+The two are checked separately rather than knapsacked together, because they are not
+the same kind of number: the GPU side is a proof from measurements, while `d_host` is
+a floor (the host-side prompt cache fills with use, not at load) topped up by a
+declared cap. So the host side reports rather than decides by default, under
+`on_host_overflow`, and is skipped outright with a stated reason where the box or the
+store cannot supply it (SPEC §7.4).
+
 ### 4.4 Emission & the 1000-combination guard
 
 The block is a set of named DSL expressions (see `SPEC.md` §3 for the grammar):

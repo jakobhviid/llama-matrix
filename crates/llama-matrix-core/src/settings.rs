@@ -59,6 +59,30 @@ pub const SETTINGS: &[Setting] = &[
         default: "4.0",
     },
     Setting {
+        key: "host_budget",
+        kind: Kind::Float,
+        desc: "GB of HOST RAM to plan against (unset = the total measure detected)",
+        default: "(detected host total)",
+    },
+    Setting {
+        key: "host_margin",
+        kind: Kind::Float,
+        desc: "GB safety slack inside the host budget",
+        default: "4.0",
+    },
+    Setting {
+        key: "host_cache_gb",
+        kind: Kind::Float,
+        desc: "GB of host prompt cache to assume per llama-server when -cram is unstated",
+        default: "8.0",
+    },
+    Setting {
+        key: "on_host_overflow",
+        kind: Kind::Enum(&["warn", "exclude", "error"]),
+        desc: "handling of sets that cost more host RAM than the host ceiling",
+        default: "warn",
+    },
+    Setting {
         key: "strategy",
         kind: Kind::Enum(&["flat", "family"]),
         desc: "packing strategy",
