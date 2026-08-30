@@ -186,7 +186,8 @@ of five footprints; grouped, it is the largest of them, and it costs one slot in
 of five.
 
 **The caps limit how many may be resident**, which no GB budget can say (`SPEC.md`
-§1.4):
+§1.4). Setting one changes what `-cram` the box affords, so re-check that afterwards
+(Loop 6):
 
 ```
 llama-matrix configure set max_models_per_set 5         # any set, at most 5 models
@@ -226,7 +227,50 @@ All read-only and safe to run anytime.
 
 ---
 
-## Loop 6 - Verify & roll back
+## Loop 6 - The host budget says most of your sets are over
+
+Expect this on the first build after a store gains host measurements, and expect it to
+be dramatic: the dimension switches on against a roster whose commands do not state
+`-cram`, so **every llama-server is assumed at llama.cpp's 8192 MiB default**. On the
+reference box that put 208 of 229 declared sets over the ceiling. Nothing is broken and
+nothing changed on the box; a budget that was never checked is now being checked.
+
+Work it in this order. Each step is derivable from data the tool already holds.
+
+**1. Read the shape, not the names.** `build --json` gives `host_over_shape`: the range
+the over sets span, whether they all hold the same number of cache holders, and any
+model present in all of them. One recurring composition is a different problem from a
+diffuse one, and the set names are interchangeable.
+
+**2. Size `-cram` from the server's own history.** `GET /api/metrics/activity` gives
+`tokens.input_tokens` per request with `tokens.cache_tokens` beside it. Segment by
+model: a periodic health probe with 2-token prompts will dominate the percentiles.
+Client-side chat logs are not a substitute - they show what a client *could* send, not
+what reached the server, and the two can differ by two orders of magnitude.
+
+**3. Set it per role, not uniformly.** `-cram` is per entry. Servers that cannot fill a
+cache (embed, rerank) go to a floor; the chat models take the remainder. On the
+reference box two aux servers at `-cram 512` freed 15 GiB of assumption, which is what
+let the LLMs run at 2560 instead of the 1792 a uniform prescription named. Rebuild
+after each change: the prescription re-solves against what you have declared.
+
+**4. Still over? Choose deliberately, and sweep.** Either `on_host_overflow =
+"exclude"` (drop the offending sets, keep the cache) or a smaller uniform cache (keep
+every set, cache less). The curve has a cliff, so sweep it rather than guessing:
+
+```
+-cram 2560 -> 294 packs,   0 excluded      3584 -> 154 packs, 140 excluded
+-cram 3072 -> 284 packs,  10 excluded      4096 ->  64 packs, 230 excluded
+```
+
+**5. Only then reach for a cardinality cap.** `max_cache_holders_per_set` bounds
+processes rather than gigabytes, and it does not move the clean threshold - it reduces
+how many sets exceed it. Compare the grid (cap x `-cram`), not the boundary: two caps
+can look identical at the threshold and differ by twenty excluded packs above it.
+
+---
+
+## Loop 7 - Verify & roll back
 
 `build --apply` does a **liveness check** automatically - it pings `/v1/models` to
 confirm llama-swap is still serving, and rolls back if not. It does **not** load
@@ -247,7 +291,7 @@ For a *functional* check (or after a `--no-verify` splice):
 
 ---
 
-## Loop 7 - The wrong model keeps getting evicted
+## Loop 8 - The wrong model keeps getting evicted
 
 Symptom: two models you use together alternate on every request, each swap paying a
 full reload, while models you have not touched in hours stay resident. Read the
@@ -374,6 +418,12 @@ The split that matters when deciding whether to stop: `unconfirmed_allocation`,
 
 ## Cadence
 
+- **Before a sweep, confirm the binary is current.** A store written by a newer
+  llama-matrix is read partially by an older one - unknown fields are dropped
+  silently, and `--llm` prints that build's own guide with nothing in it suggesting a
+  newer release exists. The tool now says so when it can (it reads the store's
+  `written_by` stamp), but that only fires once you have already run against a newer
+  store; `llama-matrix --version` against the releases page costs a second.
 - **Routine:** run Loop 1 after any memory-affecting roster change. The incremental
   cache keeps it cheap.
 - **Rare:** a full `measure --force` sweep - only when you suspect a stored number

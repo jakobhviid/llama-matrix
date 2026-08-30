@@ -1646,10 +1646,18 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
                 sets.len(),
                 match cram_gb {
                     // The whole point of computing it: a prescription, not a diagnosis.
+                    // Says "uniform floor" rather than just naming a number: the
+                    // number solves one equation with one unknown, so it prices every
+                    // llama.cpp server alike, and an aux server that cannot fill a
+                    // cache is where the cheap headroom actually is.
                     Some(gb) => format!(
-                        "Setting `-cram {}` on every llama-server entry brings all of them \
-                         under it (llama.cpp's default is 8192 MiB per process, taken whether \
-                         or not the flag appears). Or raise `host_budget`, or set \
+                        "`-cram {}` on every llama-server entry brings all of them under it \
+                         (llama.cpp's default is 8192 MiB per process, taken whether or not \
+                         the flag appears). That is a uniform FLOOR, not the best available: \
+                         `-cram` is per entry, and pinning servers that cannot fill a cache \
+                         (embed, rerank) to a few hundred MiB leaves the chat models far more \
+                         than this. Size from `GET /api/metrics/activity`, then rebuild for a \
+                         new number. Or raise `host_budget`, or set \
                          `on_host_overflow = \"exclude\"` to leave those sets out",
                         cram_mib(gb)
                     ),

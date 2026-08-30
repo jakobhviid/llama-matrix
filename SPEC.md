@@ -211,6 +211,21 @@ this is a proxy for one.
 - `max_models_per_set` is the blunt one: pick it from process-level limits or from
   what you are willing to have swap at once. Remember aux comes off the top.
 
+**A cap and the affordable `-cram` interact, and the obvious test misleads.** A cap
+does **not** move the *clean threshold* - the largest `-cram` at which no set is over.
+It changes how many sets exceed it above that point. Measured on the reference box,
+both caps clean at 2560 and both dirty at 3072, which reads as "the cap bought
+nothing":
+
+| cap | `-cram` | packs | excluded for host |
+|---|---|---|---|
+| 5 | 3072 | 284 | 10 |
+| 6 | 3072 | 179 | 29 |
+
+Under `on_host_overflow = "exclude"` that difference is the entire decision. Compare
+the *grid*, not the boundary, and after setting a cap re-check what `-cram` it now
+affords.
+
 **The counter-intuitive part: a cap can make the block bigger.** Packs are maximal by
 GB, so capping cardinality makes *every* combination of exactly the capped size
 maximal. A 14-unit roster capped to three units per pack emits up to C(14,3) = 364
@@ -795,14 +810,42 @@ set that is over with *no* cache holder at all is unfixable by `-cram`, because 
 the overrun is in memory that was measured, and the tool says that rather than
 suggesting a number that would not work.
 
-**The uniform number is a floor, not the best the box can do.** It solves one equation
-with one unknown, so it prices every llama.cpp server the same. In practice they are
-not the same: an embedding or rerank server whose prompts are a few thousand tokens
-cannot fill 8 GiB, and dropping *those* to a few hundred MiB frees far more for the
-chat models than lowering everything uniformly. The tool cannot pick those values for
-you (it has no per-model prompt-length data), but it will re-prescribe against
-whatever you declare, so lowering the cheap ones and rebuilding shows what the rest
-can afford.
+**`-cram` is per entry, and should be sized per role. The uniform number is a floor.**
+The prescription solves one equation with one unknown, so it prices every llama.cpp
+server the same; the servers are not the same. An embedding or rerank server whose
+prompts run to a few thousand tokens cannot fill 8 GiB no matter how long it runs, and
+holding the default there is pure reservation. Drop those to a floor and the chat
+models get the difference:
+
+```yaml
+# aux servers: a floor, because they cannot fill more
+"embed":   { cmd: "… --embedding -cram 512" }
+"rerank":  { cmd: "… --reranking -cram 512" }
+# chat models: the remainder, which is now much larger
+"chat-a":  { cmd: "… -cram 2560" }
+```
+
+Measured on the reference box: two aux servers pinned to 512 MiB freed 15 GiB of
+assumption, and that is what let the LLMs run at 2560 rather than the 1792 the uniform
+prescription named. Same ceiling, materially better outcome, purely from role
+awareness.
+
+The tool will not pick those values (it has no per-model prompt-length data), but it
+re-prescribes against whatever you declare - so lower the cheap ones, rebuild, and the
+new number tells you what the rest can afford.
+
+**Size them from the server's own history, not from the client's.** `GET
+/api/metrics/activity` (the same endpoint `ROADMAP.md` #7 wants for recency) returns
+`tokens.input_tokens` per request, paginated, with `tokens.cache_tokens` beside it.
+That is what actually reached the server. Client-side chat files are not: on the
+reference box they suggested prompts up to 89k tokens for models whose real largest in
+the same window was 178, because that workload was idle. Two things about the data:
+
+- **Segment by model.** A periodic health probe with 2-token prompts dominates the
+  p50 and makes percentiles meaningless across the roster.
+- **Read `cache_tokens` too.** On that box the long prompts that would have exceeded
+  the cache arrived with `cache_tokens = 0` - they were not being served from it
+  anyway, so sizing the cache to hold them buys nothing.
 
 **When it does not run.** The host dimension is optional throughout and is skipped,
 with a stated reason, when the box cannot report host RAM at all or when any model in
