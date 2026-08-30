@@ -406,13 +406,24 @@ image pool evicts one, so the solver drops the model in active use and the pair
 thrashes on every alternating request, paying a full reload each time, while an image
 pool nothing has touched for hours stays resident.
 
-So the costs are **tiered by role**: `image` < `aux` < `llm`, with the `llm` tier
-derived as `Σ image costs + 1` (floored at 10). Two properties are deliberate:
+So the costs are **tiered by model type**, ordered by what it costs to get each one
+serving again: `tts-proxy` < `stt` < `embed` < `rerank` < `image` < `llm`, with the
+`llm` tier derived as `Σ image costs + 1` (floored at 20). Three properties are
+deliberate:
 
-- **Role, not load time.** A load-proportional scale does not fix this: an image
-  server loads in ~10 s and a 28 GB LLM in ~14 s, so four images still outweigh one
-  LLM. The axis that separates them is what the model is *for*, not how long it takes
-  to come back.
+- **Type, not role.** The tier follows what a model *is*, not which `[roles]` pool it
+  rides in. Those were the same thing until a `[roles]` list that demoted an embedding
+  model out of `aux` was found to also promote it into the *llm* tier, pricing a
+  two-second reload like a hundred-second one purely because of where it was not.
+- **Ordered by reload cost, but not proportional to it.** The ordering comes from
+  measurement (reload to `ready` on the reference box: proxy instant, whisper and an
+  embedder ~2 s, a reranker ~8 s, LLMs 10-100 s), with `image` placed above the
+  service tiers because `ready` for a diffusion server arrives long before it
+  allocates and the first generation after a reload pays for it. It is deliberately
+  *not* proportional: a cost proportional to reload seconds makes the largest model
+  the cheapest thing to keep, so it never leaves however long it sits idle. See
+  `ROADMAP.md` #7 for the worked example and the fix (recency times latency, not
+  latency).
 - **Scaled to the pool, not to a constant.** The guarantee wanted is "keeping a second
   conversational model beats keeping the entire idle image pool", which is a fact about
   the pool's size. A constant would hold for four image servers and fail for twelve.
@@ -428,9 +439,10 @@ the block is readable as a statement of policy. A model excluded as unrunnable g
 none: nothing can evict what cannot load. The operator overrides both the tiers and
 individual ids in `[evict_costs]` (`SPEC.md` §1.3).
 
-What this **cannot** express is recency. Static weights rank roles; they cannot say
-"the one I used 30 seconds ago", so two same-tier models that do not fit together still
-alternate. That is `ROADMAP.md` #7.
+What this **cannot** express is recency. Static weights rank types; they cannot say
+"the one I used 30 seconds ago", so a model untouched for hours is priced exactly as it
+was when it was hot and two same-tier models that do not fit together still alternate.
+That is `ROADMAP.md` #7.
 
 ---
 

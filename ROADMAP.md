@@ -46,11 +46,47 @@ Roughly in order of value-to-effort:
    that change the pack set. More expensive, and only useful to an operator already at
    the ceiling.
 
-7. **evict_cost from telemetry.** The role tiers are the axis static config can
-   express, and they cannot express **recency**: two same-tier models that do not fit
-   together still alternate. Derive keep/evict weights from real request
-   frequency/recency, layered over the static tiers rather than replacing them, so the
-   operator's declared priorities still win.
+7. **evict_cost from recency.** The type tiers are the axis static config can express,
+   and they cannot express **recency**: a model untouched for hours is priced exactly
+   as it was when it was hot, and two same-tier models that do not fit together still
+   alternate. Derive keep weights from real request recency, layered over the static
+   tiers rather than replacing them, so the operator's declared priorities still win.
+
+   **Recency is the load-bearing half, and reload latency alone is a trap.** The store
+   already holds `load_s`, so pricing each model by what it costs to reload looks like
+   the obvious move. It is not: llama-swap evicts whatever is cheapest to evict, so a
+   large slow model becomes permanently unevictable. Concretely, with
+   `glm-4.5-air` (74 GB, 100 s) and `gemma-4-26b` (24 GB, 22 s) resident and a third
+   model requested, the solver always drops gemma, and it will keep doing so however
+   long glm has sat idle. The flat tier that exists today does not have this problem,
+   so latency-derived costs would be a regression.
+
+   The right shape is the product:
+
+   ```
+   keep(M) ≈ decay(time since M was last requested) × reload_seconds(M)
+   ```
+
+   probability of being wrong × cost of being wrong, floored at 1. Latency alone
+   assumes the probability is uniform; recency alone assumes the latency is, and on
+   the reference box that is wrong by 50x (1 s to 100 s). The product also retires
+   the `Σ image costs + 1` derivation, because an idle image pool decays to 1 on its
+   own.
+
+   Two things to settle before any of it:
+
+   - **Config churn.** Costs that track traffic have to be rewritten on a timer, and
+     each rewrite hot-reloads llama-swap. Whether a reload preserves residency decides
+     whether this is viable at all: if it evicts, the cure thrashes worse than the
+     disease. Not documented in the llama-swap README shipped in the image (v251);
+     verify on a quiet box first.
+   - **`drift` stops meaning "someone changed something".** Worth fixing regardless:
+     split it into *the declared sets differ* (structural, actionable) and *only the
+     weights differ* (expected). Then a cost refresh is invisible to drift and a real
+     config change still shows.
+
+   Plus the obvious guard: an explicit `[evict_costs.models]` pin must still win, or a
+   busy hour overrides a deliberate decision.
 
    The data source exists. `GET /api/metrics/activity` (llama-swap v251) returns
    per-request records carrying what this needs:

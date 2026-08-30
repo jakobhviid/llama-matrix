@@ -77,28 +77,35 @@ pub struct Roles {
 
 /// Built-in eviction cost of an image model: the cheapest tier. A diffusion server
 /// reloads in seconds and is used in bursts, so it is the natural eviction victim.
-pub const IMAGE_EVICT_COST: u32 = 1;
+pub const IMAGE_EVICT_COST: u32 = 5;
 
-/// Built-in eviction cost of an aux ride-along. Aux is reserved in nearly every set,
-/// so it is rarely a candidate for eviction at all; the value only decides the few
-/// cases where a `[roles]` override leaves an aux model out of some sets.
-pub const AUX_EVICT_COST: u32 = 5;
+/// Built-in eviction costs of the small service backends, ordered by what it costs to
+/// get them serving again.
+///
+/// These rank by **model type**, not by the `[roles]` pool a model happens to sit in.
+/// The two used to be the same thing, so a `[roles]` list that demoted an embedding
+/// model out of `aux` also promoted it into the *llm* tier: a 2-second reload priced
+/// like a 100-second one, purely because of where it was not. What a model costs to
+/// reload is a property of the model.
+///
+/// The ordering below is the measured one. Reload to `ready` on the reference box: a
+/// proxy is instant (it fronts a service that is already running), whisper and an
+/// embedder about 2 s, a reranker about 8 s, and an LLM 10 to 100 s. An image backend
+/// reads as 2 s but is not cheap: `ready` for a diffusion server arrives long before
+/// it allocates, and the first generation after a reload pays for it, so it sits
+/// above the service tiers rather than with them.
+pub const TTS_PROXY_EVICT_COST: u32 = 1;
+pub const STT_EVICT_COST: u32 = 2;
+pub const EMBED_EVICT_COST: u32 = 3;
+pub const RERANK_EVICT_COST: u32 = 4;
 
-/// Floor for the derived `llm` tier. Above `AUX_EVICT_COST`, round, and stable for
+/// Floor for the derived `llm` tier. Above every service tier, round, and stable for
 /// small rosters, leaving numeric room to hand-tune a single model between tiers.
-pub const MIN_LLM_EVICT_COST: u32 = 10;
+pub const MIN_LLM_EVICT_COST: u32 = 20;
 
 /// Largest cost accepted. Well beyond any real tier, and low enough that llama-swap
 /// can sum a whole roster of them without overflowing.
 pub const MAX_EVICT_COST: u32 = 1_000_000;
-
-/// The tier a model's eviction cost is drawn from, mirroring the `[roles]` split.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CostRole {
-    Llm,
-    Image,
-    Aux,
-}
 
 /// `[evict_costs]`: how much the solver must pay to evict each model.
 ///
@@ -118,11 +125,22 @@ pub struct EvictCosts {
     /// Conversational models. Unset = derived per roster so that keeping one always
     /// beats keeping the entire idle image pool (see [`EvictCosts::derived_llm`]).
     pub llm: Option<u32>,
-    /// The image pool.
+    /// Diffusion backends.
     pub image: Option<u32>,
-    /// The aux ride-alongs.
+    pub embed: Option<u32>,
+    pub rerank: Option<u32>,
+    pub stt: Option<u32>,
+    #[serde(rename = "tts-proxy", alias = "tts_proxy")]
+    pub tts_proxy: Option<u32>,
+    /// Shorthand for all four service tiers at once (`embed`, `rerank`, `stt`,
+    /// `tts-proxy`). A tier set individually wins over it.
+    ///
+    /// Kept because it is the key existing configs already use, and because "price
+    /// the small services together" is a thing people reasonably want to say in one
+    /// line. It is no longer a *category* though: what a model costs to reload
+    /// follows from what it is, not from which pool it rides in.
     pub aux: Option<u32>,
-    /// Per-model-id overrides, which win over the role tier.
+    /// Per-model-id overrides, which win over every tier.
     pub models: IndexMap<String, u32>,
 }
 
@@ -140,16 +158,21 @@ impl EvictCosts {
             .clamp(MIN_LLM_EVICT_COST as u64, MAX_EVICT_COST as u64) as u32
     }
 
-    /// The cost of one model: its per-id override, else its role tier, else the
-    /// built-in for that role. `image_pool` is consulted only for [`CostRole::Llm`].
-    pub fn of(&self, id: &str, role: CostRole, image_pool: u64) -> u32 {
+    /// The cost of one model: its per-id override, else its **type** tier, else the
+    /// `aux` shorthand where it applies, else the built-in. `image_pool` is consulted
+    /// only for an LLM.
+    pub fn of(&self, id: &str, model_type: crate::model::ModelType, image_pool: u64) -> u32 {
+        use crate::model::ModelType::*;
         if let Some(&cost) = self.models.get(id) {
             return cost;
         }
-        match role {
-            CostRole::Llm => self.llm.unwrap_or_else(|| Self::derived_llm(image_pool)),
-            CostRole::Image => self.image.unwrap_or(IMAGE_EVICT_COST),
-            CostRole::Aux => self.aux.unwrap_or(AUX_EVICT_COST),
+        match model_type {
+            Llm => self.llm.unwrap_or_else(|| Self::derived_llm(image_pool)),
+            Image => self.image.unwrap_or(IMAGE_EVICT_COST),
+            Embed => self.embed.or(self.aux).unwrap_or(EMBED_EVICT_COST),
+            Rerank => self.rerank.or(self.aux).unwrap_or(RERANK_EVICT_COST),
+            Stt => self.stt.or(self.aux).unwrap_or(STT_EVICT_COST),
+            TtsProxy => self.tts_proxy.or(self.aux).unwrap_or(TTS_PROXY_EVICT_COST),
         }
     }
 
@@ -157,7 +180,15 @@ impl EvictCosts {
     /// (`0` disables nothing, it makes the model free to evict, which the schema
     /// rejects) that a summed roster of them cannot overflow.
     fn validate(&self) -> Result<()> {
-        let roles = [("llm", self.llm), ("image", self.image), ("aux", self.aux)];
+        let roles = [
+            ("llm", self.llm),
+            ("image", self.image),
+            ("embed", self.embed),
+            ("rerank", self.rerank),
+            ("stt", self.stt),
+            ("tts-proxy", self.tts_proxy),
+            ("aux", self.aux),
+        ];
         for (key, configured) in roles {
             if let Some(cost) = configured {
                 check_cost(&format!("[evict_costs] {key}"), cost)?;
@@ -402,7 +433,9 @@ image = 2
         }
     }
 
-    /// Per-id override beats the role tier, which beats the built-in.
+    /// Per-id override beats an explicit tier, which beats the `aux` shorthand, which
+    /// beats the built-in. The tier is chosen by model TYPE, so a `[roles]` list that
+    /// demotes an embedder out of `aux` does not reprice it as an LLM.
     #[test]
     fn evict_cost_resolution_order() {
         let src = r#"
@@ -413,15 +446,36 @@ image = 3
 "#;
         let costs: EvictCosts = toml::from_str::<Policy>(src).unwrap().evict_costs;
 
-        // per-id override wins whatever the role
-        assert_eq!(costs.of("pinned-chat", CostRole::Llm, 0), 40);
-        // configured role tier beats the built-in
-        assert_eq!(costs.of("some-image", CostRole::Image, 0), 3);
-        // unconfigured role falls through to the built-in
-        assert_eq!(costs.of("embed", CostRole::Aux, 0), AUX_EVICT_COST);
+        use crate::model::ModelType;
+        // per-id override wins whatever the type
+        assert_eq!(costs.of("pinned-chat", ModelType::Llm, 0), 40);
+        // configured tier beats the built-in
+        assert_eq!(costs.of("some-image", ModelType::Image, 0), 3);
+        // unconfigured type falls through to its own built-in, in reload order
+        assert_eq!(costs.of("tts", ModelType::TtsProxy, 0), TTS_PROXY_EVICT_COST);
+        assert_eq!(costs.of("whisper", ModelType::Stt, 0), STT_EVICT_COST);
+        assert_eq!(costs.of("embed", ModelType::Embed, 0), EMBED_EVICT_COST);
+        assert_eq!(costs.of("rerank", ModelType::Rerank, 0), RERANK_EVICT_COST);
+        // The built-in tiers must stay in reload order, or the whole point is lost.
+        let tiers = [
+            TTS_PROXY_EVICT_COST,
+            STT_EVICT_COST,
+            EMBED_EVICT_COST,
+            RERANK_EVICT_COST,
+            IMAGE_EVICT_COST,
+            MIN_LLM_EVICT_COST,
+        ];
+        assert!(tiers.windows(2).all(|pair| pair[0] < pair[1]), "{tiers:?} is not ascending");
         // an unconfigured llm is derived from the image pool it must outweigh
-        assert_eq!(costs.of("chat", CostRole::Llm, 4), MIN_LLM_EVICT_COST);
-        assert_eq!(costs.of("chat", CostRole::Llm, 30), 31);
+        assert_eq!(costs.of("chat", ModelType::Llm, 4), MIN_LLM_EVICT_COST);
+        assert_eq!(costs.of("chat", ModelType::Llm, 30), 31);
+
+        // `aux` still prices the service tiers together, and an explicit tier wins.
+        let shorthand: EvictCosts =
+            toml::from_str::<Policy>("[evict_costs]\naux = 7\nstt = 2\n").unwrap().evict_costs;
+        assert_eq!(shorthand.of("embed", ModelType::Embed, 0), 7);
+        assert_eq!(shorthand.of("whisper", ModelType::Stt, 0), 2);
+        assert_eq!(shorthand.of("chat", ModelType::Llm, 0), MIN_LLM_EVICT_COST);
     }
 
     #[test]

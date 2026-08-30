@@ -16,7 +16,7 @@ use anyhow::{bail, Result};
 use crate::cache::Store;
 use crate::config;
 use crate::model::ModelType;
-use crate::policy::{CostRole, OnHostOverflow, OnOverflow, OnUnconfirmed, Policy};
+use crate::policy::{OnHostOverflow, OnOverflow, OnUnconfirmed, Policy};
 
 /// Work budget for maximal-pack enumeration. Enumerating maximal fitting packs is
 /// worst-case exponential in the light-unit count, so the recursion runs under a
@@ -1294,14 +1294,15 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
     // llama-swap answers a request by picking the declared set that minimizes the
     // summed cost of the running models it would evict. Leave the costs uniform and
     // that comparison is a body count, so a pile of idle image servers outvotes the
-    // model in active use. The tiers therefore rank by role (image < aux < llm), with
+    // model in active use. The tiers therefore rank by model TYPE, ordered by what it
+    // costs to get each back (tts-proxy < stt < embed < rerank < image < llm), with
     // the llm tier derived from the image pool it has to outweigh (ARCHITECTURE §4.7).
     // Every model carries one, not just the non-default tiers, so the block states what
     // the solver will do rather than leaving it to be re-derived.
     let costs = &policy.evict_costs;
     let image_pool: u64 = image_models
         .iter()
-        .map(|model| costs.of(&model.id, CostRole::Image, 0) as u64)
+        .map(|model| costs.of(&model.id, model.model_type, 0) as u64)
         .sum();
     let mut evict_costs: Vec<(String, u32)> = Vec::new();
     for model in models {
@@ -1309,14 +1310,10 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
         if excluded.contains(&model.id) {
             continue;
         }
-        let role = if is_aux(model) {
-            CostRole::Aux
-        } else if is_image(model) {
-            CostRole::Image
-        } else {
-            CostRole::Llm
-        };
-        evict_costs.push((model.id.clone(), costs.of(&model.id, role, image_pool)));
+        // Keyed on what the model IS, not on which pool `[roles]` put it in: a
+        // demoted embedder is still an embedder, and reloading it still takes two
+        // seconds. Pricing it as an LLM because it left `aux` was the bug.
+        evict_costs.push((model.id.clone(), costs.of(&model.id, model.model_type, image_pool)));
     }
     let unknown: Vec<&str> = costs
         .models
@@ -2675,7 +2672,7 @@ mod tests {
     /// one declared set, so a tier of its own would only change the answer when an
     /// image is requested beside it, and there the llm tier is already the right one.
     #[test]
-    fn every_runnable_model_gets_a_role_ranked_cost() {
+    fn every_runnable_model_gets_a_type_ranked_cost() {
         let plan = build(&BuildInput {
             host: None,
             models: &scenario(),
@@ -2685,15 +2682,26 @@ mod tests {
         })
         .unwrap();
 
+        use crate::policy::{EMBED_EVICT_COST, IMAGE_EVICT_COST, RERANK_EVICT_COST};
+
+        // Tiers follow the model's TYPE, ordered by what it costs to get it back.
         for image in ["img-a", "img-b"] {
-            assert_eq!(cost_of(&plan, image), Some(1), "{image}");
+            assert_eq!(cost_of(&plan, image), Some(IMAGE_EVICT_COST), "{image}");
         }
-        for aux in ["embed", "rerank"] {
-            assert_eq!(cost_of(&plan, aux), Some(5), "{aux}");
-        }
-        // …including both halves of a collapsed twin, and the heavy.
+        assert_eq!(cost_of(&plan, "embed"), Some(EMBED_EVICT_COST));
+        assert_eq!(cost_of(&plan, "rerank"), Some(RERANK_EVICT_COST));
+
+        // …including both halves of a collapsed twin, and the heavy. The llm tier is
+        // derived, so assert the guarantee rather than the number: keeping one LLM
+        // must beat keeping the whole idle image pool.
+        let image_pool: u32 = ["img-a", "img-b"]
+            .iter()
+            .filter_map(|id| cost_of(&plan, id))
+            .sum();
         for llm in ["small-a", "small-b", "mid", "twin", "twin-nothink", "huge"] {
-            assert_eq!(cost_of(&plan, llm), Some(10), "{llm}");
+            let cost = cost_of(&plan, llm).unwrap_or_else(|| panic!("no cost for {llm}"));
+            assert!(cost > image_pool, "{llm} at {cost} does not outweigh the pool at {image_pool}");
+            assert!(cost > RERANK_EVICT_COST, "{llm} at {cost} is not above the service tiers");
         }
         assert_eq!(plan.evict_costs.len(), scenario().len(), "every model, exactly once");
     }
@@ -2780,8 +2788,12 @@ mod tests {
         .unwrap();
 
         assert_eq!(cost_of(&plan, "small-a"), Some(99), "the override wins");
-        assert_eq!(cost_of(&plan, "small-b"), Some(10), "its neighbour keeps the tier");
-        assert_eq!(cost_of(&plan, "embed"), Some(2), "the configured aux tier wins");
+        assert_eq!(
+            cost_of(&plan, "small-b"),
+            Some(crate::policy::MIN_LLM_EVICT_COST),
+            "its neighbour keeps the tier"
+        );
+        assert_eq!(cost_of(&plan, "embed"), Some(2), "the `aux` shorthand prices the services");
         assert!(cost_of(&plan, "smal-a").is_none(), "an unknown id emits nothing");
         assert!(
             plan.warnings.iter().any(|warning| warning.contains("smal-a")),
@@ -2807,7 +2819,7 @@ mod tests {
 
         assert!(plan.excluded.contains(&"giant".to_string()));
         assert!(cost_of(&plan, "giant").is_none(), "nothing can evict what cannot load");
-        assert_eq!(cost_of(&plan, "chat"), Some(10));
+        assert_eq!(cost_of(&plan, "chat"), Some(crate::policy::MIN_LLM_EVICT_COST));
     }
 
     #[test]

@@ -61,9 +61,15 @@ gemma  = ["gemma-27b-q4", "gemma-27b-q4-nothink", "gemma-27b-abliterated-q5"]
 images = ["flux", "chroma", "z-image"]   # one diffusion server at a time
 
 [evict_costs]              # which model the solver keeps under pressure (§1.3).
-llm   = 10                 # per-role tiers; higher = costlier to evict = prefer to keep
-image = 1
-aux   = 5
+# Per-TYPE tiers, ordered by what it costs to get the model serving again; higher =
+# costlier to evict = prefer to keep. All optional.
+llm    = 20
+image  = 5
+rerank = 4
+embed  = 3
+stt    = 2
+"tts-proxy" = 1
+aux    = 3                 # shorthand: sets embed/rerank/stt/tts-proxy at once
 
 [evict_costs.models]       # per-model-id overrides, which win over the role tier.
 "qwen3-coder-30b" = 40
@@ -114,14 +120,29 @@ weight: higher = costlier to evict = prefer to keep. Positive integers only.
 Every model in the matrix is emitted with a cost, resolved in this order:
 
 1. a `[evict_costs.models]` entry for that exact model id;
-2. the tier for its role (`llm` / `image` / `aux`, matching the `[roles]` split);
-3. the built-in for that role.
+2. the tier for its **model type** (§6);
+3. the `aux` shorthand, which sets all four service tiers at once;
+4. the built-in for that type.
 
-| role | built-in | why |
+| type | built-in | reload on the reference box |
 |---|---|---|
-| `image` | `1` | a diffusion server reloads in seconds and is used in bursts, so it is the natural eviction victim |
-| `aux` | `5` | reserved in nearly every set, so rarely a candidate for eviction at all |
-| `llm` | `max(10, Σ image costs + 1)` | must outweigh the **whole** idle image pool, or a large enough pool wins on count alone |
+| `tts-proxy` | `1` | instant: it fronts a service that is already running |
+| `stt` | `2` | ~2 s |
+| `embed` | `3` | ~2 s |
+| `rerank` | `4` | ~8 s |
+| `image` | `5` | reads as ~2 s to `ready`, but see below |
+| `llm` | `max(20, Σ image costs + 1)` | 10 s to 100 s |
+
+**The tier follows what a model IS, not which pool it rides in.** These used to be the
+same thing, keyed on the `[roles]` split, so a `[roles]` list that demoted an embedding
+model out of `aux` also promoted it into the *llm* tier: a two-second reload priced
+like a hundred-second one, purely because of where it was not. What a model costs to
+reload is a property of the model.
+
+**Why `image` sits above the service tiers despite reading as 2 s.** `load_s` measures
+time to `ready`, and a diffusion server is ready long before it allocates (§7.2); the
+first generation after a reload pays for it. The cheap reading is an artefact of where
+the measurement stops, and the tier reflects the real cost rather than the number.
 
 The `llm` tier scales with the image pool rather than resting on a constant, because
 the guarantee wanted is "keeping a second conversational model beats keeping the
@@ -130,8 +151,14 @@ number. A **heavy** is an llm and takes the llm tier: it occupies exactly one de
 set, so a tier of its own would change the solver's answer only when an image is
 requested beside it, and there the llm tier is already the one that keeps it.
 
+**What these tiers cannot express is recency.** A cost is static, so a model that has
+not been touched in hours is priced exactly as it was when it was hot. Two same-tier
+models that do not fit together will still alternate, and no ordering of the tiers
+fixes that. See `ROADMAP.md` #7, which also records why pricing by reload latency
+*alone* would be worse than what is here.
+
 Costs are keyed by **model id**, not by logical unit, so an override on one quant of a
-collapsed model leaves its twins on the role tier. A `[evict_costs.models]` key naming
+collapsed model leaves its twins on the type tier. A `[evict_costs.models]` key naming
 no model in the matrix is a warning (a typo, or a model that is unmeasured or excluded);
 a `0` or a value above 1000000 is rejected when the policy is read.
 
