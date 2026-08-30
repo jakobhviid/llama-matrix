@@ -41,7 +41,7 @@ probe_image_size = "1024x1024"           # WxH the image load-trigger generates 
 [roles]                    # override the type-derived role assignment.
 # A NON-EMPTY list REPLACES the derivation for that role -- it is the COMPLETE set,
 # so a type-derived model not named here is demoted to an ordinary unit. Omit or
-# leave empty to derive from model type. See ADOPT.md.
+# leave empty to derive from model type. Why it is authoritative: ARCHITECTURE §4.2.
 aux    = ["embed-id", "rerank-id", "whisper-id", "tts-id"]
 images = ["image-a", "image-b"]
 
@@ -228,8 +228,13 @@ what makes a disagreement between them visible). Only a confirmed entry is adopt
 > `peak_total` is the highest delta over baseline seen while the model was allocating,
 > recorded because a diffusion step can transiently allocate above what it leaves
 > resident. Nothing consumes it yet (`build` plans against `d_total`); it exists so
-> peak budgeting has data to work from. `weights_gb` totals the weight files the
-> command names, when they were readable at measure time.
+> peak budgeting has data to work from. On the reference box the gap is small and
+> highly reproducible: across five diffusion models at `1024x1024` the peak sits
+> 0.47-0.73 GB above the resident footprint (3-7%), matching to the hundredth of a GB
+> across sweeps twenty days apart, well inside the default 4.0 GB `margin`. It scales
+> with `probe_image_size`, as the footprint does. A llama.cpp model's peak equals its
+> resident footprint. `weights_gb` totals the weight files the command names, when
+> they were readable at measure time.
 
 **Consumer rule (build):** for each model, compute its param-hash from the *current*
 config, read `measurements/<id>.json`, and select `measurements[hash]`.
@@ -354,8 +359,29 @@ only a harmless extra measure (Principle #6). **When adding a flag to the strip
 list: if unsure whether it affects memory, don't.**
 
 Examples of intended behavior: a `-nothink` twin (reasoning stripped) hashes equal
-to its base → no separate measurement. The same weights at `-np 2 -c 262144` vs
-`-np 6 -c 1572864` hash differently → two measurements under one model id.
+to its base. The same weights at `-np 2 -c 262144` vs `-np 6 -c 1572864` hash
+differently, giving two measurements under one model id.
+
+**Two ids sharing a hash are still measured separately.** The store is one file per
+model **id** and the hash keys entries *within* a file (§2), so a second id that
+hashes equal has no file of its own, misses, and is loaded like any other model. A
+shared hash saves nothing on the sweep; what it saves is a second *distinct* footprint
+to keep track of, and it buys a cross-check for free: seven twin pairs on the reference
+box are each recorded under both ids, from separate loads, agreeing to within 0.02 GB.
+A pair that disagrees is evidence about the box, not about the flag.
+
+**The strip list is not symmetric between related flags, and cannot be.** `--reasoning`
+is stripped; `--reasoning-budget` is not, because it was never audited, and an
+unaudited flag stays in the hash. So adding a budget to one member of a hash-sharing
+pair splits it and costs one measurement, with the emitted diff as the only notice.
+That is the rule working, not failing - but it is not discoverable before the fact, so
+**after changing a flag on one member of such a pair, diff the emitted block**; if the
+unit count moved, the pair split. When a newly-split hash disagrees with its sibling,
+suspect the measurement before crediting the flag (`measure` reports a re-measure that
+disagrees with the stored value, §7.3). On the reference box the split came back
+*identical* at 32.16 GB both ways, which is the evidence that `--reasoning-budget` is
+footprint-neutral; it stays in the hash anyway, because one extra measurement is the
+price of the rule that keeps the cache safe.
 
 ---
 
@@ -563,6 +589,14 @@ Three mechanisms, because the risk is not symmetric.
    naming any id but the model under test means something *arrived* during the
    window. Either sets `contended: true` on the measurement and reports the model.
 
+**What this looks like when it happens.** On the reference box, a container health
+check in an unrelated service probed a readiness endpoint that embedded a short string
+on every call, every 30 s, against sample windows of 25-30 s. It hit roughly six times
+in seven, and the inflation was exactly the embedding model's own recorded footprint:
+6.52 GB, turning a 32.16 GB entry into 38.68 GB. That arithmetic is the check to apply
+by hand when a number looks wrong - **be suspicious of any delta that equals another
+entry's recorded footprint**, because the store holds every number needed to test it.
+
 `_box.json`'s `baseline` is the **lowest** settled empty-pool reading of the sweep.
 Contamination only ever adds occupancy, so the minimum is the best estimate of what
 the box holds with nothing loaded, which is what `build` uses as its always-resident
@@ -709,6 +743,19 @@ never validated is *stated* rather than warned about (unchecked is not wrong). T
 number is not subtracted from the ceiling automatically: one sample of one
 combination is evidence for the operator to act on by raising `margin`, not a
 correction to apply behind their back.
+
+**The scale involved.** Two readings from the reference box, an all-llama.cpp set and
+an image-heavy one:
+
+| set | models | predicted | measured | error |
+|---|---|---|---|---|
+| 3 LLMs + embed + rerank + whisper | 6 | 107.49 GB | 107.40 GB | -0.09 GB |
+| 1 LLM + 5 diffusion + whisper | 7 | 91.97 GB | 91.87 GB | -0.10 GB |
+
+Both negative, i.e. the models share rather than compete, and diffusion backends are
+as additive as llama.cpp ones. Budget the time on an image-heavy set: an image model's
+load-trigger is a full generation at `probe_image_size`, so the second row cost one
+image per diffusion server, about twenty minutes.
 
 `validate` records only a reading of exactly the combination it claims, and refuses
 it in either direction:

@@ -1030,7 +1030,6 @@ fn llm_guide() -> String {
         ("ARCHITECTURE", include_str!("../../../ARCHITECTURE.md")),
         ("PRINCIPLES", include_str!("../../../PRINCIPLES.md")),
         ("ROADMAP", include_str!("../../../ROADMAP.md")),
-        ("ADOPT", include_str!("../../../ADOPT.md")),
     ];
     for (name, body) in sections {
         out.push_str(&format!("\n\n===== {name} =====\n\n"));

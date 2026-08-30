@@ -107,8 +107,8 @@ built to be driven by a person *and* by an LLM/agent - see `WORKFLOWS.md`.
 
 ## 10. Docs are load-bearing.
 
-`README`, `ARCHITECTURE`, `SPEC`, `WORKFLOWS`, `ROADMAP`, `ADOPT`, and this file are
-compiled into `--llm`. A behaviour change ships with its doc change in the same commit. When the
+`README`, `ARCHITECTURE`, `SPEC`, `WORKFLOWS`, `ROADMAP`, and this file are compiled
+into `--llm`. A behaviour change ships with its doc change in the same commit. When the
 code and `SPEC.md` disagree, the code wins and the doc is the bug - fix the doc.
 The test: *could a fresh operator or LLM run this tool correctly from `--llm`
 alone?* If a change would make them guess or fail, the doc isn't done.

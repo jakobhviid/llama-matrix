@@ -245,6 +245,20 @@ strategy over a declared `[groups]` (see `SPEC.md`).
   proxy). They **ride along** with everything: their cost is reserved in every
   combination so a request for one never evicts an LLM. Type-derived by default,
   overridable in `[roles]`.
+
+  **A non-empty `[roles]` list replaces the derivation rather than adding to it**, and
+  that is the point of the table. Riding along is not free: aux is reserved in *every*
+  emitted set, so a large but rarely-used embed or rerank model taxes the whole matrix
+  for a cold load nobody is waiting on. Type derivation sweeps in anything carrying
+  `--embedding` or `--reranking`, which is right for a small always-on service and
+  wrong for a big occasional one, so an operator has to be able to take a model *out*
+  of the pool. An additive table could only ever put models in. Measured on the
+  reference box, demoting two 4B RAG models from a 16 GB aux pool: 15.0 GB reserved
+  and 90 packs became 1.9 GB and 205 packs, three co-resident LLMs became five.
+
+  The cost of demoting a model is the one to accept knowingly: a request for it can
+  now evict an LLM and vice versa, paying that model's cold load. Demote only models
+  whose reload you are willing to wait for.
 - **images** - image models are small and all fit together, so they form a single
   co-resident pool joined with `&` (any subset valid).
 - **llm** - the logical models the knapsack combines.
