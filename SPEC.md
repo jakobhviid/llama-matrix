@@ -730,6 +730,15 @@ to mention the flag for the process to take the memory, which is why it is easy 
 miss. On a 31.7 GB box, two resident LLMs sat at 9.84 GB and 9.18 GB anonymous RSS
 with 2.5 GB available, both thrashing the 8 GiB cap.
 
+**On unified memory the two budgets overlap, and the measurement already covers it.**
+Where a GPU takes a VRAM carve-out from system RAM, its GTT pool is *also* system RAM:
+on the reference box `mem_info_gtt_total` is 15.49 GB out of a `MemTotal` of 30.97 GB.
+So a pack leaning on GTT does spend host RAM that the host budget is checking. It is
+not double-spent, because GTT pages are pinned and therefore already absent from
+`MemAvailable`: across that roster `d_host` tracks `d_gtt` to within the process's own
+RSS (2.88 GB of GTT against 3.98 GB of host, 1.63 against 1.76, and so on). Subtracting
+GTT from the host budget on top of that would **double-count** it.
+
 **What is measured.** `measure` reads host RAM the same way it reads the GPU pool,
 and at the same moments: `total - available` (not `total - free`; reclaimable page
 cache is not memory anyone is holding), sampled whenever the pool is cleared and
@@ -764,14 +773,27 @@ answer: the load-trigger's one tiny prompt leaves it at the 1.64 GB end.
 compared against `host_ceiling = host_budget - host_margin`, exactly mirroring the
 GPU arithmetic. `on_host_overflow` decides the outcome (§1.1).
 
-**And it prescribes.** Everything in a set except the *assumed* caches is fixed, so
-the largest `-cram` that set can afford is `(host_ceiling - fixed) / caches`, and the
-largest uniform one that fixes the whole matrix is the tightest of those, rounded
-down to a multiple of 256 MiB. `build` reports it (`host_cram_gb`), so the warning
-names a value to set rather than a formula to apply. A set that is over with **no**
-assumed cache cannot be fixed by `-cram` at all - it is over on memory that was
-measured - and the tool says that instead of suggesting a number that would not
-work.
+**And it prescribes.** Everything in a set except its prompt caches is fixed, so the
+largest `-cram` that set can afford is `(host_ceiling - fixed) / holders`, and the
+largest uniform one that fixes the whole matrix is the tightest of those, rounded down
+to a multiple of 256 MiB. `build` reports it (`host_cram_gb`), so the warning names a
+value to set rather than a formula to apply.
+
+Every cache holder counts, **including ones whose `-cram` is already declared**: a
+declared cap is exactly as adjustable as an assumed one, and an operator who set one
+and is still over the ceiling is precisely the person who needs the next value. Only a
+set that is over with *no* cache holder at all is unfixable by `-cram`, because then
+the overrun is in memory that was measured, and the tool says that rather than
+suggesting a number that would not work.
+
+**The uniform number is a floor, not the best the box can do.** It solves one equation
+with one unknown, so it prices every llama.cpp server the same. In practice they are
+not the same: an embedding or rerank server whose prompts are a few thousand tokens
+cannot fill 8 GiB, and dropping *those* to a few hundred MiB frees far more for the
+chat models than lowering everything uniformly. The tool cannot pick those values for
+you (it has no per-model prompt-length data), but it will re-prescribe against
+whatever you declare, so lowering the cheap ones and rebuilding shows what the rest
+can afford.
 
 **When it does not run.** The host dimension is optional throughout and is skipped,
 with a stated reason, when the box cannot report host RAM at all or when any model in

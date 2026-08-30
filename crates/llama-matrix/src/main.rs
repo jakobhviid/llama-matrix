@@ -354,9 +354,12 @@ fn cmd_drift(json: bool) -> Result<()> {
     let config_text = std::fs::read_to_string(&config_path)
         .with_context(|| format!("reading {config_path}"))?;
     let existing = apply::existing_block(&config_text);
+    // Compare what the block *declares*, not how it reads: the header comments carry
+    // live host figures that move with the box, and drift has to mean the declared
+    // combinations changed (apply::semantic_block).
     let in_sync = existing
         .as_deref()
-        .map(|current| current.trim() == block.trim())
+        .map(|current| apply::semantic_block(current) == apply::semantic_block(&block))
         .unwrap_or(false);
 
     if json {

@@ -143,11 +143,75 @@ pub fn existing_block(config_text: &str) -> Option<String> {
     Some(config_text[anchor..].to_string())
 }
 
+/// The part of a generated block that is a *claim about the machine*, for comparing
+/// two blocks: every line with the comments stripped, blanks dropped.
+///
+/// `drift` asks whether the live matrix still matches what `build` would emit, and the
+/// answer has to mean "the declared combinations changed". The header comments carry
+/// live figures - the baseline, what a set needs in host RAM, the suggested `-cram` -
+/// and those move with the box between builds. Comparing them made `drift` fire after
+/// nothing but a shift in the host baseline, with every `matrix:` line byte-identical,
+/// which is the same false positive stable pack ordering was introduced to remove,
+/// arriving from the comment side instead.
+///
+/// Trailing comments on a set line go too, since they restate the set's footprint.
+pub fn semantic_block(block: &str) -> String {
+    block
+        .lines()
+        .map(strip_comment)
+        .map(str::trim_end)
+        .filter(|line| !line.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// A line with its trailing comment removed. A `#` inside the quoted DSL expression
+/// is part of the expression, so quote state decides where a comment starts.
+fn strip_comment(line: &str) -> &str {
+    let mut in_quote = false;
+    for (at, character) in line.char_indices() {
+        match character {
+            '"' => in_quote = !in_quote,
+            '#' if !in_quote => return &line[..at],
+            _ => {}
+        }
+    }
+    line
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const BLOCK: &str = "# ==== GENERATED matrix block (llama-matrix) ====\nmatrix:\n  sets:\n    aux: \"e\"\n";
+
+    /// `drift` must mean "the declared combinations changed". The header comments
+    /// carry live host figures that move with the box, so two blocks that declare
+    /// exactly the same thing have to compare equal.
+    #[test]
+    fn comments_do_not_count_as_drift() {
+        let before = "# ==== GENERATED matrix block (llama-matrix) ====\n\
+                      # budget 111.5 GB | baseline 0.16 | margin 4.0 | ceiling 107.5\n\
+                      # WARNING: pack1 needs 55.9 GB; set `-cram 1792`\n\
+                      matrix:\n  sets:\n    pack1: \"a & b\"   # 93.7 GB: a+b\n";
+        let after = "# ==== GENERATED matrix block (llama-matrix) ====\n\
+                     # budget 111.5 GB | baseline 0.19 | margin 4.0 | ceiling 107.5\n\
+                     # WARNING: pack1 needs 56.2 GB; set `-cram 1664`\n\
+                     matrix:\n  sets:\n    pack1: \"a & b\"   # 94.0 GB: a+b\n";
+        assert_eq!(semantic_block(before), semantic_block(after));
+
+        // A real change still shows.
+        let changed = after.replace("a & b", "a & b & c");
+        assert_ne!(semantic_block(after), semantic_block(&changed));
+    }
+
+    /// A `#` inside a quoted DSL expression is part of the expression, not a comment.
+    #[test]
+    fn a_hash_inside_the_expression_survives() {
+        let block = "matrix:\n  sets:\n    pack1: \"a#b & c\"   # a comment\n";
+        assert!(semantic_block(block).contains("a#b & c"));
+        assert!(!semantic_block(block).contains("a comment"));
+    }
 
     #[test]
     fn replaces_a_previous_generated_block() {

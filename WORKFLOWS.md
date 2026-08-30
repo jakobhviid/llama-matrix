@@ -259,17 +259,40 @@ matrix: model=<requested> set=<chosen> evict=[<what it dropped>] cost=<n>
 
 `cost` is the summed eviction cost of what the chosen set drops, and llama-swap picks
 the cheapest. If it dropped the model you were using, that model was priced too low
-relative to what it kept. Retune the tier, or pin the one model, in
-`llama-matrix.toml`:
+relative to what it kept.
+
+**The defaults rank by model type**, ordered by what it costs to get each one serving
+again. Every one is overridable, and a per-id pin beats everything:
 
 ```toml
 [evict_costs]
-image = 1                    # the whole image pool is cheap to drop
-llm   = 20                   # …and any chat model outranks all of it
+llm         = 26   # derived by default as (sum of image costs + 1), floor 20
+image       = 5    # a diffusion server: `ready` is fast but the first generation is not
+rerank      = 4
+embed       = 3
+stt         = 2
+"tts-proxy" = 1    # a placeholder fronting a service that is already running
+aux         = 3    # shorthand: sets embed/rerank/stt/tts-proxy at once
 
 [evict_costs.models]
 "qwen3-coder-30b" = 40       # this one outranks even the other chat models
+"scratch-model"   = 1        # …and this one is always the first to go
 ```
+
+Resolution order is: a `[evict_costs.models]` pin, then the tier for the model's
+**type**, then `aux` where it applies, then the built-in. Higher = costlier to evict =
+prefer to keep. Positive integers only; a `0` or a value over 1000000 is rejected when
+the policy is read, and a pin naming no model in the matrix is a warning (usually a
+typo).
+
+Two traps worth knowing:
+
+- **Pinning `llm` bypasses the derivation**, and the derived value exists so that
+  keeping one conversational model beats keeping the *whole* idle image pool. Below
+  the pool's sum the solver will drop a chat model to keep image servers nothing has
+  touched, so the build warns if your pin no longer clears it.
+- **A tier is per type, not per pool.** Moving a model in or out of `[roles] aux`
+  changes when it rides along, not what it costs to evict.
 
 Then `llama-matrix build --apply` and re-request the model: the decision line should
 name a set that keeps it. Costs are a tie-break among combinations that **already
@@ -280,9 +303,11 @@ Two things this cannot fix, so check them first:
 - **Capacity, not policy.** If two models plus aux exceed the ceiling, no cost
   assignment holds both - they share no declared set. `llama-matrix build` shows which
   sets exist; if the pair appears in none, you need a smaller quant or a bigger budget.
-- **Recency.** Costs rank *roles*, not "the model I used 30 seconds ago". Two
-  equally-priced models that do not fit together will still alternate; price one of
-  them above the other to break it.
+- **Recency.** Costs rank *types*, not "the model I used 30 seconds ago". A model
+  untouched for hours is priced exactly as it was when it was hot, so two
+  equally-priced models that do not fit together will still alternate. Price one above
+  the other to break it (`ROADMAP.md` #7 is the real fix, and records why pricing by
+  reload time alone would be worse).
 
 ---
 

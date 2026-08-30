@@ -46,13 +46,15 @@ pub struct ModelFootprint {
     /// assumes. `None` where the store holds no host measurement, which disables the
     /// host check rather than guessing at it.
     pub host_gb: Option<f64>,
-    /// Does this model hold a host prompt cache whose size the *policy* assumed
-    /// rather than the command declaring it?
+    /// GB of host prompt cache this model holds: the size its command declares, or
+    /// the policy's assumption where it declares none. Zero for a backend that has no
+    /// such cache.
     ///
-    /// Only these are worth suggesting a `-cram` for: an entry that already states
-    /// one has been decided, and a backend without the cache has nothing to bound.
-    /// Counting them per set is what turns "this set is over" into "set `-cram N`".
-    pub assumed_cache: bool,
+    /// The **size**, not a flag for whether it was guessed, because this is the
+    /// quantity a `-cram` suggestion has to solve for. Treating a declared `-cram` as
+    /// unadjustable was a bug: an operator who set one and is still over the ceiling
+    /// is exactly the person who needs to be told what value would fit.
+    pub cache_gb: f64,
     /// Does this model hold a host prompt cache at all (a llama.cpp server), whether
     /// or not its size is declared? This is what `max_cache_holders_per_set` counts,
     /// because it is what spends the host budget.
@@ -74,9 +76,9 @@ struct Unit {
     size: f64,
     /// Host cost = the largest member's, for the same reason.
     host_size: Option<f64>,
-    /// One prompt cache, if any member holds an assumed one: a `|` group loads a
-    /// single member at a time.
-    assumed_caches: usize,
+    /// Prompt cache one loaded member holds, in GB. The largest across an
+    /// alternation, since the set has to be safe for whichever loads.
+    cache_gb: f64,
     /// Residency slots one loaded member costs: 1, or 0 for a proxy-only unit.
     slots: usize,
     /// Cache-holder slots one loaded member costs. Conservative across an
@@ -110,9 +112,11 @@ pub struct EmittedSet {
     /// The same sum in host RAM: `host_baseline + Σ members + aux`. `None` when the
     /// host dimension is not being checked (see `MatrixPlan::host_ceiling`).
     pub host_footprint: Option<f64>,
-    /// How many of this set's members hold a prompt cache whose size the policy
-    /// assumed. The lever: it is what a `-cram` would divide.
-    pub host_assumed_caches: usize,
+    /// GB of prompt cache this set holds in total, and how many holders that is
+    /// across. Together they are the lever: `-cram` sets the per-holder size, so a
+    /// suggestion solves `(ceiling - (host_footprint - host_cache_gb)) / holders`.
+    pub host_cache_gb: f64,
+    pub host_cache_holders: usize,
     /// Product of the expression's `|`-group sizes - must be ≤ 1000.
     pub fanout: usize,
 }
@@ -412,7 +416,7 @@ pub fn resolve_plan(
                 primary_file: record.primary_file.clone(),
                 d_total: measurement.d_total,
                 host_gb: Some(0.0),
-                assumed_cache: false,
+                cache_gb: 0.0,
                 holds_cache: false,
                 // Reserved overhead, not a scheduled unit: see the field's docs.
                 occupies_slot: false,
@@ -427,15 +431,12 @@ pub fn resolve_plan(
             ModelType::Llm | ModelType::Embed | ModelType::Rerank
         );
         let declared_cache = crate::model::declared_cache_ram_gb(&record.cmd);
-        let assumed_cache = holds_cache && declared_cache.is_none();
-        let host_gb = measurement.d_host.map(|measured| {
-            let cache = if holds_cache {
-                declared_cache.unwrap_or(policy.host_cache_gb)
-            } else {
-                0.0
-            };
-            measured + cache
-        });
+        let cache_gb = if holds_cache {
+            declared_cache.unwrap_or(policy.host_cache_gb)
+        } else {
+            0.0
+        };
+        let host_gb = measurement.d_host.map(|measured| measured + cache_gb);
         if host_gb.is_none() {
             host_unmeasured.push(record.id.clone());
         }
@@ -445,7 +446,7 @@ pub fn resolve_plan(
             primary_file: record.primary_file.clone(),
             d_total: measurement.d_total,
             host_gb,
-            assumed_cache,
+            cache_gb,
             holds_cache,
             occupies_slot: true,
         });
@@ -700,7 +701,7 @@ fn collapse_units(llm_models: &[&ModelFootprint], policy: &Policy) -> Vec<Unit> 
                 ids,
                 size,
                 host_size,
-                assumed_caches: usize::from(members.iter().any(|model| model.assumed_cache)),
+                cache_gb: members.iter().map(|model| model.cache_gb).fold(0.0_f64, f64::max),
                 slots: usize::from(members.iter().any(|model| model.occupies_slot)),
                 cache_slots: usize::from(members.iter().any(|model| model.holds_cache)),
             }
@@ -727,7 +728,7 @@ fn apply_groups(units: Vec<Unit>, policy: &Policy) -> Vec<Unit> {
         let mut ids: Vec<String> = Vec::new();
         let mut size = 0.0_f64;
         let mut host_size = Some(0.0_f64);
-        let mut assumed_caches = 0;
+        let mut cache_gb = 0.0_f64;
         let mut slots = 0;
         let mut cache_slots = 0;
         for (index, unit) in units.iter().enumerate() {
@@ -742,7 +743,7 @@ fn apply_groups(units: Vec<Unit>, policy: &Policy) -> Vec<Unit> {
                     (Some(largest), Some(host)) => Some(largest.max(host)),
                     _ => None,
                 };
-                assumed_caches = assumed_caches.max(unit.assumed_caches);
+                cache_gb = cache_gb.max(unit.cache_gb);
                 slots = slots.max(unit.slots);
                 cache_slots = cache_slots.max(unit.cache_slots);
             }
@@ -753,7 +754,7 @@ fn apply_groups(units: Vec<Unit>, policy: &Policy) -> Vec<Unit> {
                 ids,
                 size,
                 host_size,
-                assumed_caches,
+                cache_gb,
                 slots,
                 cache_slots,
             });
@@ -902,10 +903,8 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
 
     let aux_cost: f64 = aux_models.iter().map(|model| model.d_total).sum();
     let aux_host: f64 = aux_models.iter().map(|model| host_of(model)).sum();
-    let caches_of = |models: &[&ModelFootprint]| -> usize {
-        models.iter().filter(|model| model.assumed_cache).count()
-    };
-    let aux_caches = caches_of(&aux_models);
+    let aux_cache_gb: f64 = aux_models.iter().map(|model| model.cache_gb).sum();
+    let aux_cache_holders = aux_models.iter().filter(|model| model.holds_cache).count();
     let slot_cap = Slots::cap(policy);
     let aux_slots = Slots {
         models: aux_models.iter().filter(|model| model.occupies_slot).count(),
@@ -1087,7 +1086,8 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
             comment: format!("ride-along ({aux_cost:.1} GB)"),
             footprint: baseline + aux_cost,
             host_footprint: host_footprint(aux_host),
-            host_assumed_caches: aux_caches,
+            host_cache_gb: aux_cache_gb,
+            host_cache_holders: aux_cache_holders,
             fanout: 1,
         });
     }
@@ -1102,7 +1102,8 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
                 comment: format!("{:.1} GB (max variant)", unit.size),
                 footprint: baseline + unit.size + aux_cost,
                 host_footprint: host_footprint(unit.host_size.unwrap_or(0.0) + aux_host),
-                host_assumed_caches: unit.assumed_caches + aux_caches,
+                host_cache_gb: unit.cache_gb + aux_cache_gb,
+                host_cache_holders: unit.cache_slots + aux_cache_holders,
                 fanout: unit.fanout(),
             });
         }
@@ -1130,8 +1131,10 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
             host_footprint: host_footprint(
                 aux_host + whole_pool.iter().map(|unit| unit.host_size.unwrap_or(0.0)).sum::<f64>(),
             ),
-            host_assumed_caches: aux_caches
-                + whole_pool.iter().map(|unit| unit.assumed_caches).sum::<usize>(),
+            host_cache_gb: aux_cache_gb
+                + whole_pool.iter().map(|unit| unit.cache_gb).sum::<f64>(),
+            host_cache_holders: aux_cache_holders
+                + whole_pool.iter().map(|unit| unit.cache_slots).sum::<usize>(),
             fanout: whole_pool.iter().map(|unit| unit.fanout()).product(),
         });
     }
@@ -1193,12 +1196,18 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
                     + aux_host
                     + riding.iter().map(|unit| unit.host_size.unwrap_or(0.0)).sum::<f64>(),
             ),
-            host_assumed_caches: unit_indices
+            host_cache_gb: unit_indices
                 .iter()
-                .map(|&index| units[index].assumed_caches)
+                .map(|&index| units[index].cache_gb)
+                .sum::<f64>()
+                + aux_cache_gb
+                + riding.iter().map(|unit| unit.cache_gb).sum::<f64>(),
+            host_cache_holders: unit_indices
+                .iter()
+                .map(|&index| units[index].cache_slots)
                 .sum::<usize>()
-                + aux_caches
-                + riding.iter().map(|unit| unit.assumed_caches).sum::<usize>(),
+                + aux_cache_holders
+                + riding.iter().map(|unit| unit.cache_slots).sum::<usize>(),
             fanout,
         });
     }
@@ -1227,9 +1236,12 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
                         + aux_host
                         + fitting.iter().map(|image| image.host_size.unwrap_or(0.0)).sum::<f64>(),
                 ),
-                host_assumed_caches: unit.assumed_caches
-                    + aux_caches
-                    + fitting.iter().map(|image| image.assumed_caches).sum::<usize>(),
+                host_cache_gb: unit.cache_gb
+                    + aux_cache_gb
+                    + fitting.iter().map(|image| image.cache_gb).sum::<f64>(),
+                host_cache_holders: unit.cache_slots
+                    + aux_cache_holders
+                    + fitting.iter().map(|image| image.cache_slots).sum::<usize>(),
                 fanout: unit.fanout()
                     * fitting.iter().map(|image| image.fanout()).product::<usize>(),
             });
@@ -1283,9 +1295,12 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
                     + if with_aux { aux_host } else { 0.0 }
                     + fitting.iter().map(|image| image.host_size.unwrap_or(0.0)).sum::<f64>(),
             ),
-            host_assumed_caches: unit.assumed_caches
-                + if with_aux { aux_caches } else { 0 }
-                + fitting.iter().map(|image| image.assumed_caches).sum::<usize>(),
+            host_cache_gb: unit.cache_gb
+                + if with_aux { aux_cache_gb } else { 0.0 }
+                + fitting.iter().map(|image| image.cache_gb).sum::<f64>(),
+            host_cache_holders: unit.cache_slots
+                + if with_aux { aux_cache_holders } else { 0 }
+                + fitting.iter().map(|image| image.cache_slots).sum::<usize>(),
             fanout: unit.fanout() * fitting.iter().map(|image| image.fanout()).product::<usize>(),
         });
     }
@@ -1459,22 +1474,27 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
             }
         }
         // The largest uniform `-cram` that would bring every over-budget set under the
-        // ceiling. Per set: everything except the assumed caches is fixed, so the
-        // allowance is what is left divided by how many caches the set holds. The
-        // binding set is the tightest of them, and a set that is over with NO assumed
-        // cache cannot be fixed by `-cram` at all - it is over on measured memory.
+        // ceiling. Per set: everything except the prompt caches is fixed, so the
+        // allowance is what is left divided by how many caches the set holds, and the
+        // binding set is the tightest of them.
+        //
+        // This counts every cache holder, not only the ones whose size the policy
+        // assumed. Counting only assumed ones meant that declaring `-cram` anywhere
+        // made the whole prescription report "no `-cram` value fixes this" - telling
+        // the one operator who had already acted on the advice that the advice no
+        // longer applied. A declared cap is exactly as adjustable as an assumed one.
         let mut cram_gb: Option<f64> = None;
         let mut unfixable = false;
         for set in sets.iter().filter(|set| {
             set.host_footprint.is_some_and(|needed| needed > host_ceiling)
         }) {
-            if set.host_assumed_caches == 0 {
+            if set.host_cache_holders == 0 {
                 unfixable = true;
                 continue;
             }
-            let caches = set.host_assumed_caches as f64;
-            let fixed = set.host_footprint.unwrap_or(0.0) - caches * policy.host_cache_gb;
-            let allowance = (host_ceiling - fixed) / caches;
+            let holders = set.host_cache_holders as f64;
+            let fixed = set.host_footprint.unwrap_or(0.0) - set.host_cache_gb;
+            let allowance = (host_ceiling - fixed) / holders;
             cram_gb = Some(cram_gb.map_or(allowance, |tightest: f64| tightest.min(allowance)));
         }
         // A suggestion is only a suggestion if it is a value someone can set.
@@ -1811,7 +1831,7 @@ mod tests {
     ) -> ModelFootprint {
         ModelFootprint {
             host_gb: None,
-            assumed_cache: false,
+            cache_gb: 0.0,
             holds_cache: false,
             occupies_slot: true,
             id: id.to_string(),
@@ -1848,7 +1868,7 @@ mod tests {
     fn a_pack_over_the_host_ceiling_is_named_and_can_be_excluded() {
         let with_host = |id: &str, file: &str, gpu: f64, host: f64| ModelFootprint {
             host_gb: Some(host),
-            assumed_cache: true,
+            cache_gb: 8.0,
             holds_cache: true,
             occupies_slot: true,
             id: id.to_string(),
@@ -1967,7 +1987,7 @@ mod tests {
     fn a_declared_group_makes_the_image_pool_mutually_exclusive() {
         let image = |id: &str, gb: f64| ModelFootprint {
             host_gb: Some(1.0),
-            assumed_cache: false,
+            cache_gb: 0.0,
             holds_cache: false,
             occupies_slot: true,
             id: id.to_string(),
@@ -2024,7 +2044,7 @@ mod tests {
     fn a_cap_bounds_set_size_and_counts_the_right_things() {
         let model = |id: &str, kind: ModelType, cache: bool, slot: bool| ModelFootprint {
             host_gb: Some(1.0),
-            assumed_cache: cache,
+            cache_gb: if cache { 8.0 } else { 0.0 },
             holds_cache: cache,
             occupies_slot: slot,
             id: id.to_string(),
@@ -2264,7 +2284,8 @@ mod tests {
             comment: String::new(),
             footprint: 0.0,
             host_footprint: None,
-            host_assumed_caches: 0,
+            host_cache_gb: 0.0,
+            host_cache_holders: 0,
             fanout: 1,
         };
         let sets = vec![
@@ -2341,7 +2362,7 @@ mod tests {
         // overrun is in measured memory and no `-cram` touches it.
         let image = |id: &str, file: &str| ModelFootprint {
             host_gb: Some(20.0),
-            assumed_cache: false,
+            cache_gb: 0.0,
             holds_cache: false,
             occupies_slot: true,
             id: id.to_string(),

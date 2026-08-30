@@ -72,7 +72,7 @@ mod tests {
         let models = vec![
             ModelFootprint {
                 host_gb: None,
-                assumed_cache: false,
+                cache_gb: 0.0,
                 holds_cache: false,
                 occupies_slot: true,
                 id: "embed".into(),
@@ -82,7 +82,7 @@ mod tests {
             },
             ModelFootprint {
                 host_gb: None,
-                assumed_cache: false,
+                cache_gb: 0.0,
                 holds_cache: false,
                 occupies_slot: true,
                 id: "chat".into(),

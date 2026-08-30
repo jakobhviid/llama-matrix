@@ -327,6 +327,13 @@ roadmap.
 A set whose expression duplicates one already emitted is dropped, unless another set
 references it by `+name`.
 
+`drift` compares what two blocks **declare**, not how they read: comments are stripped
+before the comparison (`apply::semantic_block`). The header carries live figures - the
+baseline, what a set needs in host RAM, the suggested `-cram` - and those move with the
+box between builds, so comparing them made `drift` fire after nothing but a shift in
+the host baseline with every `matrix:` line byte-identical. That is the same false
+positive stable pack ordering removed, arriving from the comment side.
+
 ### 4.3a Validation: does the sum hold?
 
 The fit predicate adds solo footprints. `validate` is the only step that checks that
