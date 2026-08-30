@@ -80,11 +80,6 @@ Alignment work against the house guidelines (rust-cli-guidelines) that is deferr
 not skipped. These are style and ops items, separate from the product roadmap
 above; each notes why it is not yet done.
 
-- **Supply-chain gate (`deny.toml` + a CI `deny` job).** Add a cargo-deny check for
-  licenses and sources (crates.io only), following dotsync. Note the difference:
-  llama-matrix does network (HTTP to llama-swap), so it does not ban the TLS/crypto
-  stacks dotsync bans. Advisories deliberately excluded, since a new CVE must never
-  block an unrelated release; review them out of band.
 - **`regressions.rs`.** Adopt the temper/dotsync bug-to-regression-test discipline:
   a dedicated integration-test file where every confirmed bug gets a reproducing
   test before its fix.

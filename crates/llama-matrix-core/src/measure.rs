@@ -521,13 +521,18 @@ fn compare_context(declared: (u64, Option<u64>), served: (u64, u64)) -> Serving 
     }
 }
 
-/// The pool after an unload: its settled occupancy, and who was still in it.
+/// The pool after an unload: its settled occupancy, who was still in it, and what
+/// the host was holding at the same moment.
 struct ClearedPool {
     /// Settled occupancy in GB.
     used: f64,
     /// Ids llama-swap still reported after the unload and the wait. Empty is the
     /// normal case and the only one where `used` is an *empty-pool* reading.
     residents: Vec<String>,
+    /// Host RAM at the same point, when the box can report it. Read here rather than
+    /// once per sweep for the same reason the GPU baseline is: a delta is only a
+    /// footprint if the thing it is measured against is what was actually there.
+    host: Option<platform::HostMemory>,
 }
 
 /// Unload everything and wait for the pool to actually empty: `/running` clear,
@@ -552,11 +557,9 @@ fn clear_pool(agent: &ureq::Agent, endpoint: &str, gpu: &dyn GpuMemory) -> Clear
         }
         thread::sleep(Duration::from_secs(1));
     }
-    ClearedPool {
-        used: stabilize(gpu, STABILIZE_MAX_WAIT, STABILIZE_INTERVAL, STABILIZE_EPS, STABILIZE_HOLD)
-            .used,
-        residents,
-    }
+    let used =
+        stabilize(gpu, STABILIZE_MAX_WAIT, STABILIZE_INTERVAL, STABILIZE_EPS, STABILIZE_HOLD).used;
+    ClearedPool { used, residents, host: platform::host_memory() }
 }
 
 /// Lower the sweep's empty-pool floor to this reading, if it is one.
@@ -565,9 +568,13 @@ fn clear_pool(agent: &ureq::Agent, endpoint: &str, gpu: &dyn GpuMemory) -> Clear
 /// empty-pool reading and must never become the box's floor: `build` treats that
 /// number as always-resident, so another model's footprint filed there would inflate
 /// the reserved floor of every future build.
-fn note_floor(floor: &mut Option<f64>, cleared: &ClearedPool) {
-    if cleared.residents.is_empty() {
-        *floor = Some(floor.map_or(cleared.used, |current: f64| current.min(cleared.used)));
+fn note_floor(floor: &mut Option<f64>, host_floor: &mut Option<f64>, cleared: &ClearedPool) {
+    if !cleared.residents.is_empty() {
+        return;
+    }
+    *floor = Some(floor.map_or(cleared.used, |current: f64| current.min(cleared.used)));
+    if let Some(host) = cleared.host {
+        *host_floor = Some(host_floor.map_or(host.used_gb, |current: f64| current.min(host.used_gb)));
     }
 }
 
@@ -882,15 +889,15 @@ pub fn sweep(
     //
     // `None` until a clean reading is obtained, so a sweep run on a box that never
     // emptied cannot quietly file a contaminated number as the box's floor.
-    let mut empty_pool_floor: Option<f64> = None;
-    note_floor(&mut empty_pool_floor, &clear_pool(&agent, &options.endpoint, gpu.as_ref()));
     // Host RAM is a second, independent budget: a pack that fits the GPU can still
-    // exhaust the box it runs on, and the failure presents as an unexplained
-    // upstream death rather than as anything the matrix reports. Read the same way
-    // the GPU baseline is - with nothing loaded - so the two arithmetics match.
-    let host_baseline = platform::host_memory();
-    summary.host_baseline = host_baseline.map(|host| round2(host.used_gb));
-    summary.host_total = host_baseline.map(|host| round2(host.total_gb));
+    // exhaust the box it runs on, and the failure presents as an unexplained upstream
+    // death rather than as anything the matrix reports. It is read at exactly the
+    // points the GPU pool is, so the two arithmetics rest on the same moments.
+    let mut empty_pool_floor: Option<f64> = None;
+    let mut host_floor: Option<f64> = None;
+    let opening = clear_pool(&agent, &options.endpoint, gpu.as_ref());
+    summary.host_total = opening.host.map(|host| round2(host.total_gb));
+    note_floor(&mut empty_pool_floor, &mut host_floor, &opening);
 
     // The roster llama-swap is actually serving. A model the config declares but
     // llama-swap doesn't know is the loud half of a config mismatch: measuring it
@@ -971,8 +978,9 @@ pub fn sweep(
         // silent bias spread across the rest of the sweep.
         let cleared = clear_pool(&agent, &options.endpoint, gpu.as_ref());
         let baseline_split = gpu.used_split_gb();
-        note_floor(&mut empty_pool_floor, &cleared);
+        note_floor(&mut empty_pool_floor, &mut host_floor, &cleared);
         let model_baseline = cleared.used;
+        let host_at_baseline = cleared.host;
         let residents_before = cleared.residents;
         // Above the floor with nothing loaded means memory the proxy no longer
         // accounts for is still held: `/running` says empty, the device disagrees.
@@ -1197,7 +1205,7 @@ pub fn sweep(
                             // Host delta over the same empty-pool point. A floor:
                             // the host-side prompt cache fills with use, not at
                             // load, so `build` adds the declared `-cram` cap on top.
-                            let d_host = match (platform::host_memory(), host_baseline) {
+                            let d_host = match (platform::host_memory(), host_at_baseline) {
                                 (Some(now), Some(base)) => {
                                     Some(round2((now.used_gb - base.used_gb).max(0.0)))
                                 }
@@ -1290,7 +1298,12 @@ pub fn sweep(
     // Leave the box as the sweep found it, and take one more empty-pool reading
     // while doing so: on a single-model sweep it is the only second opinion there
     // is about the floor.
-    note_floor(&mut empty_pool_floor, &clear_pool(&agent, &options.endpoint, gpu.as_ref()));
+    note_floor(
+        &mut empty_pool_floor,
+        &mut host_floor,
+        &clear_pool(&agent, &options.endpoint, gpu.as_ref()),
+    );
+    summary.host_baseline = host_floor.map(round2);
 
     // The box baseline is what `build` treats as always resident, so it must come
     // from a pool that was actually empty. A sweep that never saw one (a box with a

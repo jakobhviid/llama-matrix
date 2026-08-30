@@ -575,10 +575,13 @@ to mention the flag for the process to take the memory, which is why it is easy 
 miss. On a 31.7 GB box, two resident LLMs sat at 9.84 GB and 9.18 GB anonymous RSS
 with 2.5 GB available, both thrashing the 8 GiB cap.
 
-**What is measured.** `measure` reads host RAM the same way it reads the GPU pool:
-`total - available` (not `total - free`; reclaimable page cache is not memory anyone
-is holding). With nothing loaded that is `host_baseline`, the OS and everything else
-the box runs; after a model loads, the delta is its `d_host`.
+**What is measured.** `measure` reads host RAM the same way it reads the GPU pool,
+and at the same moments: `total - available` (not `total - free`; reclaimable page
+cache is not memory anyone is holding), sampled whenever the pool is cleared and
+again when a model has settled. Each model's `d_host` is a delta over the reading
+taken immediately before *it* loaded, and `_box.json`'s `host_baseline` is the lowest
+reading seen with the pool verifiably empty, exactly as §7.3 defines the GPU
+baseline.
 
 **What is declared.** `d_host` is a **floor**. It is what the process had dirtied by
 the time it was serving, and it cannot include the prompt cache, because that fills

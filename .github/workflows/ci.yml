@@ -33,3 +33,14 @@ jobs:
       # block the release.
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+
+  # Licenses and sources only; deny.toml explains why advisories are not here.
+  # Separate from `gate` so a supply-chain answer is legible on its own, and so it
+  # never sits between a green test run and a merge.
+  deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check licenses sources

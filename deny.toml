@@ -1,0 +1,36 @@
+# cargo-deny: what this project will link and where it comes from.
+#
+# Two questions only, licenses and sources. Both are properties of the dependency
+# tree that change when someone adds a crate, which is exactly when a human should
+# be asked, and both give the same answer today as tomorrow.
+#
+# ADVISORIES ARE DELIBERATELY NOT CHECKED HERE. A CVE published against a transitive
+# crate would otherwise fail a run that has nothing to do with it, and the response
+# to a real advisory is a considered upgrade, not a blocked pipeline. Review them out
+# of band (`cargo audit`, Dependabot), on their own schedule.
+
+[licenses]
+# Permissive only. Every entry below is present in the current tree; a new license
+# means a new crate whose terms someone has to actually read, so the failure is the
+# point.
+allow = [
+    "Apache-2.0",
+    "BSL-1.0",
+    "MIT",
+    "Unicode-3.0",
+    "Unlicense",
+]
+confidence-threshold = 0.9
+
+[licenses.private]
+# The workspace's own crates are not published by cargo; their MIT is declared in
+# Cargo.toml and does not need matching against the allow list.
+ignore = true
+
+[sources]
+# crates.io and nothing else. A git dependency is unreproducible and unauditable in a
+# way a registry release is not, and llama-matrix ships prebuilt binaries from this
+# tree.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
