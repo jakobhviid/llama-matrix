@@ -1393,6 +1393,18 @@ pub struct Validation {
     /// makes the total look small, and small reads as "additive, plenty of headroom",
     /// which is the reassuring direction and the wrong one.
     pub absent: Vec<String>,
+    /// Models resident that the combination did not name. Their memory is in the
+    /// reading, so the error comes out too high, and a too-high error is the one that
+    /// tells an operator to shrink their matrix. Nothing is recorded: a false alarm
+    /// on the safety-critical output is worse than no reading.
+    pub intruders: Vec<String>,
+}
+
+impl Validation {
+    /// Is this a reading of what it claims to be a reading of?
+    pub fn is_clean(&self) -> bool {
+        self.absent.is_empty() && self.intruders.is_empty()
+    }
 }
 
 /// Load one declared combination and compare what it actually occupies against what
@@ -1484,6 +1496,15 @@ pub fn validate(
             absent.push(id);
         }
     }
+    let intruders: Vec<String> = {
+        let mut ids: Vec<String> = resident
+            .keys()
+            .filter(|id| !combo.iter().any(|member| member == *id))
+            .cloned()
+            .collect();
+        ids.sort();
+        ids
+    };
     let settled = stabilize(
         gpu.as_ref(),
         STABILIZE_MAX_WAIT,
@@ -1508,12 +1529,14 @@ pub fn validate(
         ceiling: plan.ceiling,
         margin: plan.margin,
         absent,
+        intruders,
     };
 
-    // A reading taken while part of the combination was not resident is not a
-    // co-residency reading. Report it, record nothing: a too-small number filed as
-    // the additivity answer would say the box has more headroom than it does.
-    if validation.absent.is_empty() {
+    // Record only a reading of exactly the combination it claims. Both ways of
+    // failing that are worth refusing, in opposite directions: a missing member makes
+    // the total too small (false headroom) and an extra one makes it too large (a
+    // false "your footprints are not additive, shrink your matrix").
+    if validation.is_clean() {
         let mut meta = store.read_box()?;
         meta.additivity_check = Some(crate::cache::AdditivityCheck {
             combo: validation.combo.clone(),

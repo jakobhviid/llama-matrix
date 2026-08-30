@@ -444,6 +444,17 @@ fn cmd_validate(config: Option<String>, endpoint: Option<String>, json: bool) ->
         return Ok(());
     }
 
+    if !result.intruders.is_empty() {
+        ui::alert(&format!(
+            "something outside `{}` was resident while it was measured: {}. Nothing recorded - \
+             their memory is in the reading, so the error comes out too high, and a too-high \
+             error is the one that tells you to shrink your matrix. Quiesce anything that \
+             requests models and run it again",
+            result.set,
+            result.intruders.join(", ")
+        ));
+        return Ok(());
+    }
     if !result.absent.is_empty() {
         ui::alert(&format!(
             "`{}` was not fully resident and allocated when the reading was taken: {}. Nothing \

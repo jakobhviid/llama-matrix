@@ -666,13 +666,20 @@ number is not subtracted from the ceiling automatically: one sample of one
 combination is evidence for the operator to act on by raising `margin`, not a
 correction to apply behind their back.
 
-`validate` requires the **live** config to declare the combination, since llama-swap
-evicts to satisfy each request and will not hold models it has not been told may
-co-reside. Every member also has to finish allocating, on the same evidence §7.2
-demands of a solo measurement. A member that is missing on either count is reported
-in `absent` and **nothing is recorded**, because the failure is asymmetric: a missing
-member makes the total look small, small reads as "additive, plenty of headroom", and
-that is the reassuring direction and the wrong one.
+`validate` records only a reading of exactly the combination it claims, and refuses
+it in either direction:
+
+- **A member missing.** It requires the **live** config to declare the combination,
+  since llama-swap evicts to satisfy each request and will not hold models it has not
+  been told may co-reside; and every member has to finish allocating, on the same
+  evidence §7.2 demands of a solo measurement. Failing either puts the id in `absent`.
+  A missing member makes the total look small, and small reads as "additive, plenty
+  of headroom", which is the reassuring direction and the wrong one.
+- **A member too many.** Anything resident that the set did not name goes in
+  `intruders` (§7.3's contamination, seen from the other side). Its memory is in the
+  reading, so the error comes out too high, and a too-high error is the one that tells
+  an operator to shrink their matrix. A false alarm on the safety-critical output is
+  worse than no reading.
 
 ## 8. Server control endpoints (llama-swap)
 
