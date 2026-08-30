@@ -117,6 +117,57 @@ unset until they are aligned.
 
 ---
 
+## Pack names shuffle once, and `validate` arrives (after 1.6.3)
+
+**The set of declared combinations does not change.** This entry exists because your
+next `build` produces a diff anyway, and you should know it is cosmetic before you
+read it.
+
+### Why the diff
+
+Pack order carried no meaning to llama-swap, which treats every declared set alike,
+but it was decided by comparing raw footprint sums. Two packs whose totals differ by
+hundredths of a GB therefore traded places whenever a re-measure moved either of them
+by that much, which renamed both and made `drift` report an out-of-sync matrix that
+declared exactly the same combinations. Observed on a 229-set roster: a full
+re-measure changed two packs, and changed them only into each other.
+
+The size comparison is quantised to 0.1 GB, an order of magnitude above the sampler's
+own quiet threshold, and membership breaks the remaining ties.
+
+### What you have to check
+
+Regenerate and diff, as always. On the roster above, 46 of 229 sets changed name and
+the multiset of declared combinations was byte-for-byte identical:
+
+```sh
+llama-matrix build --out /tmp/new.yaml    # pure; touches nothing
+```
+
+If the *combinations* are the same and only the `packN:` labels moved, apply it and
+you are done. After that, a re-measure that changes no footprint produces no diff,
+which is what `drift` is for.
+
+### `validate`
+
+A new verb, and the one that closes the loop the rest of the tool leaves open. Every
+footprint is measured **alone** and then summed; `validate` loads the tightest
+declared combination for real and compares what it occupies against the prediction:
+
+```
+✓ `pack52` (6 models): predicted 107.49 GB, measured 107.40 GB, error -0.09 GB
+```
+
+Run it after `build --apply`, because llama-swap will not hold models co-resident
+unless the live config declares them. A **positive** error is the one that matters:
+the models together hold more than their solo footprints predicted, so every declared
+combination sits closer to the ceiling than the plan says. It is reported against
+`margin`, which is the slack that has to absorb it, and `build` reads the recorded
+result back and warns when it does not.
+
+It shares `measure`'s side effects (it evicts your warm models) and leaves the pool
+empty, so treat it like a sweep rather than like `build`.
+
 ## Host RAM is now a second budget (after 1.6.3)
 
 **Nothing about the GPU fit changes.** This adds a check alongside it, and on an
