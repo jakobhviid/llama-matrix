@@ -1304,6 +1304,21 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
         .iter()
         .map(|model| costs.of(&model.id, model.model_type, 0) as u64)
         .sum();
+    // A pinned `llm` tier bypasses the derivation, and nothing was checking that it
+    // still clears the pool it exists to clear. Below it, the solver evicts a
+    // conversational model to keep image servers nothing has touched, which is the
+    // one behaviour the derived tier is for.
+    if let Some(pinned) = costs.llm {
+        if u64::from(pinned) <= image_pool && image_pool > 0 {
+            warnings.push(format!(
+                "`[evict_costs] llm = {pinned}` does not outweigh the image pool, which sums to \
+                 {image_pool}: llama-swap minimises the summed cost of what it evicts, so it \
+                 will drop a conversational model rather than {} idle image server(s). Raise it \
+                 above {image_pool}, lower `image`, or unset `llm` to let it derive",
+                image_models.len()
+            ));
+        }
+    }
     let mut evict_costs: Vec<(String, u32)> = Vec::new();
     for model in models {
         // Nothing can evict what cannot load.
@@ -2075,6 +2090,36 @@ mod tests {
         .unwrap();
         assert_eq!(counts(&by_cache, "pack1"), 4);
         assert_eq!(by_cache.caps.expect("a cap").largest_cache_holders, 2);
+    }
+
+    /// The derived `llm` tier exists so one conversational model outweighs the whole
+    /// idle image pool. Pinning `llm` bypasses the derivation, so the guarantee has to
+    /// be checked rather than assumed.
+    #[test]
+    fn a_pinned_llm_tier_below_the_image_pool_warns() {
+        let with_llm = |pinned: Option<u32>| {
+            let policy = Policy {
+                evict_costs: crate::policy::EvictCosts { llm: pinned, ..Default::default() },
+                ..budgeted(OnUnconfirmed::Warn)
+            };
+            build(&BuildInput {
+                models: &scenario(),
+                policy: &policy,
+                baseline: 0.16,
+                budget: 111.5,
+                host: None,
+            })
+            .unwrap()
+        };
+        let says_pool = |plan: &MatrixPlan| {
+            plan.warnings.iter().any(|warning| warning.contains("does not outweigh the image pool"))
+        };
+
+        // The scenario has two image models at the built-in tier, so the pool is 10.
+        assert!(says_pool(&with_llm(Some(4))), "a pin under the pool must warn");
+        assert!(says_pool(&with_llm(Some(10))), "equal is not above");
+        assert!(!says_pool(&with_llm(Some(11))), "a pin above the pool is fine");
+        assert!(!says_pool(&with_llm(None)), "the derived tier clears it by construction");
     }
 
     /// A pack is maximal in LLM units, which does not mean the ceiling is full. An

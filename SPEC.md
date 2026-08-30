@@ -147,7 +147,15 @@ the measurement stops, and the tier reflects the real cost rather than the numbe
 The `llm` tier scales with the image pool rather than resting on a constant, because
 the guarantee wanted is "keeping a second conversational model beats keeping the
 entire idle image pool" - which is a fact about the pool's size, not about any one
-number. A **heavy** is an llm and takes the llm tier: it occupies exactly one declared
+number. llama-swap minimises the **summed** cost of what it evicts, so "prefer one X
+over N Ys" can only be written as `cost(X) > N x cost(Y)`; that is a property of the
+solver's objective, not of the models.
+
+The consequence is worth seeing plainly: the `llm` tier is partly a function of how
+many image models the roster has. Five at tier 5 put it at 26, ten put it at 51. Pin
+`llm` explicitly to stop that, and the build **warns if the pin no longer clears the
+pool**, because below it the solver drops a conversational model to keep image servers
+nothing has touched. A **heavy** is an llm and takes the llm tier: it occupies exactly one declared
 set, so a tier of its own would change the solver's answer only when an image is
 requested beside it, and there the llm tier is already the one that keeps it.
 
