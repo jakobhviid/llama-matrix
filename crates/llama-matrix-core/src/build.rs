@@ -255,7 +255,7 @@ pub fn resolve_plan(
             "{} model(s) have no recorded host-RAM footprint, so a pack's host cost cannot be \
              totalled: {}. Re-run `llama-matrix measure --force` to record it",
             host_unmeasured.len(),
-            host_unmeasured.join(", ")
+            name_list(&host_unmeasured)
         )),
         (Some(baseline), Some(total)) => Ok(HostBudget { baseline, total }),
         _ => Err(
@@ -285,7 +285,7 @@ pub fn resolve_plan(
              Quiesce anything that requests models - health probes and pollers especially - and \
              re-measure with `llama-matrix measure --force`",
             contended.len(),
-            contended.join(", ")
+            name_list(&contended)
         ));
     }
     if !dropped_unconfirmed.is_empty() {
@@ -294,7 +294,7 @@ pub fn resolve_plan(
              and are excluded from the matrix (a safe under-declaration): {} - re-run \
              `llama-matrix measure` to confirm them",
             dropped_unconfirmed.len(),
-            dropped_unconfirmed.join(", ")
+            name_list(&dropped_unconfirmed)
         ));
         plan.excluded.extend(dropped_unconfirmed);
     } else if !unconfirmed.is_empty() {
@@ -308,8 +308,16 @@ pub fn resolve_plan(
              not fit: {}. Re-run `llama-matrix measure` to confirm them, or set `on_unconfirmed` \
              to \"exclude\" to leave them out of the matrix",
             unconfirmed.len(),
-            unconfirmed.join(", "),
-            if dependents.is_empty() { "none".to_string() } else { dependents.join(", ") }
+            name_list(&unconfirmed),
+            // Past a handful, the ratio is the actionable fact and the names are
+            // not: one unconfirmed aux model rides along in nearly every set, and
+            // "223 of 224" says that where eight pack names followed by a count
+            // does not.
+            if dependents.len() > NAMES_SHOWN {
+                format!("{} of the {} declared sets", dependents.len(), plan.sets.len())
+            } else {
+                name_list(&dependents)
+            }
         ));
     }
     plan.unconfirmed = unconfirmed;
@@ -347,6 +355,27 @@ fn sets_naming(sets: &[EmittedSet], ids: &[String]) -> Vec<String> {
         })
         .map(|set| set.name.clone())
         .collect()
+}
+
+/// How many names a warning spells out before it starts counting instead.
+///
+/// A 25-model roster produces a couple of hundred packs, and one unconfirmed aux
+/// model taints every one of them. Naming them all is not information: it is
+/// unreadable in a terminal, and `matrix::render` copies the warning into
+/// `config.yaml` as a single multi-kilobyte comment line. Eight is enough to
+/// recognise the shape of the list and act on it.
+const NAMES_SHOWN: usize = 8;
+
+/// Render names for a human-readable warning, bounded by [`NAMES_SHOWN`].
+fn name_list<S: AsRef<str>>(names: &[S]) -> String {
+    fn render<S: AsRef<str>>(slice: &[S]) -> String {
+        slice.iter().map(AsRef::as_ref).collect::<Vec<_>>().join(", ")
+    }
+    match names.len() {
+        0 => "none".to_string(),
+        count if count <= NAMES_SHOWN => render(names),
+        count => format!("{}, and {} more", render(&names[..NAMES_SHOWN]), count - NAMES_SHOWN),
+    }
 }
 
 /// Sanitize an id into a DSL-safe set-name fragment.
@@ -869,7 +898,7 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
             "`[evict_costs.models]` names {} model id(s) the matrix has no cost for: {}. Check \
              the spelling, or whether the model is unmeasured or excluded",
             unknown.len(),
-            unknown.join(", ")
+            name_list(&unknown)
         ));
     }
 
@@ -929,19 +958,22 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
             }
         }
         if !host_over.is_empty() {
-            let listed = host_over
-                .iter()
-                .map(|(name, needed)| format!("{name} needs {needed:.1} GB"))
-                .collect::<Vec<_>>()
-                .join(", ");
+            let listed = name_list(
+                &host_over
+                    .iter()
+                    .map(|(name, needed)| format!("{name} needs {needed:.1} GB"))
+                    .collect::<Vec<_>>(),
+            );
             let advice = format!(
-                "{} declared set(s) cost more HOST RAM than the {host_ceiling:.1} GB ceiling: \
+                "{} of the {} declared sets cost more HOST RAM than the {host_ceiling:.1} GB \
+                 ceiling: \
                  {listed}. The GPU fit is unaffected; the risk is the host OOM killer picking a \
                  llama-server, which presents as an unexplained upstream death. Bound it with \
                  `-cram <MiB>` on the llama-server entries (its default is 8192 MiB per process, \
                  taken whether or not the flag appears), raise `host_budget`, or set \
                  `on_host_overflow = \"exclude\"` to leave those sets out",
-                host_over.len()
+                host_over.len(),
+                sets.len()
             );
             match policy.on_host_overflow {
                 OnHostOverflow::Error => bail!("{advice}"),
@@ -1143,9 +1175,30 @@ mod tests {
             .iter()
             .find(|warning| warning.contains("without confirming"))
             .expect("an unconfirmed footprint must warn");
+        // Aux rides along in everything, so the honest summary is that every set is
+        // affected, said once. Spelling out a couple of hundred pack names is not
+        // information: it is unreadable, and `matrix::render` copies the warning into
+        // config.yaml as one comment line.
+        // A short list is spelled out, and every set is on it: aux rides along in
+        // all of them, so the indirect `+aux` dependency has to be followed. (Past
+        // NAMES_SHOWN the same warning switches to a ratio, which the roster here is
+        // too small to reach; see `a_warning_names_a_few_and_counts_the_rest`.)
         for set in &plan.sets {
             assert!(warning.contains(&set.name), "set {} missing from: {warning}", set.name);
         }
+    }
+
+    /// A warning names a few and counts the rest. The bound is the point: the
+    /// unbounded form put every pack name into a config.yaml comment.
+    #[test]
+    fn a_warning_names_a_few_and_counts_the_rest() {
+        let names: Vec<String> = (1..=20).map(|index| format!("m{index}")).collect();
+        let rendered = name_list(&names);
+        assert!(rendered.starts_with("m1, m2, m3, m4, m5, m6, m7, m8, and 12 more"), "{rendered}");
+        assert!(!rendered.contains("m9"), "{rendered}");
+        // Short lists are spelled out in full, and an empty one says so.
+        assert_eq!(name_list(&names[..3]), "m1, m2, m3");
+        assert_eq!(name_list::<String>(&[]), "none");
     }
 
     #[test]
