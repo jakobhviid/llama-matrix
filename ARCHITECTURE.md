@@ -278,6 +278,13 @@ declared cap. So the host side reports rather than decides by default, under
 `on_host_overflow`, and is skipped outright with a stated reason where the box or the
 store cannot supply it (SPEC §7.4).
 
+Pack order carries no meaning to llama-swap, which treats every declared set alike,
+so the only thing it has to be is **stable**: the size comparison is quantised to
+0.1 GB (an order of magnitude above the sampler's own quiet threshold) and membership
+breaks the remaining ties. Comparing raw sums let two packs whose totals differed by
+hundredths of a GB trade places on a re-measure, which renamed both and made `drift`
+report an out-of-sync matrix that was in fact identical.
+
 ### 4.4 Emission & the 1000-combination guard
 
 The block is a set of named DSL expressions (see `SPEC.md` §3 for the grammar):

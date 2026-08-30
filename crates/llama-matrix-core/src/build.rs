@@ -716,14 +716,33 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
     raw_packs.truncate(MAX_PACKS);
     let mut packs: Vec<BTreeSet<usize>> =
         raw_packs.iter().map(|pack| pack.iter().copied().collect()).collect();
-    // Deterministic order: larger packs first, then by total size.
+    // Deterministic order: larger packs first, then by total size, then by membership.
+    //
+    // Pack order carries no meaning to llama-swap, which treats every declared set
+    // alike, so the only thing it has to be is *stable*. Comparing raw sums was not:
+    // two packs whose totals differ by hundredths of a GB traded places whenever a
+    // re-measure moved either of them by that much, which renamed both and made
+    // `drift` report an out-of-sync matrix that was in fact identical. Observed on a
+    // 229-set roster where a full re-measure changed exactly two packs, and changed
+    // them only into each other.
+    //
+    // So the size compare is quantised to 0.1 GB, an order of magnitude above the
+    // sampler's own quiet threshold (`measure::STABILIZE_EPS`), and membership breaks
+    // the remaining ties. Two packs that are genuinely the same size now always order
+    // the same way, whatever the sensor did that day.
+    let pack_size = |pack: &BTreeSet<usize>| -> i64 {
+        let total: f64 = pack.iter().map(|&position| light_sizes[position]).sum();
+        (total * 10.0).round() as i64
+    };
+    let pack_members = |pack: &BTreeSet<usize>| -> Vec<&str> {
+        pack.iter().map(|&position| units[light_indices[position]].key.as_str()).collect()
+    };
     packs.sort_by(|left, right| {
-        let left_size: f64 = left.iter().map(|&position| light_sizes[position]).sum();
-        let right_size: f64 = right.iter().map(|&position| light_sizes[position]).sum();
         right
             .len()
             .cmp(&left.len())
-            .then(left_size.partial_cmp(&right_size).unwrap_or(std::cmp::Ordering::Equal))
+            .then_with(|| pack_size(left).cmp(&pack_size(right)))
+            .then_with(|| pack_members(left).cmp(&pack_members(right)))
     });
 
     // ---- images that fit beside a unit (largest subset, smallest-first) ----
@@ -1499,6 +1518,44 @@ mod tests {
             host,
         })
         .is_err());
+    }
+
+    /// Pack order carries no meaning to llama-swap, so the only thing it has to be is
+    /// stable. A re-measure that moves a footprint by hundredths of a GB must not
+    /// rename packs, because `drift` then reports an out-of-sync matrix that is in
+    /// fact identical.
+    #[test]
+    fn pack_order_survives_a_hundredth_of_a_gb() {
+        let roster = |wobble: f64| {
+            vec![
+                footprint("a", ModelType::Llm, Some("/a.gguf"), 30.0),
+                footprint("b", ModelType::Llm, Some("/b.gguf"), 30.0 + wobble),
+                footprint("c", ModelType::Llm, Some("/c.gguf"), 30.0),
+                footprint("d", ModelType::Llm, Some("/d.gguf"), 30.0),
+            ]
+        };
+        let named = |models: &[ModelFootprint]| {
+            let plan = build(&BuildInput {
+                models,
+                policy: &budgeted(OnUnconfirmed::Warn),
+                baseline: 0.16,
+                budget: 111.5,
+                host: None,
+            })
+            .unwrap();
+            plan.sets
+                .iter()
+                .filter(|set| set.name.starts_with("pack"))
+                .map(|set| (set.name.clone(), set.expr.clone()))
+                .collect::<Vec<_>>()
+        };
+
+        let steady = named(&roster(0.0));
+        assert!(steady.len() > 1, "the roster has to produce several packs to order");
+        // The same roster re-measured, one model 0.01 GB heavier: the packs are the
+        // same packs and must keep the same names.
+        assert_eq!(steady, named(&roster(0.01)));
+        assert_eq!(steady, named(&roster(-0.01)));
     }
 
     /// A `-cram` suggestion is only offered where it would actually work. Rounded
