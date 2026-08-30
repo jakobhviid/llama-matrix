@@ -350,7 +350,8 @@ Two things this cannot fix, so check them first:
 - **Recency.** Costs rank *types*, not "the model I used 30 seconds ago". A model
   untouched for hours is priced exactly as it was when it was hot, so two
   equally-priced models that do not fit together will still alternate. Price one above
-  the other to break it (`ROADMAP.md` #7 is the real fix, and records why pricing by
+  the other to break it (`ROADMAP.md`'s *evict_cost from recency* is the real fix, and
+  records why pricing by
   reload time alone would be worse).
 
 ---

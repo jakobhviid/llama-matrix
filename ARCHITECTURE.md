@@ -429,7 +429,8 @@ deliberate:
   allocates and the first generation after a reload pays for it. It is deliberately
   *not* proportional: a cost proportional to reload seconds makes the largest model
   the cheapest thing to keep, so it never leaves however long it sits idle. See
-  `ROADMAP.md` #7 for the worked example and the fix (recency times latency, not
+  `ROADMAP.md`'s *evict_cost from recency* for the worked example and the fix (recency
+  times latency, not
   latency).
 - **Scaled to the pool, not to a constant.** The guarantee wanted is "keeping a second
   conversational model beats keeping the entire idle image pool", which is a fact about
@@ -449,7 +450,7 @@ individual ids in `[evict_costs]` (`SPEC.md` §1.3).
 What this **cannot** express is recency. Static weights rank types; they cannot say
 "the one I used 30 seconds ago", so a model untouched for hours is priced exactly as it
 was when it was hot and two same-tier models that do not fit together still alternate.
-That is `ROADMAP.md` #7.
+That is `ROADMAP.md`'s *evict_cost from recency*.
 
 ---
 

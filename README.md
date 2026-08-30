@@ -12,6 +12,13 @@ llama-matrix closes that gap - it **measures** each model's real footprint on yo
 box, then **builds** the largest set of combinations that provably fit under a
 budget you control, and splices the result into your `config.yaml`.
 
+> **Not an importance matrix.** The `matrix:` in the name is
+> [llama-swap](https://github.com/mostlygeek/llama-swap)'s co-residency block (upstream
+> calls it Groups V2 / Swap Matrix), which declares *which models may be resident at the
+> same time*. It is unrelated to llama.cpp's `imatrix` / importance matrix, which is a
+> calibration input for quantisation. This tool is a companion to llama-swap and does
+> nothing to your weights.
+
 Two phases:
 
 - **`measure`** - load each model alone, read real GPU memory occupancy after it

@@ -162,7 +162,8 @@ requested beside it, and there the llm tier is already the one that keeps it.
 **What these tiers cannot express is recency.** A cost is static, so a model that has
 not been touched in hours is priced exactly as it was when it was hot. Two same-tier
 models that do not fit together will still alternate, and no ordering of the tiers
-fixes that. See `ROADMAP.md` #7, which also records why pricing by reload latency
+fixes that. See `ROADMAP.md`'s *evict_cost from recency*, which also records why
+pricing by reload latency
 *alone* would be worse than what is here.
 
 Costs are keyed by **model id**, not by logical unit, so an override on one quant of a
@@ -835,7 +836,8 @@ re-prescribes against whatever you declare - so lower the cheap ones, rebuild, a
 new number tells you what the rest can afford.
 
 **Size them from the server's own history, not from the client's.** `GET
-/api/metrics/activity` (the same endpoint `ROADMAP.md` #7 wants for recency) returns
+/api/metrics/activity` (the same endpoint `ROADMAP.md` wants for recency-derived evict
+costs and for per-model cache sizing) returns
 `tokens.input_tokens` per request, paginated, with `tokens.cache_tokens` beside it.
 That is what actually reached the server. Client-side chat files are not: on the
 reference box they suggested prompts up to 89k tokens for models whose real largest in
