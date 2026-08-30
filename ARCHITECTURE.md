@@ -13,8 +13,8 @@ awareness** - it only trusts a `matrix:` block that declares which model
 combinations may co-reside. llama-matrix **measures** each model's real memory
 footprint on your box, then **builds** the largest set of combinations that
 provably fit under a budget, and **splices** that block into your llama-swap
-`config.yaml`. Two phases, two subcommands: `measure` (GPU-touching, stateful) and
-`build` (pure). A small config file (`llama-matrix.toml`) holds policy; llama-swap's
+`config.yaml`. Two phases: `measure` (GPU-touching, stateful, and joined there by
+`validate`) and `build` (pure). A small config file (`llama-matrix.toml`) holds policy; llama-swap's
 `config.yaml` stays untouched except for the generated block.
 
 ---
@@ -446,9 +446,9 @@ The apply step (invoked by `build --apply` - there is no standalone `apply` verb
    splice, no network round-trip).
 4. **Roll back** to the backup if the service stops serving after the write.
 
-A *functional* check - loading a `pack`'s models to confirm co-residency and
-eviction - costs GPU time, so it's an **optional manual step** (see WORKFLOWS
-Loop 6), not part of `apply`.
+A *functional* check costs GPU time, so it is not part of `apply`: loading a pack's
+models to confirm they really co-reside is what `validate` does (§4.3a), as a separate
+verb with `measure`'s side-effect profile.
 
 `matrix:` and llama-swap's older `groups:` engine are mutually exclusive; the
 generated block replaces `groups:` on first cutover.
@@ -463,20 +463,22 @@ A Cargo workspace (matches the house style):
 crates/llama-matrix/            # thin CLI: clap, --json/--llm/-v, delegates to core
   src/main.rs
   src/completions.rs            # completions + man, generated from the clap def
-  tests/                        # CLI + fixture-reproduction tests
+  tests/cli.rs                  # what the CLI is supposed to do
+  tests/regressions.rs          # what it once did wrong: one test per confirmed bug
 crates/llama-matrix-core/
   src/lib.rs
   src/config.rs                 # parse llama-swap config.yaml (roster + cmds); macro expansion
-  src/policy.rs                 # llama-matrix.toml: budget/margin/strategy/roles/groups/paths/evict_costs
+  src/policy.rs                 # llama-matrix.toml: budget/margin/host budget/strategy/roles/groups/types/paths/evict_costs
   src/settings.rs               # `configure` get/set/unset/list/keys (SETTINGS table)
   src/model.rs                  # per-model record: id, cmd, type, file, mem_cmd, param_hash
-  src/param_hash.rs             # strip-list → hash
-  src/platform.rs               # GpuMemory trait + AMD sysfs / NVIDIA / Apple Silicon backends
-  src/measure.rs                # phase 1: trigger→ready→stabilize; lockfile; failures
+  src/param_hash.rs             # strip-list → hash; the memory-command diff
+  src/platform.rs               # GpuMemory trait + AMD sysfs / NVIDIA / Apple Silicon; host RAM
+  src/measure.rs                # phase 1: trigger→ready→stabilize; solo-residency; lockfile; validate
   src/cache.rs                  # measurements/ per-model store + retention + migrate
   src/build.rs                  # variant-collapse, roles, knapsack, heavy classification, evict costs
   src/matrix.rs                 # DSL emission + 1000-combo guard
   src/apply.rs                  # backup → splice → reload wait → verify → rollback
+  src/report.rs                 # typed --json shapes, one per verb
   src/ui.rs                     # stdout/stderr discipline + colour
 ```
 
@@ -490,11 +492,11 @@ profiles (Principle #8).
 
 `llama-matrix.toml` holds policy, separate from llama-swap's `config.yaml`:
 
-- **Scalars** (`config`, `endpoint`, `budget`, `margin`, `strategy`, `on_overflow`)
-  are managed through `llama-matrix configure get/set/unset/list/keys` - a validated,
-  shell-completable, comment-preserving surface (never hand-edit guesswork).
-- **Structured tables** (`[paths]`, `[roles]`, `[groups]`, `[evict_costs]`) are
-  hand-edited.
+- **Scalars** are managed through `llama-matrix configure get/set/unset/list/keys` -
+  a validated, shell-completable, comment-preserving surface (never hand-edit
+  guesswork). `configure keys` is the list; `SPEC.md` §1.1 is the contract.
+- **Structured tables** (`[paths]`, `[roles]`, `[groups]`, `[types]`,
+  `[evict_costs]`) are hand-edited.
 
 `llama-matrix setup` provisions the file on first run: it discovers the llama-swap
 config, sets the endpoint, probes the GPU to auto-detect the total, and writes a

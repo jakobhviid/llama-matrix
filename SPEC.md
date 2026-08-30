@@ -97,7 +97,7 @@ llama-matrix configure unset budget    # revert to default (auto-detect)
 
 Values accept friendly forms (enums case-insensitive; floats plain). Writes use a
 comment-preserving TOML editor, so hand-written comments and the `[paths]`/`[roles]`/
-`[groups]`/`[evict_costs]` tables survive. Structured tables are **not** settable here;
+`[groups]`/`[types]`/`[evict_costs]` tables survive. Structured tables are **not** settable here;
 edit them directly.
 
 ### 1.3 `[evict_costs]`: which model the solver keeps
@@ -774,21 +774,30 @@ it in either direction:
 
 ## 8. Server control endpoints (llama-swap)
 
-- **Unload** - `POST /api/models/unload` unloads all models (the clean-slate
-  primitive between measurements); `POST /api/models/unload/:model_id` unloads one
-  (useful for tightening incremental sweeps - a baseline reset still needs
-  unload-all). The bare `GET /unload` still works as a **legacy fallback** but is
-  no longer the documented surface; prefer the `POST /api/models/…` forms and fall
-  back to `GET /unload` only if they 404 (older builds).
-- `GET /running` → `{"running":[{"model","state",…}]}`. The state set is
-  `ready`, `starting`, `stopping`, `stopped`, `shutdown`. **Only `ready` is a go
-  signal** - poll until then; treat `starting` as wait and `stopping`/`stopped`/
-  `shutdown` as "do not sample" (a tearing-down model's memory reading is
-  meaningless). Reading memory right at `ready` is still too early (KV/compute
-  buffers allocating; see stabilize).
-- `GET /v1/models`, `GET /health` - sanity/verify. (`unlisted` models are hidden
-  from `/v1/models` but still requestable - which is why the worklist comes from the
-  `models:` map, not from `/v1/models`.)
+These are the endpoints llama-matrix depends on. Load triggers are §7.
+
+- **Unload** - `POST /api/models/unload` unloads all models: the clean-slate
+  primitive before every measurement, and the only unload the tool issues (a
+  baseline is a whole-pool reading, so per-model unload would not serve it). The
+  bare `GET /unload` is a **legacy fallback**, tried only when the `POST` form
+  fails (older builds).
+- `GET /running` → `{"running":[{"model","state","cmd",…}]}`.
+  - The state set is `ready`, `starting`, `stopping`, `stopped`, `shutdown`. **Only
+    `ready` is a go signal** - poll until then; treat `starting` as wait and
+    `stopping`/`stopped`/`shutdown` as "do not sample" (a tearing-down model's memory
+    reading is meaningless). Reading memory right at `ready` is still too early
+    (KV/compute buffers allocating; see stabilize).
+  - **`cmd` is the command llama-swap launched** (v251+), which is what the serving
+    cross-check compares against the config (§7.1). Absent on older builds, which
+    fall back to `/props`.
+  - The set of ids it reports is also how solo residency is checked (§7.3) and how
+    `validate` confirms a whole combination is resident (§7.5).
+- `GET /upstream/<id>/props` - the loaded llama.cpp server's own view of what it
+  allocated (`default_generation_settings.n_ctx`, `total_slots`); the §7.1 fallback
+  where `/running` reports no `cmd`. Absent on image and STT backends.
+- `GET /v1/models` - the served roster, used to explain a failed load and as
+  `apply`'s liveness check. (`unlisted` models are hidden from it but still
+  requestable, which is why the worklist comes from the `models:` map instead.)
 
 ## 8a. Version & compatibility
 
@@ -796,6 +805,10 @@ it in either direction:
   merged upstream via PR #646 - not experimental). Probe by loading a config with a
   `matrix:` block and confirming a clean reload (no "must use either groups or
   matrix" / unknown-key error).
+- **The serving cross-check is sharper on v251+**, where `GET /running` reports each
+  model's launched `cmd` (§7.1). Below that it falls back to comparing context
+  through `/props`, which no image or STT backend answers, so those stay
+  `unverified_serving`.
 - **Full model ids in sets require v243+**; older matrix builds may need `vars`.
   llama-matrix targets current llama-swap - pin and test against a known version, and
   re-verify the 1000-combination expansion cap (§3) against the build you pin (the

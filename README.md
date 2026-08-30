@@ -12,7 +12,7 @@ llama-matrix closes that gap - it **measures** each model's real footprint on yo
 box, then **builds** the largest set of combinations that provably fit under a
 budget you control, and splices the result into your `config.yaml`.
 
-Two phases, two subcommands:
+Two phases:
 
 - **`measure`** - load each model alone, read real GPU memory occupancy after it
   stabilizes, and cache the footprint (keyed by the memory-affecting launch flags,

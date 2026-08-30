@@ -203,14 +203,18 @@ All read-only and safe to run anytime.
 
 `build --apply` does a **liveness check** automatically - it pings `/v1/models` to
 confirm llama-swap is still serving, and rolls back if not. It does **not** load
-models or touch the GPU. For a *functional* check (or after a `--no-verify` splice),
-do this by hand:
+models or touch the GPU.
+
+For a *functional* check (or after a `--no-verify` splice):
 
 1. Confirm a clean reload (llama-swap accepted the config; no `error`/`invalid`).
-2. **Co-residency:** request the models of one `pack` in turn; confirm they all
-   stay resident and the summed occupancy is under budget.
-3. **Eviction:** request a heavy model; confirm the pack is evicted, aux is kept,
-   and occupancy stays under budget.
+2. **Co-residency:** `llama-matrix validate`. It loads the tightest declared
+   combination and reports what it actually occupies against the prediction.
+   `--set <name>` checks a particular one instead.
+3. **Eviction** is the part still worth doing by hand: request a heavy model and
+   confirm the pack is evicted, aux is kept, and occupancy stays under budget.
+   Nothing automates this, because it is a claim about llama-swap's solver rather
+   than about memory.
 4. **Rollback** if anything is off - restore the backup `config.yaml` (it
    hot-reloads), or revert the file in version control.
 
@@ -292,11 +296,22 @@ it cares about instead of parsing prose. Split by what they mean:
 `margin` cannot absorb becomes a warning there too, so the evidence reaches the step
 that depends on it rather than only the step that produced it.
 
-`build --json` adds `host_ceiling`, `host_over` and `host_cram_gb` alongside
-`warnings`: a `null` ceiling means the host dimension was **not checked**, which is
-not the same as checked-and-fine, and `host_cram_gb` is the largest uniform `-cram`
-that would bring every over-budget set under the ceiling (`null` with a non-empty
-`host_over` means no `-cram` can, because the overrun is in measured memory).
+`build --json` reports the plan: `budget`, `ceiling`, `packs`, `heavies`, `sets`,
+`excluded`, `unconfirmed`, `warnings`, plus the host dimension and the alternatives it
+found.
+
+| key | it means | act on it? |
+|---|---|---|
+| `host_ceiling` | what each set was checked against; **`null` means not checked**, which is not the same as checked-and-fine | **yes** if null and you care about host RAM |
+| `host_over` | `[name, gb]` per set over that ceiling | **yes**, see `host_cram_gb` |
+| `host_cram_gb` | the largest uniform `-cram` that brings them all under; `null` *with* a non-empty `host_over` means no `-cram` can, because the overrun is in measured memory | it is the fix |
+| `cheaper` | per model, the cheapest other footprint this box has measured, with the tokens that differ | no, but it is where headroom is |
+| `excluded` | models left out of the matrix entirely | **yes**, surface it |
+
+`validate --json` reports one co-residency reading: `set`, `combo`, `predicted`,
+`measured`, `error`, `ceiling`, `margin`, and the two ways it can be void, `absent`
+and `intruders`. **A non-empty `absent` or `intruders` means nothing was recorded** and
+`error` is not a measurement of anything; otherwise gate on `error > margin`.
 
 The split that matters when deciding whether to stop: `unconfirmed_allocation`,
 `no_empty_pool` and a rising `baseline_was` can leave a matrix that does not fit.
