@@ -117,13 +117,38 @@ unset until they are aligned.
 
 ---
 
-## Pack names shuffle once, and `validate` arrives (after 1.6.3)
+## Packs gain images, names shuffle once, and `validate` arrives (after 1.6.3)
 
-**The set of declared combinations does not change.** This entry exists because your
-next `build` produces a diff anyway, and you should know it is cosmetic before you
-read it.
+Your next `build` produces a real diff. Part of it is a genuine improvement, part of
+it is cosmetic, and they arrived separately, so read both before applying.
 
-### Why the diff
+### Packs now carry the images that fit beside them
+
+A pack was maximal in **LLM units**, which does not mean the ceiling was full. Two
+20 GB models on a 100 GB box leave room for an image server, and the matrix declared
+no combination holding both: images could ride with a single LLM (`llmimg_*`) or with
+each other (`images`), never with a pack.
+
+The images that fit now go into the pack's own expression, smallest first. Into the
+expression rather than a new set, because llama-swap treats any subset of a declared
+set as valid: `a & b & img` licenses `a & b` too, so this costs no extra sets and no
+extra fan-out.
+
+On the roster this was built against, **54 of 208 packs gained an image server** with
+the emitted set count unchanged at 229. `pack1` went from 93.7 GB of a 107.5 GB
+ceiling to 100.2 GB, holding the same four models plus a diffusion server that
+previously had to evict one of them.
+
+**Direction of risk.** This declares combinations that were never declared before, so
+it is the direction Principle 1 cares about, and it rests on the same fit predicate as
+every other set: `baseline + Σ members + aux ≤ ceiling`, asserted before emission.
+Checked on the device as well as in the plan: `validate` on one LLM plus **five**
+diffusion servers plus whisper predicted 91.97 GB and measured 91.87 GB, so diffusion
+backends are as additive as llama.cpp ones. If you would rather not take it, the
+images only ride where there is measured headroom, so raising `margin` shrinks what
+they can claim.
+
+### Why the *rest* of the diff is cosmetic
 
 Pack order carried no meaning to llama-swap, which treats every declared set alike,
 but it was decided by comparing raw footprint sums. Two packs whose totals differ by
@@ -137,15 +162,18 @@ own quiet threshold, and membership breaks the remaining ties.
 
 ### What you have to check
 
-Regenerate and diff, as always. On the roster above, 46 of 229 sets changed name and
-the multiset of declared combinations was byte-for-byte identical:
+Regenerate and diff, as always:
 
 ```sh
 llama-matrix build --out /tmp/new.yaml    # pure; touches nothing
 ```
 
-If the *combinations* are the same and only the `packN:` labels moved, apply it and
-you are done. After that, a re-measure that changes no footprint produces no diff,
+Expect two kinds of change, and it is worth telling them apart. Packs that **gained an
+image** are the real widening described above. Packs that only **swapped labels** are
+the ordering fix: measured on its own, before the image change, it renamed 46 of 229
+sets while leaving the multiset of declared combinations byte-for-byte identical.
+
+After this one diff, a re-measure that changes no footprint produces no diff at all,
 which is what `drift` is for.
 
 ### `validate`
