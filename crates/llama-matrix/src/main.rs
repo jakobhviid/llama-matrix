@@ -885,6 +885,15 @@ fn cmd_build(
             if !result.verified {
                 ui::warn("could not fully verify the reload - check llama-swap's logs");
             }
+            // The loop only closes here: llama-swap will not hold a combination
+            // co-resident until the config declares it, so this is the first moment
+            // `validate` can test the tightest one it just declared.
+            if plan.unvalidated {
+                ui::info(
+                    "next: `llama-matrix validate` loads the tightest combination this declares \
+                     and checks that the footprints really sum on this box",
+                );
+            }
         }
         return Ok(());
     }
