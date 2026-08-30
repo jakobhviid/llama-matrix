@@ -112,6 +112,10 @@ pub struct MatrixPlan {
     pub sets: Vec<EmittedSet>,
     pub warnings: Vec<String>,
     pub excluded: Vec<String>,
+    /// Has `validate` never run on this box? The plan sums solo footprints and
+    /// nothing has checked that sum against the device (SPEC §7.5). Not a warning:
+    /// it is the normal starting state, and the plan is unchecked rather than wrong.
+    pub unvalidated: bool,
     /// Models whose footprint the operator hand-set rather than the tool measuring
     /// (a fronted service with a placeholder `cmd`). Stated so a reader knows which
     /// numbers in the plan are declarations, not evidence.
@@ -341,6 +345,28 @@ pub fn resolve_plan(
     plan.excluded.extend(unmeasured);
     plan.warnings.extend(suspect);
     plan.hand_set = hand_set_ids;
+    // What `validate` last found, if it has run. The plan is a sum of solo
+    // footprints; this is the only recorded evidence about whether that sum holds on
+    // this box, so a build that ignores it is ignoring the one measurement aimed at
+    // its own central assumption.
+    match &box_meta.additivity_check {
+        Some(check) if check.error > policy.margin => plan.warnings.push(format!(
+            "`validate` measured `{}` at {:.2} GB against a predicted {:.2} GB, so footprints are \
+             {:+.2} GB from additive on this box and the {:.1} GB margin does not absorb it: a \
+             declared combination may not fit. Raise `margin` to at least {:.1} and rebuild",
+            check.combo.join(" + "),
+            check.measured,
+            check.predicted,
+            check.error,
+            policy.margin,
+            (check.error * 2.0).max(policy.margin)
+        )),
+        Some(_) => {}
+        // Not a warning: a box that has never run `validate` is the normal starting
+        // state, and the plan is not wrong, only unchecked against the device.
+        None => plan.unvalidated = true,
+    }
+
     if !contended.is_empty() {
         plan.warnings.push(format!(
             "{} footprint(s) were measured while something else was resident, so they are \
@@ -1181,6 +1207,7 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
         // builder is handed footprints and has no notion of their provenance.
         unconfirmed: Vec::new(),
         hand_set: Vec::new(),
+        unvalidated: false,
         baseline,
         budget,
         margin: policy.margin,
@@ -1553,6 +1580,57 @@ mod tests {
             host,
         })
         .is_err());
+    }
+
+    /// The build heeds what `validate` recorded. An error the margin cannot absorb
+    /// means a declared combination may not fit, which is the one thing the tool
+    /// exists to prevent, so it is a warning and not a footnote.
+    #[test]
+    fn a_measured_additivity_error_beyond_the_margin_warns() {
+        use crate::cache::{AdditivityCheck, BoxMeta};
+
+        let dir = tempfile::tempdir().unwrap();
+        let (config_path, store) = store_and_config(dir.path(), &[]);
+        let policy = budgeted(OnUnconfirmed::Warn); // margin 4.0
+
+        // Never validated: stated, not warned about. It is the normal starting state.
+        let plan = resolve_plan(&config_path, &policy, None, &store).unwrap();
+        assert!(plan.unvalidated);
+        assert!(!plan.warnings.iter().any(|warning| warning.contains("from additive")));
+
+        let record = |error: f64| {
+            let mut meta = store.read_box().unwrap();
+            meta.additivity_check = Some(AdditivityCheck {
+                combo: vec!["chat".into(), "embed".into()],
+                predicted: 40.0,
+                measured: 40.0 + error,
+                error,
+            });
+            store.write_box(&meta).unwrap();
+            resolve_plan(&config_path, &policy, None, &store).unwrap()
+        };
+
+        // Inside the margin, and the free-headroom direction: nothing to say.
+        for quiet in [1.5, -2.0] {
+            let plan = record(quiet);
+            assert!(!plan.unvalidated);
+            assert!(
+                !plan.warnings.iter().any(|warning| warning.contains("from additive")),
+                "error {quiet} should not warn: {:?}",
+                plan.warnings
+            );
+        }
+
+        // Beyond it: the margin does not absorb it, so a declared set may not fit.
+        let plan = record(6.0);
+        let warning = plan
+            .warnings
+            .iter()
+            .find(|warning| warning.contains("from additive"))
+            .expect("an error past the margin must warn");
+        assert!(warning.contains("+6.00"), "{warning}");
+        assert!(warning.contains("at least 12.0"), "{warning}");
+        let _ = BoxMeta::default();
     }
 
     /// A set's members are what it actually puts in memory: helper references

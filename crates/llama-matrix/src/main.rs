@@ -833,6 +833,13 @@ fn cmd_build(
         // Say plainly when the second budget was not checked. A matrix that fits the
         // GPU can still exhaust the box, and "no host warnings" must not be readable
         // as "the host was checked and is fine" (Principle 7).
+        if plan.unvalidated {
+            ui::info(
+                "co-residency never validated on this box: every footprint here was measured \
+                 alone and then summed, and `llama-matrix validate` is what checks that sum \
+                 against the device",
+            );
+        }
         if !plan.hand_set.is_empty() {
             ui::info(&format!(
                 "{} hand-set footprint(s), not measured: {}. A fronted service with a placeholder \

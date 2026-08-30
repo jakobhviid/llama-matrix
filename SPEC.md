@@ -659,6 +659,13 @@ predicted`:
   absorb it, and flagged when it does not.
 - **Negative is free headroom.** They share something; the plan is conservative.
 
+`build` reads the recorded check back: an error the `margin` does not absorb is a
+warning, because it means a declared combination may not fit, and a box that has
+never validated is *stated* rather than warned about (unchecked is not wrong). The
+number is not subtracted from the ceiling automatically: one sample of one
+combination is evidence for the operator to act on by raising `margin`, not a
+correction to apply behind their back.
+
 `validate` requires the **live** config to declare the combination, since llama-swap
 evicts to satisfy each request and will not hold models it has not been told may
 co-reside. When part of the combination never becomes ready, those ids are reported

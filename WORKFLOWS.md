@@ -274,6 +274,10 @@ it cares about instead of parsing prose. Split by what they mean:
 | `below_weight_floor` | the footprint is under 0.90 of the weights on disk; partial offload is a legitimate cause | no, a signal |
 | `baseline`, `detected_total`, `host_baseline`, `host_total` | the box, as measured | no |
 
+`build` also reads back what `validate` last recorded: an additivity error the
+`margin` cannot absorb becomes a warning there too, so the evidence reaches the step
+that depends on it rather than only the step that produced it.
+
 `build --json` adds `host_ceiling`, `host_over` and `host_cram_gb` alongside
 `warnings`: a `null` ceiling means the host dimension was **not checked**, which is
 not the same as checked-and-fine, and `host_cram_gb` is the largest uniform `-cram`
