@@ -157,6 +157,12 @@ declares everything that fits (maximum flexibility); grouping to shrink the matr
 opt-in. `build --apply` backs up your config, splices on a generated marker, waits
 for the hot-reload, verifies, and rolls back on any anomaly.
 
+Because the store keeps one footprint per distinct set of memory flags, `build` can
+also tell you what a model costs configured differently *on this box*: re-measure a
+model after a `-c` change and both numbers stay, so a pack that will not fit comes
+with a list of measured alternatives and what each would save. Reported, never acted
+on - a smaller footprint is usually a smaller context, and that trade is yours.
+
 Every footprint is measured **alone** and then summed, so `validate` is the step that
 tests whether that sum holds on your box: it loads one declared combination for real
 and compares the occupancy against the prediction. A positive error is the one that

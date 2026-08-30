@@ -862,6 +862,36 @@ fn cmd_build(
         // Say plainly when the second budget was not checked. A matrix that fits the
         // GPU can still exhaust the box, and "no host warnings" must not be readable
         // as "the host was checked and is fine" (Principle 7).
+        // Only worth a line when the ceiling is what is limiting the matrix; near it,
+        // knowing a model has a measured cheaper configuration is the difference
+        // between guessing at a flag and reading one off this box's own numbers.
+        if !plan.cheaper.is_empty() {
+            let total: f64 = plan.cheaper.iter().map(|entry| entry.saving()).sum();
+            ui::info(&format!(
+                "{} model(s) have a smaller footprint already measured on this box under other \
+                 flags ({total:.1} GB in total, biggest first). Not a recommendation - a smaller \
+                 footprint is usually a smaller context - but the price is measured, not guessed:",
+                plan.cheaper.len()
+            ));
+            for entry in plan.cheaper.iter().take(5) {
+                ui::info(&format!(
+                    "    {}: {:.2} GB now, {:.2} GB (-{:.2}) with `{}` rather than `{}`, measured {}",
+                    entry.id,
+                    entry.current,
+                    entry.alternative,
+                    entry.saving(),
+                    entry.instead,
+                    entry.rather_than,
+                    entry.measured_at
+                ));
+            }
+            if plan.cheaper.len() > 5 {
+                ui::info(&format!(
+                    "    …and {} more; `--json` lists them all",
+                    plan.cheaper.len() - 5
+                ));
+            }
+        }
         if plan.unvalidated {
             ui::info(
                 "co-residency never validated on this box: every footprint here was measured \
@@ -905,7 +935,37 @@ fn cmd_build(
             // The loop only closes here: llama-swap will not hold a combination
             // co-resident until the config declares it, so this is the first moment
             // `validate` can test the tightest one it just declared.
-            if plan.unvalidated {
+            // Only worth a line when the ceiling is what is limiting the matrix; near it,
+        // knowing a model has a measured cheaper configuration is the difference
+        // between guessing at a flag and reading one off this box's own numbers.
+        if !plan.cheaper.is_empty() {
+            let total: f64 = plan.cheaper.iter().map(|entry| entry.saving()).sum();
+            ui::info(&format!(
+                "{} model(s) have a smaller footprint already measured on this box under other \
+                 flags ({total:.1} GB in total, biggest first). Not a recommendation - a smaller \
+                 footprint is usually a smaller context - but the price is measured, not guessed:",
+                plan.cheaper.len()
+            ));
+            for entry in plan.cheaper.iter().take(5) {
+                ui::info(&format!(
+                    "    {}: {:.2} GB now, {:.2} GB (-{:.2}) with `{}` rather than `{}`, measured {}",
+                    entry.id,
+                    entry.current,
+                    entry.alternative,
+                    entry.saving(),
+                    entry.instead,
+                    entry.rather_than,
+                    entry.measured_at
+                ));
+            }
+            if plan.cheaper.len() > 5 {
+                ui::info(&format!(
+                    "    …and {} more; `--json` lists them all",
+                    plan.cheaper.len() - 5
+                ));
+            }
+        }
+        if plan.unvalidated {
                 ui::info(
                     "next: `llama-matrix validate` loads the tightest combination this declares \
                      and checks that the footprints really sum on this box",

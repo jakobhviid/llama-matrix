@@ -25,7 +25,7 @@ use serde::Serialize;
 
 use crate::cache::{BoxMeta, Measurement, ModelStore, Store};
 use crate::model::{weight_files, ModelRecord, ModelType};
-use crate::param_hash::memory_cmd;
+use crate::param_hash::{memory_cmd, token_difference};
 use crate::platform::{self, GpuMemory, BYTES_PER_GIB};
 use crate::policy::Policy;
 
@@ -449,28 +449,6 @@ fn compare_commands(declared_cmd: &str, served_cmd: &str) -> Serving {
     }
 }
 
-/// The tokens of `left` that `right` does not have, rendered for a message.
-///
-/// A whole 20-token command on each side of a mismatch buries the one flag that
-/// moved; the difference is the part an operator can act on. `(nothing)` when the
-/// two sides differ only by the *other* direction's extra tokens.
-fn token_difference(left: &str, right: &str) -> String {
-    let mut remaining: Vec<&str> = right.split_whitespace().collect();
-    let mut only_in_left: Vec<&str> = Vec::new();
-    for token in left.split_whitespace() {
-        match remaining.iter().position(|other| *other == token) {
-            Some(index) => {
-                remaining.remove(index);
-            }
-            None => only_in_left.push(token),
-        }
-    }
-    if only_in_left.is_empty() {
-        "(nothing)".to_string()
-    } else {
-        only_in_left.join(" ")
-    }
-}
 
 /// The pure half of [`check_serving`]: does a `(context, explicit_slots)`
 /// declaration match the `(per_slot_context, slots)` a live server reports?
@@ -1923,8 +1901,8 @@ mod tests {
         let Serving::Mismatch { detail } = compare_commands(declared, &restretched) else {
             panic!("a changed -c must be a mismatch");
         };
-        assert!(detail.contains("`8192`"), "{detail}");
-        assert!(detail.contains("`262144`"), "{detail}");
+        assert!(detail.contains("`-c 8192`"), "{detail}");
+        assert!(detail.contains("`-c 262144`"), "{detail}");
 
         // An unexpanded runtime placeholder is not evidence either way: llama-swap
         // substitutes it at launch and the config file never can.
@@ -1934,15 +1912,7 @@ mod tests {
         );
     }
 
-    /// The mismatch message names the tokens that moved, not both whole commands:
-    /// a 20-token command on each side buries the one flag that changed.
-    #[test]
-    fn token_difference_names_only_what_moved() {
-        assert_eq!(token_difference("a -c 8192 b", "a -c 262144 b"), "8192");
-        assert_eq!(token_difference("a b", "a b c"), "(nothing)");
-        // A repeated token is matched by count, not by presence.
-        assert_eq!(token_difference("a a b", "a b"), "a");
-    }
+
 
     /// The `/props` fallback still runs when llama-swap reports no command, and an
     /// image backend (no `/props` at all) is then unconfirmable, as before.

@@ -92,6 +92,12 @@ llama-matrix validate                # …then load the tightest declared combo:
   warning off - and the warning names the largest value that would, so there is
   nothing to compute. A store with no `d_host` gets no host check and says so;
   re-measure to enable it.
+- **`build` tells you what a model costs configured differently**, when this box has
+  already measured it: the store keeps one footprint per distinct set of memory flags,
+  so a model re-measured after a `-c` change keeps both. Reported largest-saving-first
+  with the tokens that differ. Not a recommendation, since a smaller footprint is
+  usually a smaller context, but the price is measured rather than guessed, which is
+  what you want when a pack will not fit.
 - `build` selects each model's *current-config* footprint, collapses variants,
   runs the knapsack, and emits the block. Always preview before `--apply`. If the
   header carries an *unconfirmed footprint* warning, the sets it names are the ones

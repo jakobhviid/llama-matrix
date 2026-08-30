@@ -104,6 +104,36 @@ pub struct EmittedSet {
     pub fanout: usize,
 }
 
+/// Smallest saving worth telling an operator about. Below this it is measurement
+/// noise or a rounding difference, and a list of those trains people to skip the list.
+const MIN_CHEAPER_SAVING_GB: f64 = 1.0;
+
+/// A footprint this box has already measured for a model, smaller than the one its
+/// current flags produce.
+///
+/// Not advice. A smaller footprint is almost always a smaller context or batch, which
+/// is a trade the operator makes, not one the tool makes for them. What the tool can
+/// say is that the trade has a *measured* price on this box rather than a guessed one.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Cheaper {
+    pub id: String,
+    /// GB at the flags the config declares now.
+    pub current: f64,
+    /// GB at the cheaper measured flags.
+    pub alternative: f64,
+    /// Memory tokens the cheaper measurement has that the current one does not.
+    pub instead: String,
+    /// Memory tokens the current one has that the cheaper one does not.
+    pub rather_than: String,
+    pub measured_at: String,
+}
+
+impl Cheaper {
+    pub fn saving(&self) -> f64 {
+        self.current - self.alternative
+    }
+}
+
 /// The full generated plan, ready to render (see `matrix`).
 #[derive(Debug, Clone)]
 pub struct MatrixPlan {
@@ -116,6 +146,9 @@ pub struct MatrixPlan {
     /// nothing has checked that sum against the device (SPEC §7.5). Not a warning:
     /// it is the normal starting state, and the plan is unchecked rather than wrong.
     pub unvalidated: bool,
+    /// Models this box has already measured at a smaller footprint under other flags.
+    /// Reported, never acted on: the trade is the operator's (see [`Cheaper`]).
+    pub cheaper: Vec<Cheaper>,
     /// Models whose footprint the operator hand-set rather than the tool measuring
     /// (a fronted service with a placeholder `cmd`). Stated so a reader knows which
     /// numbers in the plan are declarations, not evidence.
@@ -203,6 +236,7 @@ pub fn resolve_plan(
     // only be too high, so they cost packs rather than risking a pack that does not
     // fit, and re-measuring on a quiet box is what recovers them.
     let mut contended: Vec<String> = Vec::new();
+    let mut cheaper: Vec<Cheaper> = Vec::new();
     // Models with no recorded host footprint. One of these disables the host check
     // for the whole plan: a partial host sum is not a smaller answer, it is a wrong
     // one, and reporting it as a budget would be worse than reporting nothing.
@@ -263,6 +297,23 @@ pub fn resolve_plan(
         }
         if measurement.contended == Some(true) {
             contended.push(record.id.clone());
+        }
+        // This box may already have measured what this model costs configured
+        // differently. That is worth surfacing near a ceiling, and it is on disk.
+        if let Some(other) =
+            store.cheaper_than(&record.id, &record.param_hash, MIN_CHEAPER_SAVING_GB)?
+        {
+            cheaper.push(Cheaper {
+                id: record.id.clone(),
+                current: measurement.d_total,
+                alternative: other.d_total,
+                instead: crate::param_hash::token_difference(&other.params, &measurement.params),
+                rather_than: crate::param_hash::token_difference(
+                    &measurement.params,
+                    &other.params,
+                ),
+                measured_at: other.measured_at.clone(),
+            });
         }
         // Host cost = what the load was measured to add, plus the prompt cache the
         // process will fill on its own. The cap is read from the LIVE command, not
@@ -345,6 +396,12 @@ pub fn resolve_plan(
     plan.excluded.extend(unmeasured);
     plan.warnings.extend(suspect);
     plan.hand_set = hand_set_ids;
+    // Biggest saving first: a list an operator reads top-down should start with the
+    // one that would change their matrix most.
+    cheaper.sort_by(|left, right| {
+        right.saving().partial_cmp(&left.saving()).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    plan.cheaper = cheaper;
     // What `validate` last found, if it has run. The plan is a sum of solo
     // footprints; this is the only recorded evidence about whether that sum holds on
     // this box, so a build that ignores it is ignoring the one measurement aimed at
@@ -1250,6 +1307,7 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
         // builder is handed footprints and has no notion of their provenance.
         unconfirmed: Vec::new(),
         hand_set: Vec::new(),
+        cheaper: Vec::new(),
         unvalidated: false,
         baseline,
         budget,

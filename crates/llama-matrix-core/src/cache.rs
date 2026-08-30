@@ -466,6 +466,44 @@ impl Store {
         Ok(None)
     }
 
+    /// The cheapest **other** footprint this model has been measured at, when it
+    /// saves at least `min_saving` GB over the one at `param_hash`.
+    ///
+    /// The store stacks a measurement per distinct set of memory flags, so a model
+    /// re-measured after a context or batch change keeps both numbers. That makes the
+    /// store an answer to a question nothing was asking it: *this box has already
+    /// measured what this model costs configured differently.* An operator packing
+    /// against a ceiling can act on that; the alternative is to guess, or to
+    /// re-measure something already on disk.
+    ///
+    /// Only `ok` and **confirmed** entries qualify. Offering an unconfirmed number as
+    /// a smaller alternative would be advertising a figure that may be a mid-load
+    /// plateau, which is the one direction Principle 1 cannot tolerate.
+    pub fn cheaper_than(
+        &self,
+        id: &str,
+        param_hash: &str,
+        min_saving: f64,
+    ) -> Result<Option<Measurement>> {
+        let Some(store) = self.read_model(id)? else { return Ok(None) };
+        let Some(current) = store.measurements.get(param_hash).filter(|entry| entry.is_ok())
+        else {
+            return Ok(None);
+        };
+        let cheapest = store
+            .measurements
+            .iter()
+            .filter(|(hash, _)| hash.as_str() != param_hash)
+            .map(|(_, entry)| entry)
+            .filter(|entry| entry.is_confirmed())
+            .min_by(|left, right| {
+                left.d_total.partial_cmp(&right.d_total).unwrap_or(std::cmp::Ordering::Equal)
+            });
+        Ok(cheapest
+            .filter(|entry| current.d_total - entry.d_total >= min_saving)
+            .cloned())
+    }
+
     /// Model ids present in the store (excluding the box file).
     pub fn list_ids(&self) -> Vec<String> {
         let mut ids = Vec::new();
@@ -565,6 +603,64 @@ mod tests {
             )
             .unwrap();
         store
+    }
+
+    /// The store stacks one measurement per distinct set of memory flags, so it
+    /// already knows what a model costs configured differently. Near a ceiling that is
+    /// worth reading off disk rather than guessing at.
+    #[test]
+    fn a_cheaper_measured_alternative_is_found_but_only_a_trustworthy_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().join("measurements"));
+        let entry = |d_total: f64, confirmed: bool| Measurement {
+            status: "ok".into(),
+            d_total,
+            allocation_confirmed: Some(confirmed),
+            ..Default::default()
+        };
+        let mut measurements = IndexMap::new();
+        measurements.insert("now".to_string(), entry(41.71, true));
+        measurements.insert("small".to_string(), entry(26.96, true));
+        measurements.insert("smaller-but-unconfirmed".to_string(), entry(20.00, false));
+        store
+            .write_model(
+                "m",
+                &ModelStore {
+                    model_type: "llm".into(),
+                    file: Some("/m.gguf".into()),
+                    measurements,
+                },
+            )
+            .unwrap();
+
+        // The cheapest trustworthy alternative, not the cheapest number on disk: an
+        // unconfirmed entry may be a mid-load plateau, and advertising one as a
+        // smaller footprint would be advertising a figure that is not evidence.
+        let found = store.cheaper_than("m", "now", 1.0).unwrap().expect("an alternative");
+        assert_eq!(found.d_total, 26.96);
+
+        // Nothing to compare against from the cheapest entry itself.
+        assert!(store.cheaper_than("m", "small", 1.0).unwrap().is_none());
+        // A hash the model does not have is not a question with an answer.
+        assert!(store.cheaper_than("m", "absent", 1.0).unwrap().is_none());
+
+        // A saving under the threshold is noise, and a list of noise trains people to
+        // skip the list.
+        let mut close = IndexMap::new();
+        close.insert("now".to_string(), entry(41.71, true));
+        close.insert("barely".to_string(), entry(41.20, true));
+        store
+            .write_model(
+                "n",
+                &ModelStore {
+                    model_type: "llm".into(),
+                    file: Some("/n.gguf".into()),
+                    measurements: close,
+                },
+            )
+            .unwrap();
+        assert!(store.cheaper_than("n", "now", 1.0).unwrap().is_none());
+        assert!(store.cheaper_than("n", "now", 0.5).unwrap().is_some());
     }
 
     /// A rename orphans a measurement file, because lookup opens the file named for

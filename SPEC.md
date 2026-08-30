@@ -655,6 +655,26 @@ measurements; the host fit contains one declared term. Silently deleting packs o
 strength of a stand-in for a flag the operator never set would be the wrong trade.
 Naming them with the arithmetic is not, and `exclude` is one setting away.
 
+### 7.4a Cheaper configurations already on disk
+
+The store stacks one measurement per distinct set of memory flags (§2), so a model
+re-measured after a context or batch change keeps both numbers. That makes the store
+an answer to a question nothing was asking it: **this box has already measured what
+this model costs configured differently.**
+
+`build` reports it. For each model it names the cheapest *other* footprint on record,
+when that saves at least 1 GB, with the memory tokens that differ (`-c 131072` rather
+than `-c 524288 …`) and when it was measured. Sorted by saving, largest first.
+
+Two constraints keep it honest:
+
+- Only **confirmed** entries qualify. Offering an unconfirmed number as a smaller
+  alternative would advertise a figure that may be a mid-load plateau (§7.2).
+- It is **reported, never acted on**. A smaller footprint is almost always a smaller
+  context or batch, which is a trade the operator makes and the tool cannot. What the
+  tool can say is that the trade has a measured price on this box rather than a
+  guessed one.
+
 ### 7.5 Co-residency validation (does the sum hold?)
 
 Every footprint is measured **alone** and then summed. `validate` is the only step

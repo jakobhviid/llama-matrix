@@ -59,8 +59,14 @@ Roughly in order of value-to-effort:
 5. **Context-parametric footprints.** Measure a model at several `-c` values to get
    a KV slope, then re-target the matrix for a different serving context without
    re-measuring, and answer "does pack Y still fit if I bump X to 128k?"
-6. **KV-quant sensitivity.** Record footprint under q8 vs f16 KV so the tool can
-   advise "switch this model to q8 KV to unlock pack Y."
+6. **Advise which change unlocks a *specific* pack.** `build` already reports every
+   cheaper configuration this box has measured for a model, whatever flag differs
+   (KV quant, `-c`, `-b`, a speculative-decoding draft model), because the store keeps
+   one footprint per distinct set of memory flags. What is left is the targeted form:
+   *"switching this model to its measured 26.96 GB configuration would let pack Y
+   hold one more model"*, which means re-running the knapsack per candidate swap and
+   reporting only swaps that change the pack set. More expensive, and only useful to
+   an operator who is already at the ceiling.
 7. **evict_cost from telemetry.** The `[evict_costs]` table ranks models by *role*,
    which is the axis static config can express and is enough to stop an idle image
    pool outvoting the model in use. It cannot express **recency**: two same-tier models
