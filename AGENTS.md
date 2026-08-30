@@ -54,6 +54,14 @@ So **pick the right commit-subject prefix for the change** and the release versi
 follows automatically. Never hand-edit `version` in `Cargo.toml` to release - CI
 computes and stamps it.
 
+**One push per batch of work, not one push per commit.** Every push to `main` cuts a
+release, so ten commits pushed individually burn ten version numbers and start ten
+concurrent release runs. Commit as often as is useful; push when a piece of work is
+finished. A public version line is not a scratchpad, and version numbers only go up:
+churn cannot be undone, only avoided. (Releases are serialized by a `concurrency`
+group in `release.yml`, which stops overlapping runs racing the Homebrew tap, but
+serializing the runs does not un-burn the versions.)
+
 **Green-gate before you push, or no release is cut.** The release job first runs
 `cargo clippy --workspace --all-targets -- -D warnings` and the test suite; if
 either fails, the push does **not** publish. `cargo build`/`cargo test` alone is

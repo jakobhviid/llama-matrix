@@ -5,6 +5,22 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# Releases must run ONE AT A TIME.
+#
+# The version is derived from the tag state at the moment a run reads it, and the run
+# also pushes the Homebrew formula. Two runs in flight therefore both compute from the
+# same base and both write the tap, and the formula ends up wherever the slower one
+# finished - which can be an OLDER version than the newest release. Observed on
+# 2026-08-30: nine of twelve runs overlapped, four in flight at once, and the tap
+# landed correctly only by luck of finish order.
+#
+# `cancel-in-progress: false` is the load-bearing half. Cancelling a queued release
+# would skip its version entirely and leave the tap pinned behind the tags, which is
+# the failure this exists to prevent, not a tidier version of it.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 permissions:
   contents: write
 
