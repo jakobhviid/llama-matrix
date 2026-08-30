@@ -257,6 +257,11 @@ carry, rather than by being memory-neutral.
 
 ### Direction of risk
 
+Verified on a real 25-model store: stripping the new fields back out (`d_host`,
+`host_total`, `host_baseline`) and rebuilding produces a **byte-identical** matrix,
+with the skipped host check and its reason stated. The new machinery adds information,
+not behaviour, until you re-measure.
+
 The host check can only ever *remove* declarations, never add any, so it cannot make
 a matrix less safe. Under `warn` it changes nothing at all about what is emitted. The
 assumed cache term is deliberately the conservative direction: a box whose llama.cpp

@@ -88,7 +88,12 @@ Roughly in order of value-to-effort:
     Multi-Dimensional Knapsack. A larger change to the fit predicate and emission.
 12. **Readable output (short vars / set names).** Mint the reserved `vars` aliases
     (and/or shorter set names) so the block reads `+g_gemma` rather than
-    `+g_gemma_4_26b_a4b_q4qat`. Cosmetic - full ids work as-is on llama-swap v243+.
+    `+g_gemma_4_26b_a4b_q4qat`. Cosmetic; full ids work as-is on llama-swap v243+.
+    Blocked on documentation rather than on effort: the `vars:` syntax is not in the
+    README that ships in the llama-swap image (checked against v251), and guessing at
+    it would risk emitting a block a live server rejects, which is the one thing
+    `apply` exists to avoid. Confirm the syntax upstream first, then this is small.
+    Shorter *set names* need no upstream knowledge and could be done independently.
 13. **Per-pool VRAM/GTT split beyond AMD.** Shipped for AMD `amdgpu` sysfs
     (`GpuMemory::used_split_gb`, which reads both counters it already sums); NVIDIA
     and Apple Silicon report no split, and omit the fields rather than writing zeros.
