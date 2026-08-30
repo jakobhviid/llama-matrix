@@ -89,6 +89,23 @@ A bug only visible inside one function gets its reproducing test next to that
 function instead. The rule is that the bug is reproduced *before* it is fixed, not
 that every test lives in one file.
 
+## A backlog is not documentation
+
+`ROADMAP.md` says what the tool does **not** do yet. The moment an item ships, its
+explanation belongs in the docs that describe behaviour - `README.md`,
+`WORKFLOWS.md`, `SPEC.md`, `ARCHITECTURE.md`, `PRINCIPLES.md` - and the item leaves
+the roadmap. Do not leave a "this has shipped" note behind: a reader looking for how
+the tool behaves does not read the backlog, and would not trust it if they did.
+
+The same rule killed `ADOPT.md`, which had grown into a parallel description of
+shipped behaviour under upgrade-note headings. What a version changed is what the
+release history is for; how the tool behaves goes in one place, where someone
+looking for it will find it.
+
+An item may state the minimum baseline needed to define its gap ("images take the
+headroom the LLM knapsack left rather than competing for it"). It should not restate
+evidence that lives in the docs - cross-reference the section instead.
+
 ## "Documenting the diff": the doc failure mode, named
 
 Updating a doc or a comment is not the same as narrating the update. The reflex is

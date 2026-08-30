@@ -82,8 +82,8 @@ Roughly in order of value-to-effort:
 
 9. **Generation-peak budgeting.** Fit against `max(d_total, peak_total)` under a policy
    knob, so a diffusion step's transient allocation is budgeted when co-running near
-   the ceiling. A consumer for a field `measure` already records, not a new
-   measurement.
+   the ceiling. `peak_total` is in the store (SPEC §2), so the work is in the fit
+   predicate and a policy knob, not in measurement.
 
    Deferred on the numbers: the peak sits 3-7% above the resident footprint (SPEC §2),
    several times inside the default 4.0 GB `margin`, and only one image pool is ever
