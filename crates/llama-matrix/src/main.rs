@@ -824,8 +824,16 @@ fn cmd_configure(action: ConfigureAction, json: bool) -> Result<()> {
                     .collect();
                 println!("{}", serde_json::to_string(&entries)?);
             } else {
+                // Width from the longest key, not a constant: this is the
+                // discoverability surface, and a key that overflows its column makes
+                // the list unreadable exactly when someone is scanning it for a name.
+                let width =
+                    settings::SETTINGS.iter().map(|setting| setting.key.len()).max().unwrap_or(0);
                 for setting in settings::SETTINGS {
-                    println!("{:<16} {}  (default: {})", setting.key, setting.desc, setting.default);
+                    println!(
+                        "{:<width$} {}  (default: {})",
+                        setting.key, setting.desc, setting.default
+                    );
                 }
             }
         }
