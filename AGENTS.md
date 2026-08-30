@@ -77,6 +77,18 @@ rustfmt's output shifts. Near-zero benefit for real ongoing cost. If you ever *d
 want it, add the toolchain pin in the same change and run it as a separate lint
 workflow (never in `release.yml`, where a whitespace diff would block a release).
 
+## Every confirmed bug gets a reproducing test
+
+`crates/llama-matrix/tests/regressions.rs` holds one test per bug that was
+*observable from the CLI*, each carrying the observation that produced it and the
+commit that fixed it. It is separate from `cli.rs` deliberately: `cli.rs` says what the
+CLI is supposed to do, and this says what it once did wrong, so a failure there means
+a fixed bug came back rather than a feature regressing.
+
+A bug only visible inside one function gets its reproducing test next to that
+function instead. The rule is that the bug is reproduced *before* it is fixed, not
+that every test lives in one file.
+
 ## "Documenting the diff": the doc failure mode, named
 
 Updating a doc or a comment is not the same as narrating the update. The reflex is

@@ -140,9 +140,6 @@ Alignment work against the house guidelines (rust-cli-guidelines) that is deferr
 not skipped. These are style and ops items, separate from the product roadmap
 above; each notes why it is not yet done.
 
-- **`regressions.rs`.** Adopt the temper/dotsync bug-to-regression-test discipline:
-  a dedicated integration-test file where every confirmed bug gets a reproducing
-  test before its fix.
 - **Finish moving CLI orchestration into core (guidelines D6).** `resolve_plan` now
   lives in core; the remaining provisioning glue in `main.rs` (the legacy-store
   migration decision in `open_store`, and `prune` / `setup` discovery) could follow,
