@@ -416,7 +416,7 @@ fn cmd_validate(
     let config_path = config
         .or_else(|| policy.config.clone())
         .unwrap_or_else(|| "config.yaml".to_string());
-    let parsed = ls_config::parse_file(&config_path)?;
+    let parsed = ls_config::parse_file(&config_path, &policy)?;
     let store = open_store(&config_dir, json)?;
     let plan = build::resolve_plan(&config_path, &policy, None, &store)?;
 
@@ -608,7 +608,7 @@ fn cmd_measure(
     let config_path = config
         .or_else(|| policy.config.clone())
         .unwrap_or_else(|| "config.yaml".to_string());
-    let parsed = ls_config::parse_file(&config_path)?;
+    let parsed = ls_config::parse_file(&config_path, &policy)?;
     let store = open_store(&config_dir, json)?;
 
     let endpoint = endpoint.unwrap_or_else(|| policy.endpoint.clone());

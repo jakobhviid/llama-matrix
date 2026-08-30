@@ -28,17 +28,20 @@ Roughly in order of value-to-effort:
    forbids. Cost: more sets - mind the combo cap.
 2. **Richer combos: knapsack LLM units and images together.** A pack now carries the
    images that fit in the headroom its LLM units left, which covers "2 LLMs + an
-   image" at no cost in sets or fan-out. What is still missing is the *joint*
+   image" at no cost in sets or fan-out. Checked on the device, not just in the plan:
+   `validate` on a set of one LLM plus **five** diffusion servers plus whisper (7
+   models) predicted 91.97 GB and measured 91.87 GB, so diffusion backends are as
+   additive as llama.cpp ones and the ride-along is sound. What is still missing is the *joint*
    enumeration: the images take what the LLM knapsack left rather than competing for
    it, so the builder will never trade an LLM away to fit two image servers. That
    needs maximal groups over the union of both, and a careful look at the combination
    count it produces.
-3. **Configurable model-type detection.** Today `type` is inferred from the launch
-   command (binary + flags: `sd-server` → image, `whisper-server` → stt,
-   `--embedding`/`--reranking` → embed/rerank, else llm). Let operators **override
-   it in settings**, via a per-id `type` map (and/or custom binary→type rules), so an
-   unusual image/STT/rerank backend classifies correctly instead of falling back to
-   `llm`. Deferred; not worked on now.
+3. **Custom binary→type rules.** The per-id `[types]` map has shipped, which covers an
+   unusual backend by naming it. What is left is the general form: a rule mapping a
+   binary or flag pattern to a type, so a roster with twenty entries of one
+   unrecognised backend does not need twenty lines. Worth doing once someone has such
+   a roster; twenty explicit lines are not obviously worse than one rule nobody can
+   read.
 4. **Auto-group detection.** Derive candidate `[groups]` by normalizing ids
    (strip quant/mode) + a confirmation heuristic, so a reduction strategy needs zero
    hand-declaration for common rosters.

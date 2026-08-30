@@ -17,6 +17,7 @@ use regex::Regex;
 use serde::Deserialize;
 
 use crate::model::ModelRecord;
+use crate::policy::Policy;
 
 #[derive(Debug, Deserialize)]
 struct RawConfig {
@@ -38,8 +39,14 @@ pub struct ParsedConfig {
     pub macros: IndexMap<String, String>,
 }
 
-/// Parse a config from a YAML string.
-pub fn parse_str(yaml: &str) -> Result<ParsedConfig> {
+/// Parse a config from a YAML string, applying the policy's `[types]` overrides.
+///
+/// The policy is a parameter rather than something a caller applies afterwards
+/// because forgetting it is invisible: the roster still parses, the model still gets
+/// a type, and only the *load trigger* is wrong, which surfaces as a failed load with
+/// a misleading reason. Threading it through the one place records are built makes
+/// that unforgettable.
+pub fn parse_str(yaml: &str, policy: &Policy) -> Result<ParsedConfig> {
     let raw: RawConfig = serde_yaml::from_str(yaml).context("parsing llama-swap config YAML")?;
     let mut models = Vec::new();
     for (id, entry) in &raw.models {
@@ -50,7 +57,11 @@ pub fn parse_str(yaml: &str) -> Result<ParsedConfig> {
         };
         let normalized = normalize_ws(command);
         let expanded = expand_macros(&normalized, &raw.macros, id);
-        models.push(ModelRecord::from_expanded(id.clone(), expanded));
+        let mut record = ModelRecord::from_expanded(id.clone(), expanded);
+        if let Some(declared) = policy.declared_type(id) {
+            record.model_type = declared;
+        }
+        models.push(record);
     }
     Ok(ParsedConfig {
         models,
@@ -59,11 +70,11 @@ pub fn parse_str(yaml: &str) -> Result<ParsedConfig> {
 }
 
 /// Parse a config from a file path.
-pub fn parse_file(path: impl AsRef<Path>) -> Result<ParsedConfig> {
+pub fn parse_file(path: impl AsRef<Path>, policy: &Policy) -> Result<ParsedConfig> {
     let path = path.as_ref();
     let s = std::fs::read_to_string(path)
         .with_context(|| format!("reading llama-swap config {}", path.display()))?;
-    parse_str(&s)
+    parse_str(&s, policy)
 }
 
 /// Collapse all whitespace (folded/literal YAML scalars, newlines) to single
@@ -136,7 +147,7 @@ models:
 
     #[test]
     fn parses_expands_and_classifies() {
-        let p = parse_str(CONFIG).unwrap();
+        let p = parse_str(CONFIG, &Policy::default()).unwrap();
         // "router" has no cmd → excluded (selector-like).
         assert_eq!(p.models.len(), 2);
 
@@ -154,6 +165,31 @@ models:
         assert_eq!(embed.model_type, ModelType::Embed);
     }
 
+    /// Type decides the **load trigger**, so a backend the command sniffing does not
+    /// recognise gets sent a chat completion, fails, and is excluded with a
+    /// misleading reason. `[types]` is the escape hatch, and it has to reach the
+    /// record rather than being applied by whoever remembers to.
+    #[test]
+    fn a_declared_type_overrides_the_one_sniffed_from_the_command() {
+        let cfg = r#"
+models:
+  "my-sd-fork":
+    cmd: "/opt/weird/imagegen --model /sd/u.gguf --port 9000"
+  "chat":
+    cmd: "/app/llama-server -m /models/chat.gguf -c 4096"
+"#;
+        // Sniffed: an unrecognised binary falls back to `llm`, which is the failure.
+        let sniffed = parse_str(cfg, &Policy::default()).unwrap();
+        assert_eq!(sniffed.models[0].model_type, ModelType::Llm);
+
+        let mut policy = Policy::default();
+        policy.types.insert("my-sd-fork".into(), "image".into());
+        let declared = parse_str(cfg, &policy).unwrap();
+        assert_eq!(declared.models[0].model_type, ModelType::Image);
+        // Only the id named is affected.
+        assert_eq!(declared.models[1].model_type, ModelType::Llm);
+    }
+
     #[test]
     fn env_and_model_id_substitution() {
         std::env::set_var("LM_TEST_MODELS", "/srv/w");
@@ -162,7 +198,7 @@ models:
   "m1":
     cmd: "/app/llama-server -m ${env.LM_TEST_MODELS}/${MODEL_ID}.gguf -c 2048"
 "#;
-        let p = parse_str(cfg).unwrap();
+        let p = parse_str(cfg, &Policy::default()).unwrap();
         assert_eq!(
             p.models[0].primary_file,
             Some("/srv/w/m1.gguf".to_string())

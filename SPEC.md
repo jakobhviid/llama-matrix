@@ -45,6 +45,13 @@ probe_image_size = "1024x1024"           # WxH the image load-trigger generates 
 aux    = ["embed-id", "rerank-id", "whisper-id", "tts-id"]
 images = ["image-a", "image-b"]
 
+[types]                    # per-id model-type override; see §6.
+# Type is derived from the launch command and decides the LOAD TRIGGER, so a backend
+# the derivation does not recognise falls back to `llm`, gets sent a chat completion,
+# and fails to load. Name it here instead. One of: llm, embed, rerank, stt, image,
+# tts-proxy. An unrecognised value is an error, not a no-op.
+"my-sd-fork" = "image"
+
 [groups]                   # only consulted by reduction strategies / on_overflow.
 # A named group of DISTINCT model ids treated as one mutually-exclusive unit.
 gemma = ["gemma-27b-q4", "gemma-27b-q4-nothink", "gemma-27b-abliterated-q5"]
@@ -394,6 +401,15 @@ llama-matrix reads a standard llama-swap `config.yaml`:
 Hand-set proxy entries (e.g. a fronted TTS service with a placeholder `cmd`) are
 typed `tts-proxy` and excluded from the measure worklist; their footprint is set in
 their `measurements/<id>.json` by hand (often ~0 GPU).
+
+**`[types]` overrides the derivation, per id** (§1). The derivation reads the binary
+and flags, which covers llama.cpp, stable-diffusion.cpp and whisper.cpp and falls back
+to `llm` for anything else. That fallback is not harmless: type picks the **load
+trigger** (§7), so an unrecognised image backend is sent a chat completion, fails to
+load, and is excluded from the matrix with a reason that points at the wrong thing.
+The override is a *declaration about a backend*, not a measurement, which is why it is
+hand-edited and why an unrecognised value is rejected rather than ignored - a silently
+inert override would leave exactly the failure it was written to fix.
 
 ## 7. Load triggers (how `measure` forces a load)
 

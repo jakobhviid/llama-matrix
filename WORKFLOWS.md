@@ -108,7 +108,9 @@ llama-matrix validate                # …then load the tightest declared combo:
   predicted, so every declared combination is closer to the ceiling than the plan
   says. It is reported against `margin`, which is what has to absorb it. `--set
   <name>` tests a named set instead of the tightest, for when you have a specific
-  worry rather than a general one.
+  worry rather than a general one. Budget the time on an image-heavy set: an image
+  model's load-trigger is a full generation at `probe_image_size`, so validating one
+  costs an image per diffusion server.
 
 Add `--json` to any step to capture structured output for an agent to inspect and
 feed to the next.

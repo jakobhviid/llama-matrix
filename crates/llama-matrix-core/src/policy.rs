@@ -239,6 +239,16 @@ pub struct Policy {
     pub roles: Roles,
     /// Named groups of distinct model ids, consulted only by reduction strategies.
     pub groups: IndexMap<String, Vec<String>>,
+    /// Per-id model-type overrides, e.g. `"my-sd-fork" = "image"`.
+    ///
+    /// Type is normally derived from the launch command (binary and flags), which
+    /// covers llama.cpp, stable-diffusion.cpp and whisper.cpp and falls back to `llm`
+    /// for anything else. That fallback is not harmless: type picks the **load
+    /// trigger**, so an unrecognised image backend gets sent a chat completion, fails
+    /// to load, and is excluded from the matrix with a misleading reason. This is the
+    /// escape hatch, and it is a *declaration* about a backend rather than a
+    /// measurement, which is why it is hand-edited rather than measured.
+    pub types: IndexMap<String, String>,
     /// Per-role and per-id eviction costs (which model the solver keeps under pressure).
     pub evict_costs: EvictCosts,
 }
@@ -261,6 +271,7 @@ impl Default for Policy {
             paths: IndexMap::new(),
             roles: Roles::default(),
             groups: IndexMap::new(),
+            types: IndexMap::new(),
             evict_costs: EvictCosts::default(),
         }
     }
@@ -281,7 +292,28 @@ impl Policy {
             .evict_costs
             .validate()
             .with_context(|| format!("parsing {}", path.display()))?;
+        policy.validate_types().with_context(|| format!("parsing {}", path.display()))?;
         Ok(policy)
+    }
+
+    /// Every `[types]` value has to be a type the tool knows, or the override would
+    /// silently do nothing and the model would keep the wrong load trigger, which is
+    /// the exact failure the table exists to fix.
+    fn validate_types(&self) -> Result<()> {
+        for (id, name) in &self.types {
+            if crate::model::ModelType::from_name(name).is_none() {
+                bail!(
+                    "`[types] \"{id}\" = \"{name}\"` is not a model type; expected one of {:?}",
+                    crate::model::ModelType::NAMES
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// The type an operator declared for `id`, if any.
+    pub fn declared_type(&self, id: &str) -> Option<crate::model::ModelType> {
+        self.types.get(id).and_then(|name| crate::model::ModelType::from_name(name))
     }
 
     /// Map a container path to a host path via `[paths]`; unmapped paths pass
@@ -338,6 +370,24 @@ image = 2
         assert_eq!(p.groups["gemma"].len(), 2);
         assert_eq!(p.evict_costs.llm, Some(12));
         assert_eq!(p.evict_costs.models["pinned-chat"], 40);
+    }
+
+    /// A type nobody recognises must fail loudly. Accepting it would leave the model
+    /// with the wrong load trigger, which is the exact failure `[types]` exists to
+    /// fix, and the operator would have no way to tell it had not worked.
+    #[test]
+    fn an_unknown_declared_type_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("llama-matrix.toml");
+
+        std::fs::write(&file, "[types]\n\"m\" = \"image\"\n").unwrap();
+        assert_eq!(Policy::load(&file).unwrap().declared_type("m"), Some(crate::model::ModelType::Image));
+
+        for bad in ["diffusion", "LLM", "tts_proxy", ""] {
+            std::fs::write(&file, format!("[types]\n\"m\" = \"{bad}\"\n")).unwrap();
+            let error = Policy::load(&file).unwrap_err();
+            assert!(format!("{error:#}").contains("is not a model type"), "accepted `{bad}`");
+        }
     }
 
     /// Per-id override beats the role tier, which beats the built-in.

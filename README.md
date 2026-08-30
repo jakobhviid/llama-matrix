@@ -212,8 +212,8 @@ All of the above are compiled into `llama-matrix --llm`.
 - Model **type** is inferred from the launch command (`sd-server` → image,
   `whisper-server` → stt, `--embedding`/`--reranking` → embed/rerank, else llm). An
   unusual backend binary falls back to `llm`; if its load-trigger then doesn't fit
-  it's recorded `FAILED` and excluded - never mis-measured. Overriding type in
-  settings is on the roadmap.
+  it's recorded `FAILED` and excluded, never mis-measured. Name it in `[types]`
+  (`"my-sd-fork" = "image"`) and it is measured correctly.
 
 ## AI disclosure
 

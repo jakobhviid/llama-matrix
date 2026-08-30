@@ -158,6 +158,18 @@ declared combination for real and compares what it occupies against the predicti
 ✓ `pack52` (6 models): predicted 107.49 GB, measured 107.40 GB, error -0.09 GB
 ```
 
+Two results from the box this was built on, an all-llama.cpp set and an image-heavy
+one, to give a sense of the scale involved:
+
+| set | models | predicted | measured | error |
+|---|---|---|---|---|
+| `pack52` | 3 LLMs + embed + rerank + whisper | 107.49 GB | 107.40 GB | -0.09 GB |
+| `llmimg_…` | 1 LLM + 5 diffusion + whisper | 91.97 GB | 91.87 GB | -0.10 GB |
+
+Budget the time: the load-trigger for an image model is a full generation at
+`probe_image_size`, so validating an image-heavy set costs one image per diffusion
+server (about twenty minutes for the second row above).
+
 Run it after `build --apply`, because llama-swap will not hold models co-resident
 unless the live config declares them. A **positive** error is the one that matters:
 the models together hold more than their solo footprints predicted, so every declared

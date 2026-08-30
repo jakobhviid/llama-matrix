@@ -18,6 +18,25 @@ pub enum ModelType {
 }
 
 impl ModelType {
+    /// Parse the spelling [`ModelType::as_str`] produces, which is also what an
+    /// operator writes in `[types]`. `None` for anything else, so a typo is rejected
+    /// rather than silently classified.
+    pub fn from_name(name: &str) -> Option<ModelType> {
+        Some(match name {
+            "llm" => ModelType::Llm,
+            "embed" => ModelType::Embed,
+            "rerank" => ModelType::Rerank,
+            "stt" => ModelType::Stt,
+            "image" => ModelType::Image,
+            "tts-proxy" => ModelType::TtsProxy,
+            _ => return None,
+        })
+    }
+
+    /// Every spelling `from_str` accepts, for error messages and validation.
+    pub const NAMES: &'static [&'static str] =
+        &["llm", "embed", "rerank", "stt", "image", "tts-proxy"];
+
     pub fn as_str(self) -> &'static str {
         match self {
             ModelType::Llm => "llm",

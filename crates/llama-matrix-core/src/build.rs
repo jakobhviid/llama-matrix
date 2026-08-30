@@ -177,7 +177,7 @@ pub fn resolve_plan(
     budget_override: Option<f64>,
     store: &Store,
 ) -> Result<MatrixPlan> {
-    let parsed = config::parse_file(config_path)?;
+    let parsed = config::parse_file(config_path, policy)?;
     let box_meta = store.read_box()?;
     let budget = budget_override
         .or(policy.budget)
