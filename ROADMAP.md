@@ -73,10 +73,6 @@ Roughly in order of value-to-effort:
     a consumer for it (`build` still uses only `d_total`, so the split is recorded
     for insight and to feed item 11's per-device budgets).
 
-14. **Recover a renamed model's footprint.** A measurement file is opened by model
-    id, so renaming an id in the config orphans its file and re-measures under the
-    new name. Scan the store for a file holding a matching param-hash before
-    measuring, and adopt it (a rename is not a new footprint).
 
 ## House-style conformance backlog
 

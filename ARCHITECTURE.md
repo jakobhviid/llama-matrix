@@ -85,6 +85,10 @@ most of it inside one wait for `ready`. `sweep` therefore takes a progress callb
 and reports each model as it starts and finishes; the core never prints (the CLI puts
 those lines on stderr, so a `--json` pipe stays clean - Principle 9).
 
+A miss under the model's own id is not always work: a rename orphans a measurement
+file, and the store is checked for the same param-hash under an id the config has
+dropped before anything is loaded (SPEC §2).
+
 For each model in the config worklist:
 
 1. Unload everything (`POST /api/models/unload`; `GET /unload` is a legacy

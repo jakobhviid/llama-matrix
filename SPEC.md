@@ -186,9 +186,14 @@ one entry per distinct footprint it has been measured at:
 ```
 
 The filename is the model id (a legible 1:1 with config entries), and lookup opens
-that file directly. Renaming a model id therefore orphans its file and re-measures
-under the new name; recovering the old footprint by scanning the directory for a
-matching param-hash is a roadmap item, not current behaviour.
+that file directly. A **rename** therefore orphans a file, and `measure` recovers it:
+on a miss it looks for the same param-hash under an id the config no longer names, and
+adopts that footprint instead of re-loading. Sound for the same reason the cache is -
+an equal hash is an equal memory command, so the same weights under the same
+footprint-affecting flags - and bounded to ids the config has dropped, because
+adopting from a **live** id would quietly stop measuring it (two ids sharing a hash,
+such as a `-nothink` twin, are each loaded today, and those independent readings are
+what makes a disagreement between them visible). Only a confirmed entry is adopted.
 
 > **The per-pool fields are optional.** `d_vram`/`d_gtt`/`abs_vram`/`abs_gtt` are
 > written only by a backend that can separate pools (AMD `amdgpu` sysfs, which reads

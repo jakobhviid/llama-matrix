@@ -590,6 +590,14 @@ fn cmd_measure(
         for contended in &summary.contended {
             ui::warn(&format!("{}: {}", contended.id, contended.reason));
         }
+        for adopted in &summary.adopted {
+            ui::info(&format!(
+                "{}: adopted {:.2} GB from `{}` without re-loading - the store already held \
+                 this exact memory command under an id the config no longer names, which is \
+                 what a rename looks like",
+                adopted.id, adopted.d_total, adopted.from
+            ));
+        }
         for changed in &summary.changed {
             ui::warn(&format!(
                 "{}: re-measured {:.2} GB, against {:.2} GB stored on {} for the same flags on \

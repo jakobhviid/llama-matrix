@@ -424,6 +424,48 @@ impl Store {
         Ok(None)
     }
 
+    /// A confirmed footprint for `param_hash` filed under some id the live config no
+    /// longer has, and the id it came from.
+    ///
+    /// Renaming a model id in `config.yaml` orphans its measurement file, because
+    /// lookup opens the file named for the id. Without this the rename costs a full
+    /// re-load to record a number the store already holds, which for an 80 GB model
+    /// is a minute of GPU churn for nothing. A rename is not a new footprint.
+    ///
+    /// Adoption is sound for the same reason the cache is: an equal param-hash means
+    /// an equal *memory command*, which means the same weights file under the same
+    /// footprint-affecting flags. It is safe for the same reason a hash hit is safe,
+    /// and there is nothing extra to verify.
+    ///
+    /// **`live_ids` is what keeps it honest.** An id the config still has is not an
+    /// orphan, and adopting from one would quietly stop measuring it: two ids sharing
+    /// a hash (a `-nothink` twin) are each loaded today, and those independent
+    /// readings are what makes a disagreement between them visible. Skipping one
+    /// would trade a real cross-check for a load nobody was paying for anyway.
+    ///
+    /// Only a **confirmed** entry is adopted. Adopting a suspect number to skip a
+    /// load is the trade this exists to avoid making.
+    pub fn adoptable(
+        &self,
+        param_hash: &str,
+        live_ids: &[String],
+    ) -> Result<Option<(String, Measurement)>> {
+        let mut orphans = self.list_ids();
+        orphans.sort(); // deterministic when two orphans share a hash
+        for id in orphans {
+            if live_ids.contains(&id) {
+                continue;
+            }
+            let Some(store) = self.read_model(&id)? else { continue };
+            if let Some(measurement) = store.measurements.get(param_hash) {
+                if measurement.is_confirmed() {
+                    return Ok(Some((id, measurement.clone())));
+                }
+            }
+        }
+        Ok(None)
+    }
+
     /// Model ids present in the store (excluding the box file).
     pub fn list_ids(&self) -> Vec<String> {
         let mut ids = Vec::new();
@@ -523,6 +565,60 @@ mod tests {
             )
             .unwrap();
         store
+    }
+
+    /// A rename orphans a measurement file, because lookup opens the file named for
+    /// the id. The footprint is still the right one: an equal param-hash is an equal
+    /// memory command, which is the same weights under the same flags.
+    #[test]
+    fn a_renamed_models_footprint_is_adoptable_but_a_live_ones_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().join("measurements"));
+        let write = |id: &str, hash: &str, d_total: f64, confirmed: bool| {
+            let mut measurements = IndexMap::new();
+            measurements.insert(
+                hash.to_string(),
+                Measurement {
+                    status: "ok".into(),
+                    d_total,
+                    allocation_confirmed: Some(confirmed),
+                    ..Default::default()
+                },
+            );
+            store
+                .write_model(
+                    id,
+                    &ModelStore {
+                        model_type: "llm".into(),
+                        file: Some("/m.gguf".into()),
+                        measurements,
+                    },
+                )
+                .unwrap();
+        };
+
+        write("old-name", "hash-a", 24.61, true);
+        write("still-here", "hash-b", 30.00, true);
+        write("unconfirmed-orphan", "hash-c", 12.00, false);
+
+        // The config now names `new-name` and `still-here`.
+        let live = vec!["new-name".to_string(), "still-here".to_string()];
+
+        let (from, adopted) = store.adoptable("hash-a", &live).unwrap().expect("the orphan");
+        assert_eq!(from, "old-name");
+        assert_eq!(adopted.d_total, 24.61);
+
+        // An id the config still names is not an orphan. Adopting from one would
+        // quietly stop measuring it, and two ids sharing a hash (a `-nothink` twin)
+        // are each loaded today precisely so a disagreement between them is visible.
+        assert!(store.adoptable("hash-b", &live).unwrap().is_none());
+
+        // An unconfirmed number is not worth skipping a load for: that is the trade
+        // this exists to avoid making.
+        assert!(store.adoptable("hash-c", &live).unwrap().is_none());
+
+        // And a hash nothing holds stays a miss.
+        assert!(store.adoptable("hash-nowhere", &live).unwrap().is_none());
     }
 
     /// A hash miss must never resolve to a footprint measured under other flags.

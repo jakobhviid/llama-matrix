@@ -143,6 +143,9 @@ pub struct MeasureSummary {
     /// (`cache::Measurement::contended`). Over-measured, therefore safe, therefore
     /// reported rather than gated: the fix is to quiesce the box and `--force`.
     pub contended: Vec<Failure>,
+    /// Models whose footprint was recovered from a store file the config no longer
+    /// names, rather than re-loaded. A rename is not a new footprint.
+    pub adopted: Vec<Adopted>,
     /// Models whose fresh footprint disagrees with the one already stored under the
     /// same param-hash by more than a tolerance. Same box, same flags, two numbers:
     /// at most one of them is right, and until this was reported the new one simply
@@ -168,6 +171,15 @@ pub struct MeasureSummary {
     /// GPU (SPEC §7.4); `None` on a box with no way to read it.
     pub host_baseline: Option<f64>,
     pub host_total: Option<f64>,
+}
+
+/// A footprint recovered from a renamed model's orphaned store file.
+#[derive(Debug, Clone, Serialize)]
+pub struct Adopted {
+    pub id: String,
+    /// The id the store had it filed under.
+    pub from: String,
+    pub d_total: f64,
 }
 
 /// A re-measure that did not reproduce the stored footprint.
@@ -888,6 +900,9 @@ pub fn sweep(
     // The worklist, resolved before the loop so progress can count against a total
     // the operator recognises. A proxy entry allocates no GPU and its footprint is
     // hand-set, so it is not work; nor is a model `--only` excludes.
+    // Ids the config still names. An id in here is not an orphan, whatever the store
+    // holds for it (see `Store::adoptable`).
+    let live_ids: Vec<String> = records.iter().map(|record| record.id.clone()).collect();
     let worklist: Vec<&ModelRecord> = records
         .iter()
         .filter(|record| record.model_type != ModelType::TtsProxy)
@@ -926,6 +941,20 @@ pub fn sweep(
                 stored.as_ref().map_or(0.0, |entry| entry.d_total)
             ));
             continue;
+        }
+
+        // Nothing under this id, but the store may hold this exact memory command
+        // under an id the config no longer has: a rename orphans a measurement file,
+        // and a rename is not a new footprint. Adopting it files the number under the
+        // new id, so this happens once and `build` sees it like any other hit.
+        if !options.force && stored.is_none() {
+            if let Some((from, measurement)) = store.adoptable(&record.param_hash, &live_ids)? {
+                let d_total = measurement.d_total;
+                store_measurement(store, record, measurement)?;
+                summary.adopted.push(Adopted { id: record.id.clone(), from: from.clone(), d_total });
+                report(format!("adopted {d_total:.2} GB from `{from}` (renamed)"));
+                continue;
+            }
         }
 
         // Weights on disk: a floor on the footprint of a fully offloaded model, and
