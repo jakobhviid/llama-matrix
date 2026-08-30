@@ -196,6 +196,23 @@ fn build_without_measurements_errors_clearly() {
         .stderr(predicates::str::contains("no measurements"));
 }
 
+/// `validate` is GPU-touching, so what an end-to-end test can pin is the part that
+/// runs before any of that: it refuses a set the config does not declare, and it
+/// says so by name rather than picking some other set to load instead.
+#[test]
+fn validate_rejects_a_set_the_config_does_not_declare() {
+    let dir = tempfile::tempdir().unwrap();
+    write_working_dir(dir.path());
+
+    Command::cargo_bin("llama-matrix")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["validate", "--set", "no-such-pack"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("no set named `no-such-pack`"));
+}
+
 #[test]
 fn help_and_llm_work() {
     Command::cargo_bin("llama-matrix")

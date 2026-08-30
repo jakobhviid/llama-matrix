@@ -1432,6 +1432,18 @@ pub fn validate(
     only: Option<&str>,
     progress: &dyn Fn(Progress),
 ) -> Result<Option<Validation>> {
+    // Before the sensor and before the lock: rejecting a name the config does not
+    // declare needs neither, and an operator who typoed a set should get told that
+    // rather than told their box has no GPU.
+    if let Some(name) = only {
+        if !plan.sets.iter().any(|set| set.name == name) {
+            bail!(
+                "this config declares no set named `{name}`; `llama-matrix build` prints the \
+                 names it emits"
+            );
+        }
+    }
+
     let gpu = platform::detect().context("validate needs a GPU sensor")?;
     let _lock = LockGuard::acquire(store.dir())?;
     let agent = poll_agent();
@@ -1447,14 +1459,6 @@ pub fn validate(
     // put that exact combination on the device instead of arguing about it.
     let by_id: HashMap<&str, &ModelRecord> =
         records.iter().map(|record| (record.id.as_str(), record)).collect();
-    if let Some(name) = only {
-        if !plan.sets.iter().any(|set| set.name == name) {
-            bail!(
-                "this config declares no set named `{name}`; `llama-matrix build` prints the \
-                 names it emits"
-            );
-        }
-    }
     let Some((set, combo)) = plan
         .sets
         .iter()
