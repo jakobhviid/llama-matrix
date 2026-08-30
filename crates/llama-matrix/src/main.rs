@@ -725,6 +725,14 @@ fn cmd_build(
         // Say plainly when the second budget was not checked. A matrix that fits the
         // GPU can still exhaust the box, and "no host warnings" must not be readable
         // as "the host was checked and is fine" (Principle 7).
+        if !plan.hand_set.is_empty() {
+            ui::info(&format!(
+                "{} hand-set footprint(s), not measured: {}. A fronted service with a placeholder \
+                 `cmd` never loads, so its number is the operator's declaration",
+                plan.hand_set.len(),
+                plan.hand_set.join(", ")
+            ));
+        }
         if let Some(reason) = &plan.host_skipped {
             ui::info(&format!("host RAM not budgeted: {reason}"));
         }

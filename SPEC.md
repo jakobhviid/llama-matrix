@@ -601,7 +601,17 @@ and is why `-cram` is on the param-hash strip list (§4) despite affecting memor
 affects an axis the measurement does not carry.
 
 So, per model: `host_gb = d_host + (declared -cram, else host_cache_gb)`, and
-`host_cache_gb` is `0` for a backend that is not llama.cpp.
+`host_cache_gb` is `0` for a backend that is not llama.cpp, and `0` for a hand-set
+proxy entry (a fronted service llama-swap does not start holds no host RAM of
+llama-swap's; whatever it uses is already inside `host_baseline`).
+
+**The cache is not a chat-only cost.** Measured on a `qwen3-embedding-4b-q8` server
+(llama.cpp b10680, `-cram` unstated so the 8192 MiB default applies): anonymous RSS
+sat at 1.64 GB after loading and reached 5.88 GB after 25 embedding requests with
+distinct inputs, with the weights on the GPU throughout. An embed or rerank server is
+a llama-server and fills the same cache, which is why `host_cache_gb` applies to
+`llm`, `embed` and `rerank` alike. It also shows why `d_host` alone cannot be the
+answer: the load-trigger's one tiny prompt leaves it at the 1.64 GB end.
 
 **The check.** Each emitted set is totalled as `host_baseline + Σ members` and
 compared against `host_ceiling = host_budget - host_margin`, exactly mirroring the

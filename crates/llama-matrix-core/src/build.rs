@@ -99,6 +99,10 @@ pub struct MatrixPlan {
     pub sets: Vec<EmittedSet>,
     pub warnings: Vec<String>,
     pub excluded: Vec<String>,
+    /// Models whose footprint the operator hand-set rather than the tool measuring
+    /// (a fronted service with a placeholder `cmd`). Stated so a reader knows which
+    /// numbers in the plan are declarations, not evidence.
+    pub hand_set: Vec<String>,
     /// Models whose footprint was recorded without confirming the allocation
     /// finished, so it may be under-measured (SPEC §7.2). Named here whatever
     /// `on_unconfirmed` did with them, so a `--json` consumer can see them even under
@@ -182,12 +186,29 @@ pub fn resolve_plan(
     // for the whole plan: a partial host sum is not a smaller answer, it is a wrong
     // one, and reporting it as a budget would be worse than reporting nothing.
     let mut host_unmeasured: Vec<String> = Vec::new();
+    // Footprints the operator wrote down rather than the tool measuring. Reported
+    // once, plainly, because they are the one place a number enters the matrix
+    // without evidence behind it (Principle 7), and never as a warning, because
+    // there is nothing to fix.
+    let mut hand_set_ids: Vec<String> = Vec::new();
     for record in &parsed.models {
         let Some(measurement) = store.select(&record.id, &record.param_hash)? else {
             unmeasured.push(record.id.clone());
             continue;
         };
-        if !measurement.is_confirmed() {
+        // A hand-set proxy entry is not a measurement and the confirmation question
+        // does not apply to it: `allocation_confirmed` asks whether the load-trigger
+        // finished, and this model never loads (a fronted service with a placeholder
+        // `cmd`, SPEC §2, §6). Treating it as unconfirmed put a warning on the build
+        // that could never be cleared by any amount of measuring, and because such a
+        // model is usually aux it rode along in every set: on one live roster it
+        // named 224 of 229 sets, every time, forever. A warning nobody can act on is
+        // a warning everybody learns to skip.
+        let hand_set = record.model_type == ModelType::TtsProxy;
+        if hand_set {
+            hand_set_ids.push(record.id.clone());
+        }
+        if !hand_set && !measurement.is_confirmed() {
             unconfirmed.push(record.id.clone());
             match policy.on_unconfirmed {
                 OnUnconfirmed::Error => bail!(
@@ -227,6 +248,21 @@ pub fn resolve_plan(
         // from the measurement: `-cram` moves host RAM only, so a footprint taken at
         // one value describes the GPU at any other, and changing it must not cost a
         // re-measure. A backend that is not llama.cpp has no such cache.
+        // A proxy entry fronts a service llama-swap does not start, so it holds no
+        // host RAM of llama-swap's: whatever the fronted service uses is already in
+        // `host_baseline`, which is read with nothing loaded. Zero, not unknown - and
+        // the difference is load-bearing, because "unknown" for one never-measurable
+        // model would disable the host check for the whole plan, permanently.
+        if record.model_type == ModelType::TtsProxy {
+            footprints.push(ModelFootprint {
+                id: record.id.clone(),
+                model_type: record.model_type,
+                primary_file: record.primary_file.clone(),
+                d_total: measurement.d_total,
+                host_gb: Some(0.0),
+            });
+            continue;
+        }
         let host_gb = measurement.d_host.map(|measured| {
             let cache = match record.model_type {
                 ModelType::Llm | ModelType::Embed | ModelType::Rerank => {
@@ -278,6 +314,7 @@ pub fn resolve_plan(
     }
     plan.excluded.extend(unmeasured);
     plan.warnings.extend(suspect);
+    plan.hand_set = hand_set_ids;
     if !contended.is_empty() {
         plan.warnings.push(format!(
             "{} footprint(s) were measured while something else was resident, so they are \
@@ -999,6 +1036,7 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
         // Filled by `resolve_plan`, which is the layer that reads the store: the pure
         // builder is handed footprints and has no notion of their provenance.
         unconfirmed: Vec::new(),
+        hand_set: Vec::new(),
         baseline,
         budget,
         margin: policy.margin,

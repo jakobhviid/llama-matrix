@@ -194,6 +194,11 @@ carry, rather than by being memory-neutral.
 - **`host_cache_gb` is the one assumed number.** If your llama.cpp predates the
   host-side cache, set it to `0` and the arithmetic becomes pure measurement. If you
   set `-cram` on an entry, that entry stops assuming anything.
+- **It applies to your embed and rerank entries too, and that is not conservatism.**
+  Measured on a 4B embedding server with `-cram` unstated: anonymous RSS 1.64 GB after
+  loading, 5.88 GB after 25 embedding requests with distinct inputs, weights on the
+  GPU throughout. An embed server is a llama-server. Two aux entries on a 32 GB box
+  will eventually hold ~16 GB between them, before any LLM loads.
 - **Nothing is excluded by default.** `on_host_overflow = "warn"` emits the set and
   names it, because one term of the host sum is a declared cap rather than a
   measurement and silently deleting packs on that basis would be the wrong trade. Set
