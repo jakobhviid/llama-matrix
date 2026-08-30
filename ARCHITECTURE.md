@@ -228,11 +228,16 @@ box-level baseline/budget it belongs with.
 
 ### 4.1 Units: variant-collapse → logical models
 
-Before any knapsack, interchangeable variants of one model (same weights across
-quants, and `-nothink` twins) collapse into a **logical model**, sized by its
-largest measured quant. Under the default `flat` strategy each logical model is an
-independent knapsack unit. Under an opt-in reduction strategy (`family`), a
-user-declared group of distinct models becomes one unit instead (see `SPEC.md`).
+Before any knapsack, config entries that point at the **same weight file** collapse
+into a **logical model**: a `-nothink` twin, or an alias differing only in sampler
+flags. They are emitted as a `(a | b)` alternation and sized by the largest member,
+because the matrix has to be safe for whichever llama-swap loads.
+
+The key is the weight path, so **different quant files do not collapse** - they are
+different weights, and nothing physical stops a box holding both. Under the default
+`flat` strategy each is an independent knapsack unit at its own measured footprint.
+Merging distinct models (including two quants of one lineage) is the opt-in `family`
+strategy over a declared `[groups]` (see `SPEC.md`).
 
 ### 4.2 Roles
 

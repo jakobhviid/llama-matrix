@@ -23,9 +23,20 @@ into `--llm`.
 
 Roughly in order of value-to-effort:
 
-1. **Actual-quant sizing.** Size each quant by its own measured footprint instead of
-   the logical model's largest, unlocking combos a max-quant unit conservatively
-   forbids. Cost: more sets - mind the combo cap.
+1. **Per-variant packs.** A unit that alternates (`(a | b)`, a `-nothink` twin or a
+   declared `[groups]` family) is reserved at its **largest** member's footprint in
+   every pack it joins, because the matrix must be safe for whichever one llama-swap
+   loads. Where the members differ in size, that leaves headroom on the table: a pack
+   holding the smaller variant could have taken another model.
+
+   Enumerating packs **per variant** rather than per unit recovers it. Cost: the set
+   count multiplies by the alternation width, so this trades directly against the
+   1000-combination cap and `MAX_PACKS`, and is only worth it where variants differ
+   enough to unlock a real combination.
+
+   Note this is *not* about different quant files under the default strategy: those
+   are already separate units at their own footprints (see PRINCIPLES #4). It bites
+   only where an alternation exists.
 2. **Richer combos: knapsack LLM units and images together.** A pack now carries the
    images that fit in the headroom its LLM units left, which covers "2 LLMs + an
    image" at no cost in sets or fan-out. Checked on the device, not just in the plan:

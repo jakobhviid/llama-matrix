@@ -50,11 +50,16 @@ flexibility for a smaller declaration, never the default.
 
 ## 4. Collapse a model with itself, never distinct models (by default).
 
-The same model appearing under several names - different quant files, or a
-`-nothink` runtime twin of identical weights - is **one logical unit**, sized by
-its largest quant (if the big one fits, any fits). This is physically necessary
-deduplication, not policy. Grouping *distinct* models is a separate, opt-in
-strategy (#3).
+Two config entries pointing at the **same weight file** are one model wearing two
+names (a `-nothink` runtime twin, an alias with different sampler flags), so they
+become **one logical unit**, emitted as a `(a | b)` alternation and sized by the
+largest member: the matrix has to be safe for whichever one is loaded.
+
+Two *different* quant files are two units, each at its own measured footprint. They
+are different weights that happen to share a lineage, and nothing physical stops a
+box holding both. Merging them is a judgement about how you want the box used, not a
+fact about memory, so it is opt-in through `[groups]` with `strategy = "family"` -
+the same door that groups genuinely distinct models (#3).
 
 ## 5. The live config is written in exactly one place.
 

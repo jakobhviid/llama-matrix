@@ -1625,6 +1625,48 @@ mod tests {
         .is_err());
     }
 
+    /// What collapses is a shared **weight file**, not a shared lineage. Two quants
+    /// are different weights and nothing physical stops a box holding both, so they
+    /// stay independent units at their own footprints; merging them is a judgement
+    /// about how the box should be used, which `[groups]` + `family` exists for.
+    /// PRINCIPLES #4 and ARCHITECTURE §4.1 both assert this, so it is pinned here.
+    #[test]
+    fn quants_stay_separate_units_but_a_shared_file_collapses() {
+        let models = vec![
+            // Same lineage, different quant files.
+            footprint("chat-q4", ModelType::Llm, Some("/chat-Q4.gguf"), 20.0),
+            footprint("chat-q6", ModelType::Llm, Some("/chat-Q6.gguf"), 28.0),
+            // One file, two config entries: a `-nothink` twin.
+            footprint("twin", ModelType::Llm, Some("/twin.gguf"), 20.0),
+            footprint("twin-nothink", ModelType::Llm, Some("/twin.gguf"), 21.0),
+        ];
+        let plan = build(&BuildInput {
+            models: &models,
+            policy: &budgeted(OnUnconfirmed::Warn),
+            baseline: 0.16,
+            budget: 111.5,
+            host: None,
+        })
+        .unwrap();
+
+        // The twin is one unit: an alternation, sized by the larger member.
+        let helper = plan
+            .sets
+            .iter()
+            .find(|set| set.name.starts_with("g_"))
+            .expect("the shared-file pair collapses into a helper");
+        assert!(helper.expr.contains("twin"), "{}", helper.expr);
+        assert!(helper.expr.contains("twin-nothink"), "{}", helper.expr);
+        assert!(helper.expr.contains('|'), "an alternation, not a co-residency: {}", helper.expr);
+        assert!((helper.footprint - (0.16 + 21.0)).abs() < 0.01, "{}", helper.footprint);
+
+        // The quants are not: exactly one helper, and a pack names both quants at once.
+        assert_eq!(plan.sets.iter().filter(|set| set.name.starts_with("g_")).count(), 1);
+        let pack = plan.sets.iter().find(|set| set.name == "pack1").expect("a pack");
+        assert!(pack.expr.contains("chat-q4"), "{}", pack.expr);
+        assert!(pack.expr.contains("chat-q6"), "{}", pack.expr);
+    }
+
     /// A pack is maximal in LLM units, which does not mean the ceiling is full. An
     /// image server that fits beside it rides in the pack's own expression, because
     /// llama-swap treats any subset of a declared set as valid: `a & b & img`

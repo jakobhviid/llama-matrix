@@ -186,9 +186,12 @@ All of the above are compiled into `llama-matrix --llm`.
 
 - v1 optimizes a **single** unified memory pool; multi-GPU / per-device budgets are
   on the roadmap.
-- A logical model (a model's quant variants collapsed into one unit) is sized by its
-  largest quant - safe, but slightly pessimistic; see the roadmap for actual-quant
-  sizing.
+- Two entries pointing at the **same weight file** (a `-nothink` twin, an alias with
+  different sampler flags) are one logical model, emitted as `(a | b)` and reserved at
+  the larger one's footprint, since the matrix must be safe for whichever loads. Two
+  *different* quant files are two units at their own footprints; merging those is
+  opt-in via `[groups]`. Where an alternation's members differ in size the reservation
+  is pessimistic by that difference - see the roadmap for per-variant packs.
 - `measure` needs a supported GPU sensor (AMD sysfs, NVIDIA, or Apple Silicon via
   Metal unified memory); `build` works anywhere from an existing measurement store
   and a supplied `--budget`.
