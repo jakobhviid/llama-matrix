@@ -151,6 +151,8 @@ pub struct MeasureSummary {
     /// at most one of them is right, and until this was reported the new one simply
     /// overwrote the old with no trace that anything had changed.
     pub changed: Vec<Remeasured>,
+    /// A newer llama-matrix wrote this store, so this build is reading it partially.
+    pub store_written_by_newer: Option<String>,
     /// The sweep never saw the pool verifiably empty, so it could not establish the
     /// box baseline and kept the stored one. Every footprint it did record was taken
     /// against a pool holding something else.
@@ -872,6 +874,7 @@ pub fn sweep(
 
     let mut summary = MeasureSummary {
         detected_total: gpu.total_gb()?,
+        store_written_by_newer: store.written_by_newer()?,
         ..Default::default()
     };
 

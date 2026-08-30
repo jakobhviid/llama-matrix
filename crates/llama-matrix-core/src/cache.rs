@@ -466,6 +466,25 @@ impl Store {
         Ok(None)
     }
 
+    /// The version stamped in the store, when it is **newer** than the running binary.
+    ///
+    /// The stamp existed only to avoid writing it backwards; nothing ever read it to
+    /// warn, so an old binary would open a store a newer one wrote, silently drop
+    /// every field it did not recognise, and build a matrix from what was left. Serde
+    /// ignores unknown fields by design, so the failure is completely quiet: the
+    /// numbers it does understand are real, the guide it prints is its own and looks
+    /// authoritative, and nothing anywhere says a newer release exists.
+    ///
+    /// A stamp equal to or older than the running version is the normal case and says
+    /// nothing. An unparseable one never compares as newer (see [`version_is_newer`]),
+    /// so a corrupt stamp cannot cry wolf.
+    pub fn written_by_newer(&self) -> Result<Option<String>> {
+        Ok(self
+            .read_box()?
+            .written_by
+            .filter(|stamped| version_is_newer(stamped, WRITER_VERSION)))
+    }
+
     /// The cheapest **other** footprint this model has been measured at, when it
     /// saves at least `min_saving` GB over the one at `param_hash`.
     ///
@@ -661,6 +680,32 @@ mod tests {
             .unwrap();
         assert!(store.cheaper_than("n", "now", 1.0).unwrap().is_none());
         assert!(store.cheaper_than("n", "now", 0.5).unwrap().is_some());
+    }
+
+    /// An old binary reading a newer store drops every field it does not recognise,
+    /// silently, and builds from what is left. The stamp is the only thing that can
+    /// catch it, so it has to be read and not merely written.
+    #[test]
+    fn a_store_written_by_a_newer_build_is_flagged() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().join("measurements"));
+        let stamp = |version: &str| {
+            std::fs::create_dir_all(store.dir()).unwrap();
+            std::fs::write(
+                store.dir().join(BOX_FILE),
+                format!(r#"{{"baseline":0.16,"written_by":"{version}"}}"#),
+            )
+            .unwrap();
+            store.written_by_newer().unwrap()
+        };
+
+        assert_eq!(stamp("99.0.0").as_deref(), Some("99.0.0"), "a newer store is flagged");
+        assert_eq!(stamp(WRITER_VERSION), None, "our own stamp says nothing");
+        assert_eq!(stamp("0.0.1"), None, "an older store is the normal case");
+        assert_eq!(stamp("not-a-version"), None, "a corrupt stamp must not cry wolf");
+        // A store with no stamp at all predates the field; nothing to say.
+        std::fs::write(store.dir().join(BOX_FILE), r#"{"baseline":0.16}"#).unwrap();
+        assert_eq!(store.written_by_newer().unwrap(), None);
     }
 
     /// A rename orphans a measurement file, because lookup opens the file named for

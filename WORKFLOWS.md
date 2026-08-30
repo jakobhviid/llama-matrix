@@ -355,8 +355,9 @@ found.
 | key | it means | act on it? |
 |---|---|---|
 | `host_ceiling` | what each set was checked against; **`null` means not checked**, which is not the same as checked-and-fine | **yes** if null and you care about host RAM |
-| `host_over` | `[name, gb]` per set over that ceiling | **yes**, see `host_cram_gb` |
-| `host_cram_gb` | the largest uniform `-cram` that brings them all under; `null` *with* a non-empty `host_over` means no `-cram` can, because the overrun is in measured memory | it is the fix |
+| `host_over` | per set over that ceiling, decomposed: `baseline` / `measured` (Σ `d_host`) / `caches` (Σ `-cram`) / `holders`, plus its heaviest members. Nothing to re-join to the store by hand | **yes**, see `host_cram_gb` |
+| `host_over_shape` | what they have in **common**: the range, a shared `common_holders` count when every one has the same, and `always_present` models (aux excluded, since it rides in everything). With hundreds over, this is the actionable part | **yes**, read this before the list |
+| `host_cram_gb` | the largest uniform `-cram` that brings them all under, reported under `warn` and `exclude` alike; `null` *with* a non-empty `host_over` means no `-cram` can, because the overrun is in measured memory | it is the fix |
 | `cheaper` | per model, the cheapest other footprint this box has measured, with the tokens that differ | no, but it is where headroom is |
 | `excluded` | models left out of the matrix entirely | **yes**, surface it |
 

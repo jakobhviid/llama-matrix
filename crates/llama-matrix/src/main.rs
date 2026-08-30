@@ -718,6 +718,14 @@ fn cmd_measure(
                 summary.baseline
             ));
         }
+        if let Some(newer) = &summary.store_written_by_newer {
+            ui::alert(&format!(
+                "this measurement store was written by llama-matrix {newer}, newer than the {} \
+                 running here: fields that version records and this one does not know are being \
+                 ignored silently. Upgrade before trusting this sweep",
+                llama_matrix_core::cache::WRITER_VERSION
+            ));
+        }
         if summary.no_empty_pool {
             ui::warn(&format!(
                 "the pool was never seen empty during this sweep, so the box baseline could not \

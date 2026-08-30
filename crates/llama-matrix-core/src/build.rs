@@ -523,6 +523,18 @@ pub fn resolve_plan(
     if let Err(reason) = host_budget {
         plan.host_skipped = Some(reason);
     }
+    // Before anything derived from the store: if a newer build wrote it, this one has
+    // been silently dropping fields it does not recognise, and every number below is
+    // a partial reading of it.
+    if let Some(newer) = store.written_by_newer()? {
+        plan.warnings.push(format!(
+            "this measurement store was written by llama-matrix {newer}, newer than the {} \
+             running here. Fields that version records and this one does not know are being \
+             ignored, silently, so this matrix is built from a partial reading of the store. \
+             Upgrade before trusting it",
+            crate::cache::WRITER_VERSION
+        ));
+    }
     plan.excluded.extend(unmeasured);
     plan.warnings.extend(suspect);
     plan.hand_set = hand_set_ids;
