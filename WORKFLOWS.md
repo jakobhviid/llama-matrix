@@ -246,6 +246,33 @@ Each step's `--json` is designed to be inspected and gated on before the next: a
 `FAILED` model means excluded-from-matrix (surface it); an overflow warning means a
 strategy decision is pending; a failed verify means the change was rolled back.
 
+### What to gate on
+
+`measure --json` reports each outcome as its own key, so a driver can act on the one
+it cares about instead of parsing prose. Split by what they mean:
+
+| key | it means | act on it? |
+|---|---|---|
+| `measured`, `cached`, `adopted` | ids that now have a footprint (loaded, reused, or recovered from a renamed id) | no |
+| `failed` | `{id, reason}`; excluded from the matrix | **yes**, surface it |
+| `skipped_missing` | the weight file is not on this host | **yes**, the config or the mount is wrong |
+| `unconfirmed_allocation` | `{id, reason}`; the footprint may be **short**, which is the direction that OOMs | **yes**, re-measure |
+| `no_empty_pool` | the pool was never seen empty, so every footprint here is a delta over something else | **yes**, quiesce and re-measure |
+| `baseline_was` | the empty-pool baseline moved; an increase is what a pool that only *looked* empty produces | **yes** if it went up |
+| `contended` | `{id, reason}`; something else was resident, so the footprint is **too high** | no, but re-measure to recover the packs |
+| `changed` | `{id, previous, current, previous_measured_at}`; same box, same flags, a different number | no, but at most one of them is right |
+| `unverified_serving` | llama-swap could not confirm which command it ran | no, informational |
+| `below_weight_floor` | the footprint is under 0.90 of the weights on disk; partial offload is a legitimate cause | no, a signal |
+| `baseline`, `detected_total`, `host_baseline`, `host_total` | the box, as measured | no |
+
+`build --json` adds `host_ceiling` and `host_over` alongside `warnings`: a `null`
+ceiling means the host dimension was **not checked**, which is not the same as
+checked-and-fine.
+
+The split that matters when deciding whether to stop: `unconfirmed_allocation`,
+`no_empty_pool` and a rising `baseline_was` can leave a matrix that does not fit.
+`contended` and `changed` can only leave one that is smaller than it needs to be.
+
 ---
 
 ## Cadence
