@@ -1366,6 +1366,151 @@ pub fn sweep(
     Ok(summary)
 }
 
+/// What a co-residency check found: the combination it loaded, what the plan
+/// predicted it would occupy, and what the device actually reported.
+#[derive(Debug, Clone, Serialize)]
+pub struct Validation {
+    /// The emitted set that was tested.
+    pub set: String,
+    /// The model ids loaded, in the order they were loaded.
+    pub combo: Vec<String>,
+    /// `baseline + Σ solo footprints`, from the plan.
+    pub predicted: f64,
+    /// Settled occupancy with all of them resident.
+    pub measured: f64,
+    /// `measured - predicted`. **Positive is the dangerous sign**: the models
+    /// together hold more than their solo footprints predicted, so every declared
+    /// combination is closer to the ceiling than the plan says.
+    pub error: f64,
+    /// The ceiling the plan was built against, so the error can be read against the
+    /// slack that is supposed to absorb it.
+    pub ceiling: f64,
+    /// The safety margin, which is what an error this size eats into.
+    pub margin: f64,
+    /// Models the combination named that llama-swap did not have resident when the
+    /// reading was taken. Non-empty means the number below is not a co-residency
+    /// measurement at all, and nothing is recorded.
+    pub absent: Vec<String>,
+}
+
+/// Load one declared combination and compare what it actually occupies against what
+/// the plan predicted.
+///
+/// This is the only step that tests the tool's central assumption. Everything else
+/// measures models **alone** and then *sums*; if footprints are not additive on a box
+/// (allocator fragmentation, a shared buffer, a driver that reserves per-process),
+/// every declared combination is closer to the ceiling than the plan says, and the
+/// error is in the direction that OOMs.
+///
+/// The tightest declared set is the one worth testing: it is the binding claim, and
+/// anything smaller is implied by it. Loading it is not a risk the operator is not
+/// already taking, because llama-swap will load exactly that combination on demand.
+///
+/// Requires the live config to declare the combination, since llama-swap evicts to
+/// satisfy each request and will not hold models it has not been told may co-reside.
+/// When it does not, the models are reported `absent` rather than a smaller number
+/// being recorded as if it were the answer.
+pub fn validate(
+    plan: &crate::build::MatrixPlan,
+    records: &[ModelRecord],
+    store: &Store,
+    options: &MeasureOptions,
+    progress: &dyn Fn(Progress),
+) -> Result<Option<Validation>> {
+    let gpu = platform::detect().context("validate needs a GPU sensor")?;
+    let _lock = LockGuard::acquire(store.dir())?;
+    let agent = poll_agent();
+
+    // The tightest set that names more than one loadable model. A single-model set
+    // proves nothing about additivity, and an `aux`-only set is already inside every
+    // other set's prediction.
+    let by_id: HashMap<&str, &ModelRecord> =
+        records.iter().map(|record| (record.id.as_str(), record)).collect();
+    let Some((set, combo)) = plan
+        .sets
+        .iter()
+        .filter_map(|set| {
+            let combo: Vec<String> = crate::build::set_member_ids(&plan.sets, set)
+                .into_iter()
+                .filter(|id| {
+                    by_id.get(id.as_str())
+                        .is_some_and(|record| record.model_type != ModelType::TtsProxy)
+                })
+                .collect();
+            (combo.len() > 1).then_some((set, combo))
+        })
+        .max_by(|left, right| {
+            left.0.footprint.partial_cmp(&right.0.footprint).unwrap_or(std::cmp::Ordering::Equal)
+        })
+    else {
+        return Ok(None);
+    };
+
+    let total = combo.len();
+    clear_pool(&agent, &options.endpoint, gpu.as_ref());
+    let mut fired = Vec::new();
+    for (position, id) in combo.iter().enumerate() {
+        progress(Progress::Loading { index: position + 1, total, id });
+        let model_type = by_id[id.as_str()].model_type;
+        let trigger = trigger(id, model_type, options);
+        wait_ready(&agent, &options.endpoint, id, options.load_timeout);
+        fired.push(trigger);
+    }
+    // Every trigger has to finish before the reading, for the same reason a solo
+    // measurement waits for one: a lazily-allocating backend is `ready` long before
+    // its weights are resident.
+    for trigger in &fired {
+        await_allocation(trigger, gpu.as_ref(), options.trigger_timeout);
+    }
+
+    let resident = running(&agent, &options.endpoint);
+    let absent: Vec<String> = combo
+        .iter()
+        .filter(|id| resident.get(id.as_str()).map(|entry| entry.state.as_str()) != Some("ready"))
+        .cloned()
+        .collect();
+    let settled = stabilize(
+        gpu.as_ref(),
+        STABILIZE_MAX_WAIT,
+        STABILIZE_INTERVAL,
+        STABILIZE_EPS,
+        STABILIZE_HOLD,
+    );
+    drop(fired);
+
+    let measured = round2(settled.used);
+    let predicted = round2(set.footprint);
+    // Leave the pool as `measure` leaves it: empty. This is a diagnostic, and pinning
+    // the box at its ceiling afterwards is a side effect nobody asked for - on a
+    // roster with `ttl: 0` those models would simply stay there.
+    clear_pool(&agent, &options.endpoint, gpu.as_ref());
+    let validation = Validation {
+        set: set.name.clone(),
+        combo,
+        predicted,
+        measured,
+        error: round2(measured - predicted),
+        ceiling: plan.ceiling,
+        margin: plan.margin,
+        absent,
+    };
+
+    // A reading taken while part of the combination was not resident is not a
+    // co-residency reading. Report it, record nothing: a too-small number filed as
+    // the additivity answer would say the box has more headroom than it does.
+    if validation.absent.is_empty() {
+        let mut meta = store.read_box()?;
+        meta.additivity_check = Some(crate::cache::AdditivityCheck {
+            combo: validation.combo.clone(),
+            predicted: validation.predicted,
+            measured: validation.measured,
+            error: validation.error,
+        });
+        store.write_box(&meta)?;
+    }
+    Ok(Some(validation))
+}
+
 fn round2(value: f64) -> f64 {
     (value * 100.0).round() / 100.0
 }

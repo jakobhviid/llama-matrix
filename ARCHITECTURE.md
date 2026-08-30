@@ -285,6 +285,16 @@ breaks the remaining ties. Comparing raw sums let two packs whose totals differe
 hundredths of a GB trade places on a re-measure, which renamed both and made `drift`
 report an out-of-sync matrix that was in fact identical.
 
+### 4.3a Validation: does the sum hold?
+
+The fit predicate adds solo footprints. `validate` is the only step that checks that
+addition against the device: it loads the tightest declared set for real and compares
+settled occupancy against the prediction, recording `additivity_check` in `_box.json`.
+A **positive** error means the models together hold more than predicted, so every
+declared combination sits closer to the ceiling than the plan says; it is reported
+against `margin`, which is the slack meant to absorb it. It belongs to `measure`'s
+side-effect profile (GPU-touching, lockfile-guarded), not `build`'s (SPEC §7.5).
+
 ### 4.4 Emission & the 1000-combination guard
 
 The block is a set of named DSL expressions (see `SPEC.md` §3 for the grammar):

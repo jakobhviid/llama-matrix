@@ -68,6 +68,7 @@ llama-matrix measure          # load each model, record its real footprint
 llama-matrix build            # preview the generated matrix block (stdout)
 llama-matrix build --out m.yaml   # …or write it to a file
 llama-matrix build --apply    # …or splice it into config.yaml, wait for reload, verify
+llama-matrix validate         # load the tightest declared combo; does it really fit?
 ```
 
 > `measure` talks to your **running** llama-swap and loads each model in turn - it
@@ -123,6 +124,7 @@ image pool), and you can retune a tier or pin a single model in `[evict_costs]`
 | `measure` | load each model, record its real footprint (GPU-touching, stateful) |
 | `build` | generate the matrix block; `--out FILE` to write it, `--apply` to splice it |
 | `drift` | show whether the live matrix block matches a fresh build (read-only) |
+| `validate` | load the tightest declared combination and check it really fits (GPU-touching) |
 | `configure` | get/set the scalar settings (budget, margin, strategy, …) |
 | `prune` | drop measurements whose weight files are gone (`--yes` to delete) |
 
@@ -153,6 +155,13 @@ default strategy declares everything that fits (maximum flexibility); grouping t
 shrink the matrix is opt-in. `build --apply` backs up your
 config, splices on a generated marker, waits for the hot-reload, verifies, and rolls
 back on any anomaly.
+
+Every footprint is measured **alone** and then summed, so `validate` is the step that
+tests whether that sum holds on your box: it loads one declared combination for real
+and compares the occupancy against the prediction. A positive error is the one that
+matters (the models together hold more than predicted, so every declared combination
+sits closer to the ceiling than the plan says), and it is reported against the margin
+that is supposed to absorb it.
 
 This targets llama-swap's `matrix:` engine, which replaces the legacy `groups:` one
 (the two are mutually exclusive). `groups:` has no memory model - it can't know which

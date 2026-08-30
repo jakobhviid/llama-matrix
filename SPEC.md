@@ -153,6 +153,7 @@ property of `(model, box)`, so they must not travel with the weights).
   "host_baseline": 4.2,       // GB host RAM held with nothing loaded (§7.4)
   "date": "2026-01-01",       // last sweep
   "additivity_check": { "combo": ["a","b","c"], "predicted": 73.15, "measured": 73.15, "error": 0.0 }
+                              // written by `validate` (§7.5); absent until it has run
 }
 ```
 
@@ -636,6 +637,34 @@ a wrong one. `build` says so rather than leaving "no host warnings" to be read a
 measurements; the host fit contains one declared term. Silently deleting packs on the
 strength of a stand-in for a flag the operator never set would be the wrong trade.
 Naming them with the arithmetic is not, and `exclude` is one setting away.
+
+### 7.5 Co-residency validation (does the sum hold?)
+
+Every footprint is measured **alone** and then summed. `validate` is the only step
+that tests whether that sum holds on a given box: it loads one declared combination
+for real and compares the settled occupancy against the prediction.
+
+It picks the **tightest** declared set naming more than one loadable model. That is
+the binding claim, everything smaller is implied by it, and loading it is not a risk
+the operator is not already taking, because llama-swap will load exactly that
+combination on demand. A single-model set proves nothing about additivity.
+
+The result goes to `_box.json` as `additivity_check`, with `error = measured -
+predicted`:
+
+- **Positive is the dangerous sign.** The models together hold more than their solo
+  footprints predicted (allocator fragmentation, a shared buffer, a per-process
+  driver reservation), so *every* declared combination sits closer to the ceiling
+  than the plan says. It is reported against `margin`, which is the slack that has to
+  absorb it, and flagged when it does not.
+- **Negative is free headroom.** They share something; the plan is conservative.
+
+`validate` requires the **live** config to declare the combination, since llama-swap
+evicts to satisfy each request and will not hold models it has not been told may
+co-reside. When part of the combination never becomes ready, those ids are reported
+as `absent` and **nothing is recorded**: a reading taken with a member missing is not
+a co-residency reading, and filing it as the additivity answer would claim more
+headroom than the box has.
 
 ## 8. Server control endpoints (llama-swap)
 

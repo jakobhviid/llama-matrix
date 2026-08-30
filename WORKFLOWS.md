@@ -95,6 +95,14 @@ llama-matrix build --apply --no-verify   # …or a pure backup-and-splice (no ne
   models out until you have.
 - `--apply` backs up `config.yaml`, splices on the generated marker, waits for the
   hot-reload, verifies, and rolls back on any anomaly.
+- **`validate` closes the loop.** Every footprint is measured alone and then summed;
+  this loads the tightest declared combination for real and compares the occupancy
+  against the prediction. Run it after `--apply`, because llama-swap will not hold
+  models co-resident unless the live config declares them (if it will not, `validate`
+  reports which ones never became ready and records nothing). A **positive** error is
+  the one that matters: the models together hold more than their solo footprints
+  predicted, so every declared combination is closer to the ceiling than the plan
+  says. It is reported against `margin`, which is what has to absorb it.
 
 Add `--json` to any step to capture structured output for an agent to inspect and
 feed to the next.
@@ -240,6 +248,7 @@ llama-matrix setup --config "$CFG" --endpoint "$EP" --json
 llama-matrix measure --json                 # inspect: any FAILED models?
 llama-matrix build --json                    # inspect: overflow warnings? every set fits?
 llama-matrix build --apply --json            # splice + verify; check the verify result
+llama-matrix validate --json                 # inspect: `error` positive and > margin?
 ```
 
 Each step's `--json` is designed to be inspected and gated on before the next: a

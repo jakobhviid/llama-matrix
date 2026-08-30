@@ -102,6 +102,20 @@ enum Cmd {
     },
     /// Show what's out of sync: current config's matrix vs what build would emit.
     Drift,
+    /// Load the tightest declared combination and check it really fits (GPU-touching).
+    ///
+    /// Every footprint is measured alone and then summed. This is the step that tests
+    /// whether that sum holds: it loads one declared set for real and compares the
+    /// occupancy against the prediction. Requires the live config to declare the
+    /// combination, so run it after `build --apply`.
+    Validate {
+        /// llama-swap config.yaml (default: from llama-matrix.toml / discovery).
+        #[arg(long)]
+        config: Option<String>,
+        /// llama-swap base URL (default: from config, else http://localhost:8080).
+        #[arg(long)]
+        endpoint: Option<String>,
+    },
     /// Provision llama-matrix.toml (find config + endpoint, detect the budget).
     Setup {
         /// llama-swap config.yaml to use (skips discovery).
@@ -237,6 +251,7 @@ fn run(cli: Cli) -> Result<()> {
         }) => cmd_measure(config, endpoint, force, only, json)?,
         Some(Cmd::Setup { config, endpoint }) => cmd_setup(config, endpoint, json)?,
         Some(Cmd::Drift) => cmd_drift(json)?,
+        Some(Cmd::Validate { config, endpoint }) => cmd_validate(config, endpoint, json)?,
         Some(Cmd::Prune { yes }) => cmd_prune(yes, json)?,
     }
     Ok(())
@@ -380,6 +395,99 @@ fn cmd_drift(json: bool) -> Result<()> {
 }
 
 /// `setup` - provision llama-matrix.toml (discover config + endpoint, probe budget).
+/// `validate` - load one declared combination and see whether it really fits.
+fn cmd_validate(config: Option<String>, endpoint: Option<String>, json: bool) -> Result<()> {
+    use llama_matrix_core::measure::{
+        validate, MeasureOptions, Progress, DEFAULT_LOAD_TIMEOUT, DEFAULT_TRIGGER_TIMEOUT,
+    };
+
+    let policy = Policy::load(PathBuf::from("llama-matrix.toml"))?;
+    let config_dir = std::env::current_dir()?;
+    let config_path = config
+        .or_else(|| policy.config.clone())
+        .unwrap_or_else(|| "config.yaml".to_string());
+    let parsed = ls_config::parse_file(&config_path)?;
+    let store = open_store(&config_dir, json)?;
+    let plan = build::resolve_plan(&config_path, &policy, None, &store)?;
+
+    let options = MeasureOptions {
+        endpoint: endpoint.unwrap_or_else(|| policy.endpoint.clone()),
+        force: false,
+        only: None,
+        load_timeout: DEFAULT_LOAD_TIMEOUT,
+        trigger_timeout: DEFAULT_TRIGGER_TIMEOUT,
+        probe_image_size: policy.probe_image_size.clone(),
+    };
+    let show_progress = |progress: Progress| {
+        if json {
+            return;
+        }
+        if let Progress::Loading { index, total, id } = progress {
+            ui::info(&format!("[{index}/{total}] loading {id} …"));
+        }
+    };
+
+    let Some(result) = validate(&plan, &parsed.models, &store, &options, &show_progress)? else {
+        if json {
+            println!("{}", serde_json::to_string(&report::Status { status: "nothing-to-validate" })?);
+        } else {
+            ui::warn(
+                "no declared set names more than one loadable model, so there is no co-residency \
+                 claim to test",
+            );
+        }
+        return Ok(());
+    };
+
+    if json {
+        println!("{}", serde_json::to_string(&result)?);
+        return Ok(());
+    }
+
+    if !result.absent.is_empty() {
+        ui::alert(&format!(
+            "llama-swap did not hold `{}` co-resident: {} never became ready. Nothing recorded - \
+             a reading taken with part of the combination missing is not a co-residency reading. \
+             The live config most likely does not declare this set; run `llama-matrix drift`, \
+             then `build --apply`",
+            result.set,
+            result.absent.join(", ")
+        ));
+        return Ok(());
+    }
+
+    let headline = format!(
+        "`{}` ({} models): predicted {:.2} GB, measured {:.2} GB, error {:+.2} GB",
+        result.set,
+        result.combo.len(),
+        result.predicted,
+        result.measured,
+        result.error
+    );
+    // Only a POSITIVE error is a problem: the models together hold more than their
+    // solo footprints predicted, so every declared combination sits closer to the
+    // ceiling than the plan says. Negative means they share, which is free headroom.
+    if result.error > result.margin {
+        ui::alert(&headline);
+        ui::warn(&format!(
+            "the error exceeds the {:.1} GB margin, so the margin does not absorb it and a \
+             declared combination may not fit. Raise `margin` to at least {:.1} and rebuild",
+            result.margin,
+            (result.error * 2.0).max(result.margin)
+        ));
+    } else if result.error > 0.0 {
+        ui::ok(&headline);
+        ui::info(&format!(
+            "footprints are not quite additive on this box, by {:+.2} GB, which the {:.1} GB \
+             margin absorbs",
+            result.error, result.margin
+        ));
+    } else {
+        ui::ok(&headline);
+    }
+    Ok(())
+}
+
 fn cmd_setup(config: Option<String>, endpoint: Option<String>, json: bool) -> Result<()> {
     let file = PathBuf::from("llama-matrix.toml");
     let config_path = config.or_else(|| {

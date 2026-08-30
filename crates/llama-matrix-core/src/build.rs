@@ -420,6 +420,41 @@ fn sets_naming(sets: &[EmittedSet], ids: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// Every model id a set actually puts in memory, expanding its `+helper` references
+/// one level (`+aux`, `+g_<key>`).
+///
+/// A `|` alternative group contributes only its **first** member: llama-swap loads
+/// one of them, and the plan already sized the unit by the largest, so naming them
+/// all would ask for a combination that can never exist.
+pub fn set_member_ids(sets: &[EmittedSet], set: &EmittedSet) -> Vec<String> {
+    let mut ids: Vec<String> = Vec::new();
+    for term in terms(&set.expr) {
+        match term.strip_prefix('+') {
+            Some(helper) => {
+                if let Some(referenced) = sets.iter().find(|other| other.name == helper) {
+                    for inner in terms(&referenced.expr) {
+                        push_unique(&mut ids, inner.trim_start_matches('+'));
+                    }
+                }
+            }
+            None => push_unique(&mut ids, term),
+        }
+    }
+    ids
+}
+
+/// An expression's `&`-separated terms, each reduced to one id: the term itself, or
+/// the first alternative of a `(a | b)` group.
+fn terms(expr: &str) -> Vec<&str> {
+    expr.split('&').filter_map(|term| expr_tokens(term).next()).collect()
+}
+
+fn push_unique(ids: &mut Vec<String>, id: &str) {
+    if !id.is_empty() && !ids.iter().any(|seen| seen == id) {
+        ids.push(id.to_string());
+    }
+}
+
 /// A `-cram` value as the flag takes it: whole MiB, rounded DOWN to a multiple of
 /// 256 so the suggestion is a round number that is never larger than what fits.
 fn cram_mib(gb: f64) -> u64 {
@@ -1518,6 +1553,43 @@ mod tests {
             host,
         })
         .is_err());
+    }
+
+    /// A set's members are what it actually puts in memory: helper references
+    /// expanded, and exactly one member taken from each `(a | b)` group, because
+    /// llama-swap loads one of them and asking for both names a combination that can
+    /// never exist.
+    #[test]
+    fn a_sets_members_expand_helpers_and_pick_one_alternative() {
+        let set = |name: &str, expr: &str| EmittedSet {
+            name: name.to_string(),
+            expr: expr.to_string(),
+            comment: String::new(),
+            footprint: 0.0,
+            host_footprint: None,
+            host_assumed_caches: 0,
+            fanout: 1,
+        };
+        let sets = vec![
+            set("aux", "embed & rerank"),
+            set("g_gemma", "(gemma-q4 | gemma-q4-nothink)"),
+            set("pack1", "+g_gemma & coder-30b & +aux"),
+        ];
+        assert_eq!(
+            set_member_ids(&sets, &sets[2]),
+            vec![
+                "gemma-q4".to_string(),
+                "coder-30b".to_string(),
+                "embed".to_string(),
+                "rerank".to_string()
+            ]
+        );
+        // A set that names an alternative group directly, not through a helper.
+        assert_eq!(set_member_ids(&sets, &sets[1]), vec!["gemma-q4".to_string()]);
+        assert_eq!(
+            set_member_ids(&sets, &sets[0]),
+            vec!["embed".to_string(), "rerank".to_string()]
+        );
     }
 
     /// Pack order carries no meaning to llama-swap, so the only thing it has to be is

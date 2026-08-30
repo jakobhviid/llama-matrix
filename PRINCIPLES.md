@@ -88,7 +88,8 @@ Every boundary condition surfaces:
 
 ## 8. Two phases, two side-effect profiles.
 
-`measure` is stateful, slow, and churns the live GPU (it evicts warm models).
+`measure` is stateful, slow, and churns the live GPU (it evicts warm models), and so
+is `validate`, which shares its guarantees (lockfile, one loader at a time).
 `build` is pure, fast, and safe to run anytime. They are separate subcommands with
 separate guarantees, and the incremental measurement cache means a full sweep is
 rare. Never entangle them.
