@@ -120,16 +120,22 @@ For each model in the config worklist:
    small epsilon (KV and compute buffers finish allocating *after* `ready`). Still
    moving when sampling stops is also recorded as unconfirmed, rather than returned
    as though it had settled.
-7. Record the delta over baseline and the load time, plus the VRAM/GTT split when
-   the backend separates pools (AMD sysfs; a unified or single-pool device omits it
-   rather than recording zeros), the allocation peak, whether allocation and serving
-   were confirmed, and the total size of the weight files the command names.
-8. Unload (all, or `POST /api/models/unload/:model_id` for just this one).
+7. **Check who else is in the pool.** A model that *arrived* during the window put
+   its memory in this delta, which is recorded as `contended`; one that *left* was
+   subtracted from the reading and is not in it, which makes the delta short and
+   fails the model outright. The two are not the same risk (SPEC §7.3).
+8. Record the delta over this model's baseline and the load time, plus the VRAM/GTT
+   split when the backend separates pools (AMD sysfs; a unified or single-pool
+   device omits it rather than recording zeros), the host-RAM delta, the allocation
+   peak, whether allocation and serving were confirmed, and the total size of the
+   weight files the command names.
 
-Then an **additivity check**: load a real co-resident combo, compare the measured
-total to `baseline + Σ(solo deltas)`. Footprints are additive to within a small
-error empirically, which is what makes the knapsack valid; the residual sizes the
-safety margin.
+The pool is cleared at the top of the *next* model's window rather than at the end of
+this one, so the unload and the baseline reading it has to precede cannot drift apart;
+a final clear leaves the box as the sweep found it.
+
+Whether those solo deltas actually **sum** is a separate question, and a separate
+verb: see §4.3a.
 
 Guards: a **pid lockfile** (two concurrent sweeps share the unload primitive and
 corrupt each other's readings); a **pre-check** that the weight file exists (a

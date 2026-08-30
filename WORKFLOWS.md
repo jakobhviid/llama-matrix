@@ -14,7 +14,9 @@ Compiled into `--llm`.
   physically fits (never OOM) while allowing as many concurrent models as fit.
 - **Two phases.** `measure` loads each model alone and records its footprint
   (GPU-touching, slow, cached). `build` is pure math over those footprints and
-  emits/splices the block (fast, safe anytime).
+  emits/splices the block (fast, safe anytime). `validate` belongs to the first
+  phase: it loads a whole declared combination and checks that the footprints really
+  sum, so it evicts your warm models the same way a sweep does.
 - **What llama-matrix touches.** Your llama-swap `config.yaml` (the roster -
   llama-matrix reads it, and only ever rewrites the generated block). A
   `measurements/` directory (one small JSON per model, the per-box cache
@@ -49,7 +51,7 @@ llama-matrix configure set budget 50
 
 ---
 
-## Loop 1 - The core lifecycle (measure → build → apply)
+## Loop 1 - The core lifecycle (measure → build → apply → validate)
 
 The loop you run whenever the roster or a model's memory settings change:
 
@@ -59,11 +61,12 @@ llama-matrix build                   # preview the generated matrix block (print
 llama-matrix build --out matrix.yaml # …or write it to a file instead of stdout
 llama-matrix build --apply           # …or splice into config.yaml (backup + liveness check + rollback)
 llama-matrix build --apply --no-verify   # …or a pure backup-and-splice (no network round-trip)
+llama-matrix validate                # …then load the tightest declared combo: does the sum hold?
 ```
 
 - `measure` is **incremental** - a model whose footprint-affecting flags are
   unchanged is a cache hit and is skipped. A first/full sweep loads every model
-  (minutes); subsequent runs usually load nothing but the additivity combo. One
+  (minutes); subsequent runs usually load nothing at all. One
   exception: an entry whose allocation was never **confirmed** is re-measured rather
   than reused. A store holding no confirmations therefore sweeps in full (budget the
   time for it); one holding them re-loads only what is suspect.
@@ -86,8 +89,9 @@ llama-matrix build --apply --no-verify   # …or a pure backup-and-splice (no ne
   emitted; set `on_host_overflow = "exclude"` to leave it out). The dominant term is
   llama.cpp's host-side prompt cache, 8192 MiB per llama-server whether or not `-cram`
   appears in the command, so bounding it with `-cram <MiB>` is usually what turns a
-  warning off. A store with no `d_host` gets no host check and says so; re-measure to
-  enable it.
+  warning off - and the warning names the largest value that would, so there is
+  nothing to compute. A store with no `d_host` gets no host check and says so;
+  re-measure to enable it.
 - `build` selects each model's *current-config* footprint, collapses variants,
   runs the knapsack, and emits the block. Always preview before `--apply`. If the
   header carries an *unconfirmed footprint* warning, the sets it names are the ones
