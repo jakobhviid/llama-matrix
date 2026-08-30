@@ -1387,9 +1387,11 @@ pub struct Validation {
     pub ceiling: f64,
     /// The safety margin, which is what an error this size eats into.
     pub margin: f64,
-    /// Models the combination named that llama-swap did not have resident when the
-    /// reading was taken. Non-empty means the number below is not a co-residency
-    /// measurement at all, and nothing is recorded.
+    /// Models the combination named that were not resident *and* finished allocating
+    /// when the reading was taken. Non-empty means the number above is not a
+    /// co-residency measurement at all, and nothing is recorded: a missing member
+    /// makes the total look small, and small reads as "additive, plenty of headroom",
+    /// which is the reassuring direction and the wrong one.
     pub absent: Vec<String>,
 }
 
@@ -1458,17 +1460,30 @@ pub fn validate(
     }
     // Every trigger has to finish before the reading, for the same reason a solo
     // measurement waits for one: a lazily-allocating backend is `ready` long before
-    // its weights are resident.
-    for trigger in &fired {
-        await_allocation(trigger, gpu.as_ref(), options.trigger_timeout);
+    // its weights are resident. Here it matters even more than there, because a model
+    // that has not finished allocating makes the total look SMALL, and small reads as
+    // "additive, plenty of headroom" - the reassuring direction, and the wrong one.
+    let mut incomplete: Vec<String> = Vec::new();
+    for (trigger, id) in fired.iter().zip(&combo) {
+        if !matches!(
+            await_allocation(trigger, gpu.as_ref(), options.trigger_timeout),
+            Allocation::Confirmed { .. }
+        ) {
+            incomplete.push(id.clone());
+        }
     }
 
     let resident = running(&agent, &options.endpoint);
-    let absent: Vec<String> = combo
+    let mut absent: Vec<String> = combo
         .iter()
         .filter(|id| resident.get(id.as_str()).map(|entry| entry.state.as_str()) != Some("ready"))
         .cloned()
         .collect();
+    for id in incomplete {
+        if !absent.contains(&id) {
+            absent.push(id);
+        }
+    }
     let settled = stabilize(
         gpu.as_ref(),
         STABILIZE_MAX_WAIT,

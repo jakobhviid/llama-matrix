@@ -446,10 +446,11 @@ fn cmd_validate(config: Option<String>, endpoint: Option<String>, json: bool) ->
 
     if !result.absent.is_empty() {
         ui::alert(&format!(
-            "llama-swap did not hold `{}` co-resident: {} never became ready. Nothing recorded - \
-             a reading taken with part of the combination missing is not a co-residency reading. \
-             The live config most likely does not declare this set; run `llama-matrix drift`, \
-             then `build --apply`",
+            "`{}` was not fully resident and allocated when the reading was taken: {}. Nothing \
+             recorded - a reading missing part of the combination reads as extra headroom, which \
+             is the reassuring direction and the wrong one. Either the live config does not \
+             declare this set (run `llama-matrix drift`, then `build --apply`), or a model did \
+             not finish loading",
             result.set,
             result.absent.join(", ")
         ));

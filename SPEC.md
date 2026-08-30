@@ -668,10 +668,11 @@ correction to apply behind their back.
 
 `validate` requires the **live** config to declare the combination, since llama-swap
 evicts to satisfy each request and will not hold models it has not been told may
-co-reside. When part of the combination never becomes ready, those ids are reported
-as `absent` and **nothing is recorded**: a reading taken with a member missing is not
-a co-residency reading, and filing it as the additivity answer would claim more
-headroom than the box has.
+co-reside. Every member also has to finish allocating, on the same evidence §7.2
+demands of a solo measurement. A member that is missing on either count is reported
+in `absent` and **nothing is recorded**, because the failure is asymmetric: a missing
+member makes the total look small, small reads as "additive, plenty of headroom", and
+that is the reassuring direction and the wrong one.
 
 ## 8. Server control endpoints (llama-swap)
 
