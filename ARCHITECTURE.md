@@ -285,6 +285,18 @@ breaks the remaining ties. Comparing raw sums let two packs whose totals differe
 hundredths of a GB trade places on a re-measure, which renamed both and made `drift`
 report an out-of-sync matrix that was in fact identical.
 
+A pack is maximal in **LLM units**, which does not mean the ceiling is full: two
+20 GB models on a 100 GB box leave room for an image server. The images that fit go
+into the pack's own expression, smallest first, because llama-swap treats any subset
+of a declared set as valid - `a & b & img` licenses `a & b` too, so this costs no
+extra set and no extra fan-out (an image is a single id, never an alternative group).
+They take the headroom the LLM knapsack left rather than competing for it, so this
+will not trade an LLM away to fit two images; that is the joint enumeration on the
+roadmap.
+
+A set whose expression duplicates one already emitted is dropped, unless another set
+references it by `+name`.
+
 ### 4.3a Validation: does the sum hold?
 
 The fit predicate adds solo footprints. `validate` is the only step that checks that

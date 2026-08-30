@@ -305,7 +305,7 @@ capped at 1000 combinations per expression** - the product of that expression's
 
 | `g_<name>` helper | `(q4 \| q6 \| q8)` | a logical model's quant alternatives (`\|`), referenced by `+g_<name>` - emitted **only** for a model with more than one variant |
 | `images` | `img1 & img2 & +aux` | all image models co-resident (`&`), any subset valid |
-| `pack<N>` | `single-a & +g_multi-b & +aux` | a maximal fitting combination of logical models |
+| `pack<N>` | `single-a & +g_multi-b & img1 & +aux` | a maximal fitting combination of logical models, plus any images that fit in what they leave |
 | `llmimg_<id>` | `+g_a & img1 & img2 & +aux` | one logical model + the largest fitting image subset |
 | `heavy_<id>` | `(q4 \| q6) & img1 & +aux` | a heavy unit alone + any images that still fit |
 
@@ -315,7 +315,8 @@ capped at 1000 combinations per expression** - the product of that expression's
 referenced by `+aux` (omitted entirely when there are no aux models). Quant slots
 and mutually-exclusive units → `|`; co-resident pools (images, multi-unit packs) →
 `&`. Every emitted set satisfies `baseline + Σ(members at max quant) + aux_cost ≤
-ceiling` (Architecture §4.6) or the build fails. (llama-matrix emits no `vars:`, see §3
+ceiling` (Architecture §4.6) or the build fails. A set whose expression duplicates one
+already emitted is dropped, unless another set references it by `+name`. (llama-matrix emits no `vars:`, see §3
 above; the `<name>` here are the model ids themselves.)
 
 ### 3.2 The generated marker

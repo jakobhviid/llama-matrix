@@ -922,27 +922,56 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
         }
     };
 
-    // packs
+    // packs, each carrying whatever images still fit beside it
+    //
+    // A pack is maximal in *LLM units*, which does not mean the ceiling is full: a
+    // pack of two 20 GB models on a 100 GB box has room for an image server, and
+    // until this the matrix declared no combination that held both. Because
+    // llama-swap treats any subset of a declared set as valid, the images go into
+    // the pack's own expression rather than into a set of their own: declaring
+    // `a & b & img` licenses `a & b` too, so this costs no extra sets and no extra
+    // fan-out (an image is a single id, never an alternative group).
+    //
+    // Deliberately the cheap version of the general problem. The images take the
+    // headroom the LLM knapsack left, smallest first; they are not knapsacked
+    // jointly with the LLM units, so this will not trade an LLM away to fit two
+    // images. That trade needs the union enumeration on the roadmap; this captures
+    // the case it exists for at no cost.
     for (position, pack) in packs.iter().enumerate() {
         let unit_indices: Vec<usize> = pack.iter().map(|&light_position| light_indices[light_position]).collect();
         let references: Vec<String> = unit_indices.iter().map(|&index| unit_reference(index)).collect();
-        let expr = format!("{}{aux_ref}", references.join(" & "));
         let members_total: f64 = unit_indices.iter().map(|&index| units[index].size).sum();
         let members_host: f64 =
             unit_indices.iter().map(|&index| units[index].host_size.unwrap_or(0.0)).sum();
+        let riding = images_fitting(ceiling - baseline - members_total - aux_cost);
+        let images_suffix = riding
+            .iter()
+            .map(|model| format!(" & {}", model.id))
+            .collect::<Vec<_>>()
+            .concat();
+        let expr = format!("{}{images_suffix}{aux_ref}", references.join(" & "));
+        let images_total: f64 = riding.iter().map(|model| model.d_total).sum();
         let fanout: usize = unit_indices.iter().map(|&index| units[index].fanout()).product();
         let names: Vec<&str> = unit_indices.iter().map(|&index| units[index].key.as_str()).collect();
+        let footprint = baseline + members_total + aux_cost + images_total;
+        let images_note = match riding.len() {
+            0 => String::new(),
+            count => format!(" + {count} imgs"),
+        };
         sets.push(EmittedSet {
             name: format!("pack{}", position + 1),
             expr,
-            comment: format!("{:.1} GB: {}", baseline + members_total + aux_cost, names.join("+")),
-            footprint: baseline + members_total + aux_cost,
-            host_footprint: host_footprint(members_host + aux_host),
+            comment: format!("{footprint:.1} GB: {}{images_note}", names.join("+")),
+            footprint,
+            host_footprint: host_footprint(
+                members_host + aux_host + riding.iter().map(|model| host_of(model)).sum::<f64>(),
+            ),
             host_assumed_caches: unit_indices
                 .iter()
                 .map(|&index| units[index].assumed_caches)
                 .sum::<usize>()
-                + aux_caches,
+                + aux_caches
+                + caches_of(&riding),
             fanout,
         });
     }
@@ -1084,6 +1113,20 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
             );
         }
     }
+
+    // ---- drop sets that declare the same thing twice ----
+    // Now that a pack carries the images that fit beside it, a single-unit pack can
+    // come out identical to that unit's `llmimg_` set. Two names for one combination
+    // is not wrong, but it is a line of config that says nothing and it counts
+    // against the emitted set budget. A set another set references by `+name` is
+    // never dropped, whatever its expression, or the block would dangle.
+    let referenced: BTreeSet<String> = sets
+        .iter()
+        .flat_map(|set| expr_tokens(&set.expr).filter_map(|token| token.strip_prefix('+')))
+        .map(str::to_string)
+        .collect();
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    sets.retain(|set| referenced.contains(&set.name) || seen.insert(set.expr.clone()));
 
     // ---- guard 2: the 1000-combination cap (Principle #7 - never emit invalid) ----
     // `error` refuses; `group` OMITS the over-cap set (a safe under-declaration -
@@ -1580,6 +1623,85 @@ mod tests {
             host,
         })
         .is_err());
+    }
+
+    /// A pack is maximal in LLM units, which does not mean the ceiling is full. An
+    /// image server that fits beside it rides in the pack's own expression, because
+    /// llama-swap treats any subset of a declared set as valid: `a & b & img`
+    /// licenses `a & b` too, so it costs no extra set and no extra fan-out.
+    #[test]
+    fn images_ride_along_in_a_packs_leftover_headroom() {
+        let models = vec![
+            footprint("small-a", ModelType::Llm, Some("/sa.gguf"), 20.0),
+            footprint("small-b", ModelType::Llm, Some("/sb.gguf"), 25.0),
+            footprint("img", ModelType::Image, Some("/img.gguf"), 4.0),
+        ];
+        let mut policy = budgeted(OnUnconfirmed::Warn);
+        policy.margin = 4.0;
+
+        // 60 GB budget: 20 + 25 + 4 = 49 fits under the 56 GB ceiling, so the image
+        // belongs in the pack.
+        let roomy = build(&BuildInput {
+            models: &models,
+            policy: &policy,
+            baseline: 0.16,
+            budget: 60.0,
+            host: None,
+        })
+        .unwrap();
+        let pack = roomy.sets.iter().find(|set| set.name == "pack1").expect("a pack");
+        assert!(pack.expr.contains("small-a"), "{}", pack.expr);
+        assert!(pack.expr.contains("small-b"), "{}", pack.expr);
+        assert!(pack.expr.contains("img"), "{}", pack.expr);
+        assert!((pack.footprint - (0.16 + 49.0)).abs() < 0.01, "{}", pack.footprint);
+        // The image adds one id, never an alternative, so nothing multiplies.
+        assert_eq!(pack.fanout, 1);
+
+        // 50 GB budget: the two LLMs alone are 45 against a 46 GB ceiling, so there
+        // is no room and the pack must not claim any.
+        let tight = build(&BuildInput {
+            models: &models,
+            policy: &policy,
+            baseline: 0.16,
+            budget: 50.0,
+            host: None,
+        })
+        .unwrap();
+        let pack = tight.sets.iter().find(|set| set.name == "pack1").expect("a pack");
+        assert!(!pack.expr.contains("img"), "{}", pack.expr);
+
+        // Every emitted set still fits, images and all.
+        for plan in [&roomy, &tight] {
+            for set in &plan.sets {
+                assert!(
+                    set.footprint <= plan.ceiling + 1e-9,
+                    "set `{}` is {:.2} GB over the {:.2} GB ceiling",
+                    set.name,
+                    set.footprint,
+                    plan.ceiling
+                );
+            }
+        }
+    }
+
+    /// Two names for one combination is a line of config that says nothing. A set
+    /// another set references by `+name` is never dropped, whatever its expression.
+    #[test]
+    fn a_duplicate_expression_is_emitted_once() {
+        let plan = build(&BuildInput {
+            models: &scenario(),
+            policy: &budgeted(OnUnconfirmed::Warn),
+            baseline: 0.16,
+            budget: 111.5,
+            host: None,
+        })
+        .unwrap();
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for set in &plan.sets {
+            assert!(seen.insert(set.expr.as_str()), "`{}` repeats `{}`", set.name, set.expr);
+        }
+        // The helper everything else references is still there to reference.
+        assert!(plan.sets.iter().any(|set| set.name == "aux"), "lost the aux helper");
     }
 
     /// The build heeds what `validate` recorded. An error the margin cannot absorb

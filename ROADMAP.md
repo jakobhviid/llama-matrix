@@ -26,8 +26,13 @@ Roughly in order of value-to-effort:
 1. **Actual-quant sizing.** Size each quant by its own measured footprint instead of
    the logical model's largest, unlocking combos a max-quant unit conservatively
    forbids. Cost: more sets - mind the combo cap.
-2. **Richer combos.** Enumerate maximal groups over the *union* of LLM units and
-   images (e.g. "2 LLMs + an image"), not just LLM-packs or single-LLM-plus-images.
+2. **Richer combos: knapsack LLM units and images together.** A pack now carries the
+   images that fit in the headroom its LLM units left, which covers "2 LLMs + an
+   image" at no cost in sets or fan-out. What is still missing is the *joint*
+   enumeration: the images take what the LLM knapsack left rather than competing for
+   it, so the builder will never trade an LLM away to fit two image servers. That
+   needs maximal groups over the union of both, and a careful look at the combination
+   count it produces.
 3. **Configurable model-type detection.** Today `type` is inferred from the launch
    command (binary + flags: `sd-server` → image, `whisper-server` → stt,
    `--embedding`/`--reranking` → embed/rerank, else llm). Let operators **override
