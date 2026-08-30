@@ -1,4 +1,4 @@
-# ROADMAP.md — where llama-matrix is going
+# ROADMAP.md - where llama-matrix is going
 
 What v1.0 ships and the deliberately-deferred work after it. The v1 build is
 intentionally conservative: it never OOMs, at the cost of leaving some headroom on
@@ -7,16 +7,16 @@ into `--llm`.
 
 ## v1.0 scope
 
-- **measure** — solo-footprint sweep into the per-model, per-box measurement store,
+- **measure** - solo-footprint sweep into the per-model, per-box measurement store,
   incremental by param-hash, lockfile-guarded, with failure classification.
-- **build** — variant-collapse, the `flat` (max-flexibility) strategy, the knapsack,
+- **build** - variant-collapse, the `flat` (max-flexibility) strategy, the knapsack,
   heavy classification, DSL emission, and the 1000-combination guard.
-- **apply** — backup → marker-anchored splice → hot-reload wait → verify → rollback.
-- **platforms** — AMD sysfs and NVIDIA memory backends; `--budget` makes `build`
+- **apply** - backup → marker-anchored splice → hot-reload wait → verify → rollback.
+- **platforms** - AMD sysfs and NVIDIA memory backends; `--budget` makes `build`
   work with no sensor.
-- **config** — `llama-matrix.toml` with the `configure` scalar surface, `setup`
+- **config** - `llama-matrix.toml` with the `configure` scalar surface, `setup`
   provisioning, and the `--json` / `--llm` / completions / man surfaces.
-- **regression** — reproduce the reference fixtures (a known measurements set →
+- **regression** - reproduce the reference fixtures (a known measurements set →
   its expected matrix block, and a tighter second budget).
 
 ## After v1.0
@@ -25,13 +25,13 @@ Roughly in order of value-to-effort:
 
 1. **Actual-quant sizing.** Size each quant by its own measured footprint instead of
    the logical model's largest, unlocking combos a max-quant unit conservatively
-   forbids. Cost: more sets — mind the combo cap.
+   forbids. Cost: more sets - mind the combo cap.
 2. **Richer combos.** Enumerate maximal groups over the *union* of LLM units and
    images (e.g. "2 LLMs + an image"), not just LLM-packs or single-LLM-plus-images.
 3. **Configurable model-type detection.** Today `type` is inferred from the launch
    command (binary + flags: `sd-server` → image, `whisper-server` → stt,
    `--embedding`/`--reranking` → embed/rerank, else llm). Let operators **override
-   it in settings** — a per-id `type` map (and/or custom binary→type rules) — so an
+   it in settings**, via a per-id `type` map (and/or custom binary→type rules), so an
    unusual image/STT/rerank backend classifies correctly instead of falling back to
    `llm`. Deferred; not worked on now.
 4. **Auto-group detection.** Derive candidate `[groups]` by normalizing ids
@@ -61,11 +61,11 @@ Roughly in order of value-to-effort:
     available. (Apple Silicon via Metal unified memory has shipped: `total` from
     `hw.memsize`, `used` from the `ioreg` IOAccelerator counter.)
 11. **Multi-GPU / multi-node.** A single unified pool today; discrete or multi-GPU
-    makes the knapsack multi-dimensional (per-device budgets) — the Multi-Choice
+    makes the knapsack multi-dimensional (per-device budgets) - the Multi-Choice
     Multi-Dimensional Knapsack. A larger change to the fit predicate and emission.
 12. **Readable output (short vars / set names).** Mint the reserved `vars` aliases
     (and/or shorter set names) so the block reads `+g_gemma` rather than
-    `+g_gemma_4_26b_a4b_q4qat`. Cosmetic — full ids work as-is on llama-swap v243+.
+    `+g_gemma_4_26b_a4b_q4qat`. Cosmetic - full ids work as-is on llama-swap v243+.
 13. **Per-pool VRAM/GTT split beyond AMD.** Shipped for AMD `amdgpu` sysfs
     (`GpuMemory::used_split_gb`, which reads both counters it already sums); NVIDIA
     and Apple Silicon report no split, and omit the fields rather than writing zeros.
@@ -80,12 +80,6 @@ Alignment work against the house guidelines (rust-cli-guidelines) that is deferr
 not skipped. These are style and ops items, separate from the product roadmap
 above; each notes why it is not yet done.
 
-- **Purge em-dashes from the docs and comments.** The "No em-dashes" rule
-  (AGENTS.md, CLAUDE.md) is now stated, but text written before it still carries
-  roughly 260 em-dashes across the docs and Rust comments. Do one careful,
-  judgment-based pass (each em-dash becomes a hyphen, comma, colon, parentheses, or
-  a rewrite, never a blanket replace that harms readability). En-dashes in ranges
-  stay.
 - **Supply-chain gate (`deny.toml` + a CI `deny` job).** Add a cargo-deny check for
   licenses and sources (crates.io only), following dotsync. Note the difference:
   llama-matrix does network (HTTP to llama-swap), so it does not ban the TLS/crypto
@@ -101,11 +95,11 @@ above; each notes why it is not yet done.
 
 ## Premise risk (track this)
 
-llama-swap is very actively developed — the matrix engine changed across multiple
+llama-swap is very actively developed - the matrix engine changed across multiple
 releases in a single week around our reference point. The tool's premise is that the
 solver has **no memory awareness**; that holds today (the config schema has no
 memory/budget keys). If upstream ever adds VRAM auto-detection or a memory-aware
-solver, llama-matrix's **build** half could become redundant — but the **measure**
+solver, llama-matrix's **build** half could become redundant - but the **measure**
 half (real per-model footprints + a fit-proof) keeps standalone value regardless.
 Mitigation: pin and test against a known llama-swap version range, and watch
 releases + the Groups-V2 discussion for memory-awareness landing.

@@ -1,4 +1,4 @@
-//! Phase 1 — the solo-footprint sweep. Loads each model alone, reads real GPU
+//! Phase 1 - the solo-footprint sweep. Loads each model alone, reads real GPU
 //! occupancy after allocation stabilizes, and records the delta over an empty
 //! baseline into the per-model store, keyed by param-hash. GPU-touching, slow,
 //! and lockfile-guarded. See ARCHITECTURE.md §2.1.
@@ -853,7 +853,7 @@ fn store_measurement(store: &Store, record: &ModelRecord, measurement: Measureme
     store.write_model(&record.id, &model_store)
 }
 
-/// Run the sweep. Detects the GPU (errors if none — measure needs a sensor).
+/// Run the sweep. Detects the GPU (errors if none - measure needs a sensor).
 ///
 /// `progress` is called as each model starts and finishes; pass `&|_| {}` to ignore
 /// it. See [`Progress`] for why the core reports rather than prints.

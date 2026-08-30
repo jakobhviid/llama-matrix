@@ -1,9 +1,9 @@
-//! The `llama-matrix configure` surface — a small, validated set of *scalar*
+//! The `llama-matrix configure` surface - a small, validated set of *scalar*
 //! settings in `llama-matrix.toml`, exposed as get/set/unset/list/keys so they're
 //! discoverable (and shell-completable) instead of hand-edited guesswork.
 //!
 //! Only scalars live here; structured tables (`[paths]`, `[roles]`, `[groups]`)
-//! stay hand-edited. `SETTINGS` is the single source of truth — it drives
+//! stay hand-edited. `SETTINGS` is the single source of truth - it drives
 //! validation, `list`, `keys`, and completion. Writes are comment-preserving
 //! (`toml_edit`), so hand-written comments and structured tables survive.
 
@@ -11,7 +11,7 @@ use std::path::Path;
 
 use anyhow::{anyhow, bail, Context, Result};
 
-/// The value domain of a setting — decides how a value is parsed/validated.
+/// The value domain of a setting - decides how a value is parsed/validated.
 pub enum Kind {
     /// A free string (e.g. a URL).
     Str,
@@ -117,7 +117,7 @@ fn find(key: &str) -> Result<&'static Setting> {
     SETTINGS
         .iter()
         .find(|setting| setting.key == key)
-        .ok_or_else(|| anyhow!("unknown setting `{key}` — run `llama-matrix configure keys`"))
+        .ok_or_else(|| anyhow!("unknown setting `{key}` - run `llama-matrix configure keys`"))
 }
 
 /// Validate + normalize a value, returning its display form and the toml item.
@@ -191,7 +191,7 @@ pub fn get(file: &Path, key: &str) -> Result<String> {
     Ok(effective(&text, setting))
 }
 
-/// Every setting with its effective value — backs `list`.
+/// Every setting with its effective value - backs `list`.
 pub fn list(file: &Path) -> Vec<(&'static str, String)> {
     let text = std::fs::read_to_string(file).unwrap_or_default();
     SETTINGS

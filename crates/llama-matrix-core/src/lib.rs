@@ -1,9 +1,9 @@
-//! llama-matrix-core — the library behind the `llama-matrix` CLI.
+//! llama-matrix-core - the library behind the `llama-matrix` CLI.
 //!
 //! `llama-matrix` measures each of a llama-swap server's models' real GPU memory
 //! footprint, then builds a co-residency `matrix:` block declaring only the model
 //! combinations that provably fit under a budget. llama-swap's solver has no
-//! memory awareness — it trusts the declared combinations — so the generator only
+//! memory awareness - it trusts the declared combinations - so the generator only
 //! ever emits fitting ones (under-declaring is safe; over-declaring OOMs).
 //!
 //! Every capability lives here as a typed function; the `llama-matrix` binary is a

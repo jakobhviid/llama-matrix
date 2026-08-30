@@ -2,48 +2,48 @@
 
 Measure how much memory each of your [llama-swap](https://github.com/mostlygeek/llama-swap)
 models really uses, then generate a co-residency `matrix:` block that lets as many
-models run concurrently as physically fit — **without ever exceeding VRAM**.
+models run concurrently as physically fit - **without ever exceeding VRAM**.
 
 llama-swap can keep several models resident at once, but its solver has **no
 memory awareness**: it only trusts the combinations you declare in a `matrix:`
 block, and evicts to satisfy each request without checking free memory. Declare a
 combination that doesn't fit and you OOM; declare too few and you waste headroom.
-llama-matrix closes that gap — it **measures** each model's real footprint on your
+llama-matrix closes that gap - it **measures** each model's real footprint on your
 box, then **builds** the largest set of combinations that provably fit under a
 budget you control, and splices the result into your `config.yaml`.
 
 Two phases, two subcommands:
 
-- **`measure`** — load each model alone, read real GPU memory occupancy after it
+- **`measure`** - load each model alone, read real GPU memory occupancy after it
   stabilizes, and cache the footprint (keyed by the memory-affecting launch flags,
   so a non-memory config edit never forces a re-measure). Host RAM is read the same
   way, because a combination that fits the GPU can still exhaust the box.
-- **`build`** — a pure knapsack over your models that emits only combinations whose
+- **`build`** - a pure knapsack over your models that emits only combinations whose
   measured footprints sum under the ceiling, then (with `--apply`) splices the
   `matrix:` block into your `config.yaml`.
 
-**v1.0 — released.** Install below, then run `llama-matrix setup`.
+**v1.0 is released.** Install below, then run `llama-matrix setup`.
 
 ## Requirements
 
-- **A running llama-swap with the matrix engine** — upstream calls it Groups V2 /
+- **A running llama-swap with the matrix engine** - upstream calls it Groups V2 /
   Swap Matrix (merged in llama-swap PR #646). Quick check: load a config with a
   `matrix:` block; it should hot-reload with no "must use either groups or matrix"
   error.
-- **A GPU sensor for `measure`** — AMD (`amdgpu` sysfs), NVIDIA (`nvidia-smi`), or
+- **A GPU sensor for `measure`** - AMD (`amdgpu` sysfs), NVIDIA (`nvidia-smi`), or
   Apple Silicon (Metal unified memory, read via `ioreg`). `build` needs none: it
   works from an existing measurement store and a `--budget`.
 - **No** root, no compiler, and no particular process manager or container runtime.
 
 ## Works with any llama-swap setup
 
-llama-matrix is **general-purpose and deployment-agnostic** — for anyone running a
+llama-matrix is **general-purpose and deployment-agnostic** - for anyone running a
 llama-swap server with more models than fit in memory at once. It talks HTTP to your
 llama-swap at a configurable endpoint (default `http://localhost:8080`), reads your
 `config.yaml` wherever it lives, and auto-detects your GPU budget (AMD `amdgpu`,
 NVIDIA, or Apple Silicon unified memory; APU, discrete card, or Mac). It does
-**not** manage your service —
-it writes the config block and lets llama-swap hot-reload — and it assumes nothing
+**not** manage your service -
+it writes the config block and lets llama-swap hot-reload - and it assumes nothing
 about your process manager, container runtime, model roster, or backend mix. Nothing
 about any particular machine is baked in.
 
@@ -53,7 +53,7 @@ about any particular machine is baked in.
 # Homebrew (macOS + Linux):
 brew install jakobhviid/tap/llama-matrix
 
-# …or a prebuilt binary — no compiler, Homebrew, or root required:
+# …or a prebuilt binary - no compiler, Homebrew, or root required:
 curl -fsSL https://raw.githubusercontent.com/jakobhviid/llama-matrix/main/install.sh | sh
 
 # …or from source (needs a Rust toolchain):
@@ -70,7 +70,7 @@ llama-matrix build --out m.yaml   # …or write it to a file
 llama-matrix build --apply    # …or splice it into config.yaml, wait for reload, verify
 ```
 
-> `measure` talks to your **running** llama-swap and loads each model in turn — it
+> `measure` talks to your **running** llama-swap and loads each model in turn - it
 > evicts your warm models, and a first full sweep can take minutes. `build --apply`
 > itself only writes the config and does a **liveness check** (it never loads models
 > or touches the GPU); add `--no-verify` for a pure backup-and-splice with no network
@@ -85,7 +85,7 @@ llama-matrix build --budget 96          # or just for this run
 
 ## What it produces
 
-A `matrix:` block that llama-swap consumes — the maximal set of model combinations
+A `matrix:` block that llama-swap consumes - the maximal set of model combinations
 that fit under your budget. On a roster where a couple of coders + a general model +
 small aux services fit together, but a 122B model can't:
 
@@ -98,7 +98,7 @@ matrix:
     aux:    "embed & rerank & whisper"       # small services; ride along with every set
     pack1:  "gemma & glm-flash & +aux"       # three models co-resident, under budget
     pack2:  "coder-30b & gemma & +aux"
-    heavy_qwen122: "qwen122 & +aux"          # too big to share — runs alone (+ aux)
+    heavy_qwen122: "qwen122 & +aux"          # too big to share - runs alone (+ aux)
 ```
 
 **Terms:** an **aux** model is a small always-useful service reserved in every
@@ -108,7 +108,7 @@ llama-matrix may plan against and **margin** is safety slack (`ceiling = budget 
 margin`). (Interchangeable quant/`-nothink` variants of one model collapse into a
 `+g_<name>` "pick one" helper.) The payoff: instead of one model at a time,
 llama-swap keeps each declared combination resident and evicts only when an
-incompatible model is requested — never OOMing.
+incompatible model is requested - never OOMing.
 
 **Eviction costs** decide *which* model goes when something has to. The defaults rank
 by role (an image model is the cheapest thing to drop; a chat model outranks the whole
@@ -127,7 +127,7 @@ image pool), and you can retune a tier or pin a single model in `[evict_costs]`
 | `prune` | drop measurements whose weight files are gone (`--yes` to delete) |
 
 Every command takes `--json`, and `llama-matrix --llm` prints the full guide (every
-command plus the design) — readable by a human *or* an LLM/agent. See
+command plus the design) - readable by a human *or* an LLM/agent. See
 **`WORKFLOWS.md`** for the operating loops.
 
 ## How it works
@@ -144,7 +144,7 @@ occupancy to settle after each unload rather than trusting the proxy's bookkeepi
 reads each model's baseline immediately before it loads, and reports a reading another
 model could have contaminated. `build` collapses each model's
 interchangeable quant/`-nothink` variants into one unit, then finds every *maximal*
-combination that fits under `ceiling = budget − margin` — because llama-swap treats
+combination that fits under `ceiling = budget − margin` - because llama-swap treats
 any subset of a declared set as valid, declaring the maximal groups licenses all the
 smaller ones too. Each combination is totalled against **host RAM** as well, since
 llama.cpp holds a host-side prompt cache of 8192 MiB per server by default and four
@@ -155,19 +155,19 @@ config, splices on a generated marker, waits for the hot-reload, verifies, and r
 back on any anomaly.
 
 This targets llama-swap's `matrix:` engine, which replaces the legacy `groups:` one
-(the two are mutually exclusive). `groups:` has no memory model — it can't know which
-models physically fit together — and that's the gap llama-matrix fills.
+(the two are mutually exclusive). `groups:` has no memory model - it can't know which
+models physically fit together - and that's the gap llama-matrix fills.
 
 ## Documentation
 
-- **`ARCHITECTURE.md`** — the memory model, the two phases, the crate/module map.
-- **`SPEC.md`** — schemas of record: `llama-matrix.toml`, the measurement store, the
+- **`ARCHITECTURE.md`** - the memory model, the two phases, the crate/module map.
+- **`SPEC.md`** - schemas of record: `llama-matrix.toml`, the measurement store, the
   matrix DSL, the param-hash, config parsing.
-- **`WORKFLOWS.md`** — the operating loops (setup → measure → build → apply),
+- **`WORKFLOWS.md`** - the operating loops (setup → measure → build → apply),
   written to be driven by a human or an agent.
-- **`PRINCIPLES.md`** — the design rules (never OOM, measure reality, fail loud, …).
-- **`ROADMAP.md`** — v1.0 scope and deferred work.
-- **`ADOPT.md`** — behaviour changes an existing config must know about, and how
+- **`PRINCIPLES.md`** - the design rules (never OOM, measure reality, fail loud, …).
+- **`ROADMAP.md`** - v1.0 scope and deferred work.
+- **`ADOPT.md`** - behaviour changes an existing config must know about, and how
   to check whether one affects yours. Read before upgrading.
 
 All of the above are compiled into `llama-matrix --llm`.
@@ -177,7 +177,7 @@ All of the above are compiled into `llama-matrix --llm`.
 - v1 optimizes a **single** unified memory pool; multi-GPU / per-device budgets are
   on the roadmap.
 - A logical model (a model's quant variants collapsed into one unit) is sized by its
-  largest quant — safe, but slightly pessimistic; see the roadmap for actual-quant
+  largest quant - safe, but slightly pessimistic; see the roadmap for actual-quant
   sizing.
 - `measure` needs a supported GPU sensor (AMD sysfs, NVIDIA, or Apple Silicon via
   Metal unified memory); `build` works anywhere from an existing measurement store
@@ -202,7 +202,7 @@ All of the above are compiled into `llama-matrix --llm`.
 - Model **type** is inferred from the launch command (`sd-server` → image,
   `whisper-server` → stt, `--embedding`/`--reranking` → embed/rerank, else llm). An
   unusual backend binary falls back to `llm`; if its load-trigger then doesn't fit
-  it's recorded `FAILED` and excluded — never mis-measured. Overriding type in
+  it's recorded `FAILED` and excluded - never mis-measured. Overriding type in
   settings is on the roadmap.
 
 ## AI disclosure
@@ -213,4 +213,4 @@ single place that fact is disclosed; it is deliberately kept out of the commit h
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT - see [LICENSE](LICENSE).

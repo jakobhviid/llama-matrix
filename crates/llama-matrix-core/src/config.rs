@@ -2,7 +2,7 @@
 //!
 //! Order of operations matters (see SPEC.md §5): the `macros:` section and the
 //! reserved `${…}` substitutions are expanded **before** deriving type, primary
-//! file, or param-hash — hashing or stat-ing an unexpanded `${…}` placeholder is
+//! file, or param-hash - hashing or stat-ing an unexpanded `${…}` placeholder is
 //! a bug. A macro-free config expands to itself, so this is always safe.
 //!
 //! Unknown keys are tolerated (serde ignores them): llama-swap has many
@@ -67,7 +67,7 @@ pub fn parse_file(path: impl AsRef<Path>) -> Result<ParsedConfig> {
 }
 
 /// Collapse all whitespace (folded/literal YAML scalars, newlines) to single
-/// spaces and trim — the command becomes one shell line.
+/// spaces and trim - the command becomes one shell line.
 fn normalize_ws(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
@@ -76,7 +76,7 @@ fn normalize_ws(s: &str) -> String {
 ///
 /// Handles: user `${macro}` references (from the `macros:` map, recursively),
 /// `${env.VAR}` (from the process environment), and `${MODEL_ID}`. The runtime-
-/// assigned `${PORT}`/`${PID}` are left as-is — they only ever appear in
+/// assigned `${PORT}`/`${PID}` are left as-is - they only ever appear in
 /// footprint-irrelevant positions (stripped by the param-hash) and their real
 /// values aren't known outside a live launch.
 fn expand_macros(input: &str, macros: &IndexMap<String, String>, model_id: &str) -> String {
@@ -105,7 +105,7 @@ fn substitute_once(input: &str, macros: &IndexMap<String, String>, model_id: &st
             } else if let Some(value) = macros.get(key) {
                 value.clone()
             } else {
-                // PORT / PID / unknown — leave the placeholder untouched.
+                // PORT / PID / unknown - leave the placeholder untouched.
                 captures[0].to_string()
             }
         })

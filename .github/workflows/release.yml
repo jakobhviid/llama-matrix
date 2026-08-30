@@ -171,7 +171,7 @@ jobs:
           TAP_DEPLOY_KEY: ${{ secrets.TAP_DEPLOY_KEY }}
         run: |
           if [ -z "$TAP_DEPLOY_KEY" ]; then
-            echo "::warning::TAP_DEPLOY_KEY not set — built & released, but skipping the tap update."
+            echo "::warning::TAP_DEPLOY_KEY not set - built & released, but skipping the tap update."
             exit 0
           fi
           mkdir -p ~/.ssh

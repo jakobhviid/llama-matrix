@@ -1,8 +1,8 @@
-//! Phase 2 — build the co-residency plan from measured footprints (pure).
+//! Phase 2 - build the co-residency plan from measured footprints (pure).
 //!
 //! Policy = maximum flexibility, never OOM. Emit every maximal combination of
 //! models that genuinely fits under `ceiling = budget - margin`, and never one
-//! that doesn't (under-declaring is safe; over-declaring OOMs — Principle #1).
+//! that doesn't (under-declaring is safe; over-declaring OOMs - Principle #1).
 //!
 //! Pipeline: collapse interchangeable variants into logical units → assign roles
 //! (aux ride-alongs, image pool, llm knapsack subjects) → classify heavies →
@@ -39,7 +39,7 @@ pub struct ModelFootprint {
     pub model_type: ModelType,
     /// Weight path as written in the command (used to collapse same-file variants).
     pub primary_file: Option<String>,
-    /// GB delta over baseline — the footprint.
+    /// GB delta over baseline - the footprint.
     pub d_total: f64,
     /// GB of host RAM this model costs while resident: what it was measured to add
     /// (`d_host`), plus the prompt-cache cap its command declares or the policy
@@ -53,7 +53,7 @@ pub struct ModelFootprint {
 struct Unit {
     /// Display key (DSL-safe), e.g. the base id or a group name.
     key: String,
-    /// Member ids (quant/`-nothink` variants) — a `|` alternative group in the DSL.
+    /// Member ids (quant/`-nothink` variants) - a `|` alternative group in the DSL.
     ids: Vec<String>,
     /// Footprint = the largest member's `d_total` (so any quant mix fits).
     size: f64,
@@ -82,12 +82,12 @@ pub struct EmittedSet {
     pub name: String,
     pub expr: String,
     pub comment: String,
-    /// baseline + Σ members (at max quant) + aux_cost — must be ≤ ceiling.
+    /// baseline + Σ members (at max quant) + aux_cost - must be ≤ ceiling.
     pub footprint: f64,
     /// The same sum in host RAM: `host_baseline + Σ members + aux`. `None` when the
     /// host dimension is not being checked (see `MatrixPlan::host_ceiling`).
     pub host_footprint: Option<f64>,
-    /// Product of the expression's `|`-group sizes — must be ≤ 1000.
+    /// Product of the expression's `|`-group sizes - must be ≤ 1000.
     pub fanout: usize,
 }
 
@@ -470,15 +470,15 @@ fn apply_groups(units: Vec<Unit>, policy: &Policy) -> Vec<Unit> {
 
 /// Enumerate the **maximal** fitting packs of `sizes` directly: every subset whose
 /// total ≤ `limit` that no further unit can be added to without exceeding it.
-/// Emitting only maximal packs is sufficient — llama-swap treats any subset of a
-/// declared set as valid (ARCHITECTURE §4.3) — and recording maximality inline (an
+/// Emitting only maximal packs is sufficient - llama-swap treats any subset of a
+/// declared set as valid (ARCHITECTURE §4.3) - and recording maximality inline (an
 /// O(n) test per node) avoids the previous enumerate-all-subsets-then-filter pass,
 /// whose maximal filter was O(subsets²) and hung on a large light-unit roster.
 ///
 /// `node_budget` bounds the recursion and `results` is capped at `MAX_PACKS`:
 /// enumerating maximal packs is worst-case exponential, so if either limit is hit
 /// the walk stops and returns `false` (truncated). The packs collected so far are
-/// still valid and safe — a smaller declaration never OOMs (Principle #1) — and the
+/// still valid and safe - a smaller declaration never OOMs (Principle #1) - and the
 /// caller warns and applies `on_overflow`. Returns `true` iff the walk completed.
 fn enumerate_maximal_packs(
     start: usize,
@@ -496,7 +496,7 @@ fn enumerate_maximal_packs(
 
     // Maximal ⟺ no unit outside `chosen` still fits in the headroom. (A fitting
     // superset would add exactly such a unit, so "nothing addable" is precisely
-    // "no fitting superset" — the predicate the old O(subsets²) filter computed.)
+    // "no fitting superset" - the predicate the old O(subsets²) filter computed.)
     let nothing_addable = (0..sizes.len())
         .filter(|index| !chosen.contains(index))
         .all(|index| running_total + sizes[index] > limit);
@@ -549,11 +549,11 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
     // so a large-but-rarely-used embed/rerank model taxes every combination, and the
     // operator needs to be able to demote it to an ordinary evictable unit.
     //
-    // This was `override || derived` until 2026-08-28 — purely additive, so it could
+    // This was `override || derived` until 2026-08-28 - purely additive, so it could
     // only ever ADD a model to a pool and silently ignored any attempt to narrow one.
     // The docs advertise `[roles]` as an override, and AUX_EVICT_COST even reasons
     // about "the few cases where a `[roles]` override leaves an aux model out of some
-    // sets" — an outcome the additive form could never produce. Parsing was covered
+    // sets" - an outcome the additive form could never produce. Parsing was covered
     // by a test; the *effect* was not, which is how it shipped. See the tests below.
     //
     // Trade-off of authoritative-when-non-empty: a list written to PROMOTE one extra
@@ -594,7 +594,7 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
     let has_aux = !aux_models.is_empty();
     // The ` & +aux` suffix is only valid when an `aux` set is actually emitted;
     // with no aux models it must be omitted, or the block would reference an
-    // undefined `+aux` — an invalid config (Principle #7).
+    // undefined `+aux` - an invalid config (Principle #7).
     let aux_ref = if has_aux { " & +aux" } else { "" };
 
     // ---- logical units + heavy classification ----
@@ -676,13 +676,13 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
 
     // Enumeration overflow → fail over via the SAME `on_overflow` knob as the
     // 1000-combination cap: `group` (default) keeps the bounded packs and warns
-    // loudly to group the roster (a safe under-declaration — a smaller matrix never
+    // loudly to group the roster (a safe under-declaration - a smaller matrix never
     // OOMs, Principle #1); `error` refuses. Symmetric with guard 2 below.
     if enumeration_truncated {
         match policy.on_overflow {
             OnOverflow::Group => warnings.push(format!(
                 "the light-unit roster ({} units) produces too many co-residency combinations to \
-                 enumerate exhaustively — emitted {} maximal packs and stopped (a safe \
+                 enumerate exhaustively - emitted {} maximal packs and stopped (a safe \
                  under-declaration; a smaller matrix never OOMs). Reduce it with \
                  `strategy = \"family\"` + `[groups]`, or set `on_overflow = \"error\"` to refuse.",
                 light_indices.len(),
@@ -818,7 +818,7 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
         if baseline + unit.size > ceiling {
             excluded.extend(unit.ids.iter().cloned());
             warnings.push(format!(
-                "`{}` ({:.1} GB) exceeds the ceiling {:.1} GB — excluded (can't run)",
+                "`{}` ({:.1} GB) exceeds the ceiling {:.1} GB: excluded (can't run)",
                 unit.key, unit.size, ceiling
             ));
             continue;
@@ -838,7 +838,7 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
         // Only blame aux when aux actually exists but this heavy can't fit with it.
         if has_aux && !with_aux {
             warnings.push(format!(
-                "heavy `{}` is too large to co-reside with aux ({aux_cost:.1} GB) — it runs alone",
+                "heavy `{}` is too large to co-reside with aux ({aux_cost:.1} GB) - it runs alone",
                 unit.key
             ));
         }
@@ -902,11 +902,11 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
         ));
     }
 
-    // ---- guard 1: the fit invariant (Principle #1) — always fatal ----
+    // ---- guard 1: the fit invariant (Principle #1) - always fatal ----
     for set in &sets {
         if set.footprint > ceiling + 1e-6 {
             bail!(
-                "internal error: emitted set `{}` is {:.2} GB > ceiling {:.2} GB — refusing to \
+                "internal error: emitted set `{}` is {:.2} GB > ceiling {:.2} GB, refusing to \
                  emit an unsafe matrix",
                 set.name,
                 set.footprint,
@@ -915,8 +915,8 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
         }
     }
 
-    // ---- guard 2: the 1000-combination cap (Principle #7 — never emit invalid) ----
-    // `error` refuses; `group` OMITS the over-cap set (a safe under-declaration —
+    // ---- guard 2: the 1000-combination cap (Principle #7 - never emit invalid) ----
+    // `error` refuses; `group` OMITS the over-cap set (a safe under-declaration -
     // dropping a combo never OOMs, it just declares less) and warns. Either way the
     // emitted block is always valid.
     let mut over_cap: Vec<String> = Vec::new();
@@ -931,7 +931,7 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
                 ),
                 OnOverflow::Group => {
                     warnings.push(format!(
-                        "set `{}` expands to {} combinations (> the 1000 cap) — omitted (a safe \
+                        "set `{}` expands to {} combinations (> the 1000 cap) - omitted (a safe \
                          under-declaration); split it via `[groups]` to cover those combinations",
                         set.name, set.fanout
                     ));
@@ -1085,8 +1085,8 @@ mod tests {
 
     /// A non-empty `[roles] aux` REPLACES the type derivation. Without this, the
     /// only expressible change is adding a model to the pool, and the case operators
-    /// actually need — dropping a big, rarely-used embed/rerank model out of `aux` so
-    /// its footprint stops being reserved in every single set — is silently ignored.
+    /// actually need - dropping a big, rarely-used embed/rerank model out of `aux` so
+    /// its footprint stops being reserved in every single set - is silently ignored.
     #[test]
     fn a_non_empty_roles_aux_list_can_remove_a_type_derived_model() {
         let dir = tempfile::tempdir().unwrap();
@@ -1474,7 +1474,7 @@ mod tests {
         );
 
         // Both variants appear together only in the `g_gemma` helper, as `|`
-        // alternatives (exactly one loads). No OTHER set may name both — they must
+        // alternatives (exactly one loads). No OTHER set may name both - they must
         // be referenced via `+g_gemma`, never co-resident.
         for set in plan.sets.iter().filter(|set| set.name != "g_gemma") {
             assert!(
@@ -1522,7 +1522,7 @@ mod tests {
             .insert("gB".to_string(), (0..32).map(|index| format!("gB-{index}")).collect());
 
         // group (default): the 1024-combo pack is omitted, and every surviving set
-        // is within the cap — the emitted block is always valid.
+        // is within the cap - the emitted block is always valid.
         let plan = build(&BuildInput {
             host: None,
             models: &models,
@@ -1573,7 +1573,7 @@ mod tests {
     #[test]
     fn no_aux_models_means_no_dangling_aux_reference() {
         // A roster with no embed/rerank/stt/tts must never emit a `+aux` reference
-        // (there's no `aux` set to point at) — that would be an invalid block.
+        // (there's no `aux` set to point at) - that would be an invalid block.
         let models = vec![
             footprint("model-a", ModelType::Llm, Some("/a.gguf"), 20.0),
             footprint("model-b", ModelType::Llm, Some("/b.gguf"), 25.0),
@@ -1667,7 +1667,7 @@ mod tests {
             plan.warnings.iter().any(|warning| warning.contains("too many co-residency combinations")),
             "expected an enumeration-overflow warning"
         );
-        // every emitted pack still fits — truncation never emits an unsafe set
+        // every emitted pack still fits - truncation never emits an unsafe set
         for set in &plan.sets {
             assert!(set.footprint <= plan.ceiling + 1e-6, "{} exceeds ceiling", set.name);
         }

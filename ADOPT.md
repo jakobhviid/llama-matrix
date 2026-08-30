@@ -1,4 +1,4 @@
-# ADOPT.md — behaviour changes an existing config must know about
+# ADOPT.md - behaviour changes an existing config must know about
 
 Upgrade notes for anyone already running llama-matrix. One entry per change that can
 alter the matrix your config produces. `llama-matrix build` is pure, so every entry
@@ -22,7 +22,7 @@ policy.roles.aux.contains(&model.id)          // the override
 ```
 
 The `||` makes the table **purely additive**. It can add a model to a pool; it can
-never remove one. So any attempt to *narrow* a pool was ignored — silently, with no
+never remove one. So any attempt to *narrow* a pool was ignored - silently, with no
 warning, no error, and no diagnostic. The emitted block looked exactly as it did
 before, which reads as "I misunderstood the syntax" rather than "the feature is
 inert".
@@ -36,13 +36,13 @@ rarely-used one. On the box that surfaced this, two 4B RAG models were **14.1 GB
 every pack to avoid a ~5 s cold load. There was no way to say "these are ordinary
 evictable units".
 
-The intent had been there all along — `AUX_EVICT_COST`'s own doc comment reasons
+The intent had been there all along - `AUX_EVICT_COST`'s own doc comment reasons
 about "the few cases where a `[roles]` override leaves an aux model out of some
 sets", an outcome the additive form could never produce.
 
 **Why it shipped:** `parses_scalars_and_tables` asserted the table was *read*
 (`p.roles.aux == ["e", "r"]`). Nothing asserted it had any *effect*. A parse test on
-a policy knob proves deserialization, not behaviour — the gap between those two is
+a policy knob proves deserialization, not behaviour - the gap between those two is
 exactly where an inert feature hides.
 
 ### The change
@@ -65,7 +65,7 @@ leave that pool.
 
 ```toml
 # Was:  aux = derived {embed, rerank, stt, tts} PLUS chat-7b
-# Now:  aux = exactly {chat-7b} — the four derived ones are demoted.
+# Now:  aux = exactly {chat-7b} - the four derived ones are demoted.
 [roles]
 aux = ["chat-7b"]
 ```
@@ -76,7 +76,7 @@ If that is not what you meant, name them all:
 aux = ["chat-7b", "embed-4b", "rerank-4b", "whisper-turbo", "tts-1"]
 ```
 
-This fails **visibly** — the `aux:` line and the pack count both change — where the
+This fails **visibly** (the `aux:` line and the pack count both change) where the
 additive form failed silently. Regenerate and diff before applying:
 
 ```sh
@@ -87,7 +87,7 @@ llama-matrix build --out /tmp/new.yaml    # pure; touches nothing
 
 Narrowing `aux` **increases** what the matrix declares co-resident, because reserved
 GB become schedulable. That is a real memory commitment, so it is only safe on
-*measured* footprints — which is the whole premise of the tool, but worth stating:
+*measured* footprints - which is the whole premise of the tool, but worth stating:
 if you narrow `aux`, the models you demoted can now be evicted, and whatever moves
 into the freed space is planned against `d_total`, not a guess.
 
@@ -110,8 +110,8 @@ load. Only narrow `aux` for models whose reload you are willing to wait for.
 A config using `[roles]` to narrow a pool produces **a different matrix depending on
 which binary generated it**. An older binary silently ignores the setting and emits
 the wider-aux, fewer-packs block; `drift` then disagrees across versions on the same
-config. It fails safe — the old behaviour is strictly more conservative and cannot
-OOM — but it costs co-residency with no warning. If you pin llama-matrix anywhere
+config. It fails safe - the old behaviour is strictly more conservative and cannot
+OOM - but it costs co-residency with no warning. If you pin llama-matrix anywhere
 (a Homebrew formula, CI, a second host), move them together, or leave `[roles]`
 unset until they are aligned.
 

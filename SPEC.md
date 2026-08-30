@@ -1,14 +1,14 @@
-# SPEC.md — schemas & contracts of record
+# SPEC.md - schemas & contracts of record
 
 The authoritative definitions. When this file and the code disagree, the **code
-wins and this doc is the bug** — fix the doc (Principle #10). Covers: the
+wins and this doc is the bug** - fix the doc (Principle #10). Covers: the
 `llama-matrix.toml` policy schema, the per-model measurement-store schema, the
 llama-swap config parsing contract, the param-hash, model-type derivation, load
 triggers, and the matrix DSL. Compiled into `--llm`.
 
 ---
 
-## 1. `llama-matrix.toml` — policy
+## 1. `llama-matrix.toml` - policy
 
 llama-matrix's own config, separate from llama-swap's `config.yaml`. All keys are
 optional; omission takes the documented default. Scalars are managed by
@@ -128,12 +128,12 @@ predicate or the knapsack.
 
 ---
 
-## 2. The measurement store — the measure↔build contract
+## 2. The measurement store - the measure↔build contract
 
 Measurements live in a **`measurements/` directory** beside `llama-matrix.toml`,
 **one JSON file per model** plus one reserved box-level file. Not a single blob:
 per-model files are small, never hand-edited, retained indefinitely (even after a
-model leaves the config), and cheap to keep — so old footprints stay cached and a
+model leaves the config), and cheap to keep - so old footprints stay cached and a
 re-added model is an instant hit. The store is **per box** (footprints are a
 property of `(model, box)`, so they must not travel with the weights).
 
@@ -156,7 +156,7 @@ property of `(model, box)`, so they must not travel with the weights).
 }
 ```
 
-**`<model-id>.json`** — multi-measurement per model, keyed by the param-hash (§4).
+**`<model-id>.json`** - multi-measurement per model, keyed by the param-hash (§4).
 Carries the model's `type`, its primary weight `file`, and a `measurements` map,
 one entry per distinct footprint it has been measured at:
 
@@ -167,7 +167,7 @@ one entry per distinct footprint it has been measured at:
   "measurements": {
     "b7e718dc3aac": {         // param-hash of the footprint-affecting flags
       "status": "ok",         // ok | FAILED
-      "d_total": 49.05,       // GB delta over baseline — the primary number
+      "d_total": 49.05,       // GB delta over baseline - the primary number
       "d_vram": 48.77, "d_gtt": 0.27,           // optional; omitted, never 0, when unknown
       "abs_total": 49.21, "abs_vram": 48.92, "abs_gtt": 0.29,
       "load_s": 42.0,         // seconds to ready → feeds evict_costs
@@ -175,7 +175,7 @@ one entry per distinct footprint it has been measured at:
       "serving_verified": true,       // did /props confirm the served cmd? (§7.1)
       "peak_total": 49.60,    // highest delta seen while allocating (insight only)
       "weights_gb": 49.90,    // total size of the weight files the cmd names
-      "d_host": 1.10,         // GB host RAM the load added — a floor, see §7.4
+      "d_host": 1.10,         // GB host RAM the load added - a floor, see §7.4
       "pool_baseline": 0.16,  // empty-pool occupancy this delta was taken against (§7.3)
       "contended": false,     // was anything else in the pool during the window? (§7.3)
       "params": "…the hashed (memory) cmd, human-readable…",
@@ -242,7 +242,7 @@ footprint and are excluded (including at a matching hash). A model with no `ok`
 measurement at the current hash is skipped with a warning: the build runs on
 partial data; **missing is never treated as fits.**
 
-**Retention & prune:** nothing is auto-deleted — a model removed from the config
+**Retention & prune:** nothing is auto-deleted - a model removed from the config
 keeps its file (re-adding hits the cache). A `FAILED` result likewise never overwrites
 an existing `ok` footprint at the same hash: a bad load in one sweep (a rejected
 trigger, a timeout during a `--force` re-measure) is no evidence against the stored
@@ -264,16 +264,16 @@ in write path.
 
 A `matrix:` block has three sub-keys:
 
-- **`vars`** — short alias → model id, for readable expressions. A var name wins
+- **`vars`** - short alias → model id, for readable expressions. A var name wins
   over an identical model id; if minted, keep aliases to **≤8 alphanumeric
   characters** (the schema-safe bound). Vars are optional as of llama-swap v243, and
-  **llama-matrix currently emits none** — sets reference full model ids directly
+  **llama-matrix currently emits none** - sets reference full model ids directly
   (valid on v243+). The `vars:` sub-key is reserved for a future readability pass.
-- **`evict_costs`** — positive integers, default 1. Higher = costlier to evict =
+- **`evict_costs`** - positive integers, default 1. Higher = costlier to evict =
   prefer to keep. llama-matrix emits one for **every** model in the matrix, so the
   block states what the solver will do rather than leaving it to be re-derived; the
   numbers come from `[evict_costs]` (§1.3).
-- **`sets`** — named **DSL strings** (not lists).
+- **`sets`** - named **DSL strings** (not lists).
 
 **Operators:**
 
@@ -285,7 +285,7 @@ A `matrix:` block has three sub-keys:
 | `+ref` | inline another set | `+aux & x` |
 
 `(a|b) & (c|d)` → `[a,c] [a,d] [b,c] [b,d]`. **Any subset of a declared set is a
-valid co-resident group** — you need not load all of it; only the requested model
+valid co-resident group** - you need not load all of it; only the requested model
 starts, and the set is the *maximal* group it may share space with.
 
 **Solver on a request for X:** if X is running, forward; else among all declared
@@ -293,7 +293,7 @@ combinations containing X, pick the one minimizing the eviction cost of running
 models not in it, evict the rest, start X.
 
 **Constraints:** `matrix` XOR `groups` (mutually exclusive engines). **Expansion is
-capped at 1000 combinations per expression** — the product of that expression's
+capped at 1000 combinations per expression** - the product of that expression's
 `|`-group sizes.
 
 ### 3.1 Emitted set shapes
@@ -302,7 +302,7 @@ capped at 1000 combinations per expression** — the product of that expression'
 |---|---|---|
 | `aux` | `embed & rerank & whisper` | ride-along pool (`&`) |
 
-| `g_<name>` helper | `(q4 \| q6 \| q8)` | a logical model's quant alternatives (`\|`), referenced by `+g_<name>` — emitted **only** for a model with more than one variant |
+| `g_<name>` helper | `(q4 \| q6 \| q8)` | a logical model's quant alternatives (`\|`), referenced by `+g_<name>` - emitted **only** for a model with more than one variant |
 | `images` | `img1 & img2 & +aux` | all image models co-resident (`&`), any subset valid |
 | `pack<N>` | `single-a & +g_multi-b & +aux` | a maximal fitting combination of logical models |
 | `llmimg_<id>` | `+g_a & img1 & img2 & +aux` | one logical model + the largest fitting image subset |
@@ -354,29 +354,29 @@ to its base → no separate measurement. The same weights at `-np 2 -c 262144` v
 
 llama-matrix reads a standard llama-swap `config.yaml`:
 
-- **Macro expansion — do this FIRST, before anything below.** llama-swap configs
+- **Macro expansion - do this FIRST, before anything below.** llama-swap configs
   may define a global `macros:` map and reference `${macro}` inside `cmd` strings,
   plus the reserved substitutions `${PORT}`, `${PID}`, `${MODEL_ID}`, and
   `${env.VAR}` (multi-pass expansion). Every downstream step (binary/type
   detection, primary-file existence check, param-hash) operates on the **expanded**
-  command — hashing or stat-ing an unexpanded `${…}` placeholder is a bug. A
+  command - hashing or stat-ing an unexpanded `${…}` placeholder is a bug. A
   macro-free config expands to itself, so this is always safe to run.
 - **Worklist** = the `models:` map keys, minus (a) hand-set proxy entries and
   (b) **selectors / virtual model ids** (llama-swap's per-request routing entries
-  with strategies like `warm`/`pin`/`spillover`) — those are not loadable servers,
-  so `measure` must skip them. The set of ids to measure *is* the config — never a
+  with strategies like `warm`/`pin`/`spillover`) - those are not loadable servers,
+  so `measure` must skip them. The set of ids to measure *is* the config - never a
   parallel hand-kept list.
-- **`cmd`** — the launch command scalar (folded `>` or literal `|`), normalized to
+- **`cmd`** - the launch command scalar (folded `>` or literal `|`), normalized to
   one line, then macro-expanded. First token is the binary.
-- **type** — derived from `cmd` (§6), never a hardcoded id-set.
-- **primary file** — the first match of `--diffusion-model`, `-m`, `--model`,
+- **type** - derived from `cmd` (§6), never a hardcoded id-set.
+- **primary file** - the first match of `--diffusion-model`, `-m`, `--model`,
   `--llm`.
-- **path mapping** — a container path is resolved to a host path via `[paths]`;
+- **path mapping** - a container path is resolved to a host path via `[paths]`;
   unmapped paths pass through unchanged (native deployments).
 - **Unknown keys are tolerated.** llama-swap has many model-level keys llama-matrix
   doesn't consume (`cmdStop`, `unloadTimeout`, `concurrencyLimit`, `capabilities`,
   `filters`, `metadata`, `name`, `description`, …). The parser must ignore
-  unrecognized fields, never fail closed on them — and the marker-anchored splice
+  unrecognized fields, never fail closed on them - and the marker-anchored splice
   preserves every non-matrix key untouched.
 
 ## 6. Model-type derivation (from `cmd`)
@@ -559,7 +559,7 @@ Compare `allocation_confirmed`, which is the opposite direction and does gate.
 `(model, param-hash)` differs from the stored one by more than `max(0.25 GB, 2%)`,
 the sweep names both numbers and the date of the old one. Same box, same flags, two
 answers: at most one is right, and the higher one is the likelier contaminated. The
-new value is still written - it is the more recent evidence - but never silently.
+new value is still written (it is the more recent evidence), but never silently.
 
 ### 7.4 Host RAM (the second budget)
 
@@ -609,40 +609,40 @@ Naming them with the arithmetic is not, and `exclude` is one setting away.
 
 ## 8. Server control endpoints (llama-swap)
 
-- **Unload** — `POST /api/models/unload` unloads all models (the clean-slate
+- **Unload** - `POST /api/models/unload` unloads all models (the clean-slate
   primitive between measurements); `POST /api/models/unload/:model_id` unloads one
-  (useful for tightening incremental sweeps — a baseline reset still needs
+  (useful for tightening incremental sweeps - a baseline reset still needs
   unload-all). The bare `GET /unload` still works as a **legacy fallback** but is
   no longer the documented surface; prefer the `POST /api/models/…` forms and fall
   back to `GET /unload` only if they 404 (older builds).
 - `GET /running` → `{"running":[{"model","state",…}]}`. The state set is
   `ready`, `starting`, `stopping`, `stopped`, `shutdown`. **Only `ready` is a go
-  signal** — poll until then; treat `starting` as wait and `stopping`/`stopped`/
+  signal** - poll until then; treat `starting` as wait and `stopping`/`stopped`/
   `shutdown` as "do not sample" (a tearing-down model's memory reading is
   meaningless). Reading memory right at `ready` is still too early (KV/compute
   buffers allocating; see stabilize).
-- `GET /v1/models`, `GET /health` — sanity/verify. (`unlisted` models are hidden
-  from `/v1/models` but still requestable — which is why the worklist comes from the
+- `GET /v1/models`, `GET /health` - sanity/verify. (`unlisted` models are hidden
+  from `/v1/models` but still requestable - which is why the worklist comes from the
   `models:` map, not from `/v1/models`.)
 
 ## 8a. Version & compatibility
 
 - **Requires a llama-swap build with the matrix engine** (Groups V2 / Swap Matrix,
-  merged upstream via PR #646 — not experimental). Probe by loading a config with a
+  merged upstream via PR #646 - not experimental). Probe by loading a config with a
   `matrix:` block and confirming a clean reload (no "must use either groups or
   matrix" / unknown-key error).
 - **Full model ids in sets require v243+**; older matrix builds may need `vars`.
-  llama-matrix targets current llama-swap — pin and test against a known version, and
+  llama-matrix targets current llama-swap - pin and test against a known version, and
   re-verify the 1000-combination expansion cap (§3) against the build you pin (the
   solver became symbolic in v244; the cap still lives in `matrix_dsl.go`).
 - Because upstream iterates quickly on the matrix engine, treat the tested version
   range as part of the contract and watch releases for memory-awareness landing
-  (which would change the `build` half's value — see `ROADMAP.md`).
+  (which would change the `build` half's value - see `ROADMAP.md`).
 
 ## 9. Not in the schema (explicitly)
 
-- No per-model hand-written footprints in `llama-matrix.toml` — footprints live
+- No per-model hand-written footprints in `llama-matrix.toml` - footprints live
   only in the `measurements/` store, only from a real measurement.
-- No `groups:` output — llama-matrix emits `matrix:` only (the memory-aware engine).
-- No idle-TTL policy management — residency is demand-driven via the matrix; TTLs
+- No `groups:` output - llama-matrix emits `matrix:` only (the memory-aware engine).
+- No idle-TTL policy management - residency is demand-driven via the matrix; TTLs
   are the operator's concern in `config.yaml`.

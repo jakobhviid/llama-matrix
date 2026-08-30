@@ -1,4 +1,4 @@
-//! `llama-matrix.toml` — the operator's policy, separate from llama-swap's
+//! `llama-matrix.toml` - the operator's policy, separate from llama-swap's
 //! `config.yaml`. All keys are optional; omission takes the documented default.
 //! Scalars are managed by the `configure` surface (see `settings`); the
 //! structured tables (`[paths]`, `[roles]`, `[groups]`, `[evict_costs]`) are
@@ -21,7 +21,7 @@ pub fn default_probe_image_size() -> String {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Strategy {
-    /// No grouping — every model is independent; declare everything that fits.
+    /// No grouping - every model is independent; declare everything that fits.
     #[default]
     Flat,
     /// Collapse the `[groups]` declarations into single mutually-exclusive units.
@@ -33,7 +33,7 @@ pub enum Strategy {
 #[serde(rename_all = "lowercase")]
 pub enum OnOverflow {
     /// Omit any set that exceeds the 1000-combination cap (a safe
-    /// under-declaration — dropping a combo never OOMs) and warn loudly.
+    /// under-declaration - dropping a combo never OOMs) and warn loudly.
     #[default]
     Group,
     /// Refuse to emit; the operator groups by hand.

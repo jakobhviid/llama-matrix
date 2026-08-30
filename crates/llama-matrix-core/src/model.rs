@@ -4,7 +4,7 @@
 
 use crate::param_hash::param_hash;
 
-/// A model's role, derived from its launch command — never a hardcoded id-set.
+/// A model's role, derived from its launch command - never a hardcoded id-set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModelType {
     Llm,
@@ -12,7 +12,7 @@ pub enum ModelType {
     Rerank,
     Stt,
     Image,
-    /// A fronted service with a placeholder `cmd` (e.g. a TTS proxy) — no GPU of
+    /// A fronted service with a placeholder `cmd` (e.g. a TTS proxy) - no GPU of
     /// its own; excluded from the measure worklist, footprint hand-set.
     TtsProxy,
 }
@@ -45,7 +45,7 @@ pub fn type_from_cmd(cmd: &str) -> ModelType {
     }
 }
 
-/// The model's own weight file (as it appears in the command — an in-container
+/// The model's own weight file (as it appears in the command - an in-container
 /// path until the `[paths]` map resolves it), for existence/prune checks. Flags
 /// are tried in priority order so a diffusion model wins over a stray `-m`.
 pub fn primary_file(cmd: &str) -> Option<String> {

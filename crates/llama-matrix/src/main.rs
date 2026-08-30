@@ -1,4 +1,4 @@
-//! llama-matrix — measure llama-swap model memory footprints and generate a
+//! llama-matrix - measure llama-swap model memory footprints and generate a
 //! co-residency `matrix:` block so as many models run concurrently as physically
 //! fit, without exceeding VRAM.
 //!
@@ -242,7 +242,7 @@ fn run(cli: Cli) -> Result<()> {
     Ok(())
 }
 
-/// `prune` — remove measurement files whose weight file is gone from disk
+/// `prune` - remove measurement files whose weight file is gone from disk
 /// (explicit only; the store is otherwise retained indefinitely).
 fn cmd_prune(yes: bool, json: bool) -> Result<()> {
     let policy = Policy::load(PathBuf::from("llama-matrix.toml"))?;
@@ -269,7 +269,7 @@ fn cmd_prune(yes: bool, json: bool) -> Result<()> {
             };
             println!("{}", serde_json::to_string(&doc)?);
         } else {
-            ui::ok("nothing to prune — every measured model's weight file is still present");
+            ui::ok("nothing to prune - every measured model's weight file is still present");
         }
         return Ok(());
     }
@@ -312,7 +312,7 @@ fn open_store(config_dir: &Path, json: bool) -> Result<cache::Store> {
     Ok(store)
 }
 
-/// `drift` — compare the live config's matrix block to a fresh build (read-only).
+/// `drift` - compare the live config's matrix block to a fresh build (read-only).
 fn cmd_drift(json: bool) -> Result<()> {
     let policy = Policy::load(PathBuf::from("llama-matrix.toml"))?;
     let config_dir = std::env::current_dir()?;
@@ -324,7 +324,7 @@ fn cmd_drift(json: bool) -> Result<()> {
             let doc = report::Status { status: "no-measurements" };
             println!("{}", serde_json::to_string(&doc)?);
         } else {
-            ui::warn("no measurements yet — run `llama-matrix measure`");
+            ui::warn("no measurements yet - run `llama-matrix measure`");
         }
         return Ok(());
     }
@@ -354,15 +354,15 @@ fn cmd_drift(json: bool) -> Result<()> {
     }
 
     if in_sync {
-        ui::ok("in sync — the live matrix block matches a fresh build");
+        ui::ok("in sync - the live matrix block matches a fresh build");
     } else if existing.is_none() {
         ui::warn(&format!(
-            "no matrix block in {config_path} — run `llama-matrix build --apply` to add one ({} sets)",
+            "no matrix block in {config_path} - run `llama-matrix build --apply` to add one ({} sets)",
             plan.sets.len()
         ));
     } else {
         ui::warn(&format!(
-            "drift — the live block differs from a fresh build ({} sets); run `llama-matrix build --apply`",
+            "drift - the live block differs from a fresh build ({} sets); run `llama-matrix build --apply`",
             plan.sets.len()
         ));
     }
@@ -379,7 +379,7 @@ fn cmd_drift(json: bool) -> Result<()> {
     Ok(())
 }
 
-/// `setup` — provision llama-matrix.toml (discover config + endpoint, probe budget).
+/// `setup` - provision llama-matrix.toml (discover config + endpoint, probe budget).
 fn cmd_setup(config: Option<String>, endpoint: Option<String>, json: bool) -> Result<()> {
     let file = PathBuf::from("llama-matrix.toml");
     let config_path = config.or_else(|| {
@@ -407,7 +407,7 @@ fn cmd_setup(config: Option<String>, endpoint: Option<String>, json: bool) -> Re
             lines.push(format!("budget = {total:.1}"));
         }
         None => {
-            lines.push("# no GPU sensor detected — set the pool to plan against:".to_string());
+            lines.push("# no GPU sensor detected - set the pool to plan against:".to_string());
             lines.push("# budget = 96.0".to_string());
         }
     }
@@ -422,7 +422,7 @@ fn cmd_setup(config: Option<String>, endpoint: Option<String>, json: bool) -> Re
             };
             println!("{}", serde_json::to_string(&doc)?);
         } else {
-            ui::warn("llama-matrix.toml already exists — not overwriting; setup would write:");
+            ui::warn("llama-matrix.toml already exists - not overwriting; setup would write:");
             print!("{content}");
         }
         return Ok(());
@@ -447,14 +447,14 @@ fn cmd_setup(config: Option<String>, endpoint: Option<String>, json: bool) -> Re
             ));
         }
         if config_path.is_none() {
-            ui::warn("no config.yaml found — set `config` in llama-matrix.toml or pass --config");
+            ui::warn("no config.yaml found - set `config` in llama-matrix.toml or pass --config");
         }
         ui::info("next: `llama-matrix measure`  →  `llama-matrix build`");
     }
     Ok(())
 }
 
-/// `measure` — the GPU-touching solo-footprint sweep.
+/// `measure` - the GPU-touching solo-footprint sweep.
 fn cmd_measure(
     config: Option<String>,
     endpoint: Option<String>,
@@ -487,7 +487,7 @@ fn cmd_measure(
 
     if !json {
         ui::info(&format!(
-            "measuring {} models against {} — this loads each model in turn",
+            "measuring {} models against {} - this loads each model in turn",
             parsed.models.len(),
             options.endpoint
         ));
@@ -556,7 +556,7 @@ fn cmd_measure(
             ui::warn(&format!("{}: {}", failure.id, failure.reason));
         }
         for id in &summary.skipped_missing {
-            ui::warn(&format!("{id}: weight file missing — skipped"));
+            ui::warn(&format!("{id}: weight file missing - skipped"));
         }
         for unconfirmed in &summary.unconfirmed_allocation {
             ui::warn(&format!(
@@ -618,7 +618,7 @@ fn cmd_measure(
     Ok(())
 }
 
-/// `configure` — the validated scalar-settings surface over llama-matrix.toml.
+/// `configure` - the validated scalar-settings surface over llama-matrix.toml.
 fn cmd_configure(action: ConfigureAction, json: bool) -> Result<()> {
     let file = PathBuf::from("llama-matrix.toml");
     match action {
@@ -685,7 +685,7 @@ fn cmd_configure(action: ConfigureAction, json: bool) -> Result<()> {
     Ok(())
 }
 
-/// `build` — generate the matrix block from the measurement store + config.
+/// `build` - generate the matrix block from the measurement store + config.
 fn cmd_build(
     config: Option<String>,
     budget: Option<f64>,
@@ -710,7 +710,7 @@ fn cmd_build(
     let store = open_store(&config_dir, json)?;
     if store.list_ids().is_empty() {
         anyhow::bail!(
-            "no measurements in {} — run `llama-matrix measure` first",
+            "no measurements in {} - run `llama-matrix measure` first",
             store.dir().display()
         );
     }
@@ -745,10 +745,10 @@ fn cmd_build(
             };
             println!("{}", serde_json::to_string(&doc)?);
         } else {
-            ui::ok(&format!("applied to {config_path} — {}", result.note));
+            ui::ok(&format!("applied to {config_path} - {}", result.note));
             ui::info(&format!("backup: {}", result.backup.display()));
             if !result.verified {
-                ui::warn("could not fully verify the reload — check llama-swap's logs");
+                ui::warn("could not fully verify the reload - check llama-swap's logs");
             }
         }
         return Ok(());

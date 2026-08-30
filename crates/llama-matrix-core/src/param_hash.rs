@@ -9,7 +9,7 @@
 //!
 //! The strip-list is a **conservative allowlist of flags known not to affect the
 //! footprint**. Everything else stays in the hash. The risk direction is fixed by
-//! design: an unlisted-but-irrelevant flag costs only a harmless extra measure —
+//! design: an unlisted-but-irrelevant flag costs only a harmless extra measure -
 //! never a wrong cache hit (which would under-count the matrix and could OOM).
 //! When unsure whether a flag affects memory, do not add it here.
 
@@ -71,7 +71,7 @@ pub fn memory_cmd(cmd: &str) -> String {
 }
 
 /// A 12-hex key identifying a distinct memory footprint (sha1 of `memory_cmd`,
-/// truncated to 12 hex chars — matches the reference tooling's key format).
+/// truncated to 12 hex chars - matches the reference tooling's key format).
 pub fn param_hash(cmd: &str) -> String {
     let mut hasher = Sha1::new();
     hasher.update(memory_cmd(cmd).as_bytes());
@@ -90,7 +90,7 @@ mod tests {
     #[test]
     fn strips_port_and_reasoning() {
         // A "-nothink" twin differs only by `--reasoning off` (+ a different port);
-        // both are stripped, so it hashes equal to its base — no separate measure.
+        // both are stripped, so it hashes equal to its base - no separate measure.
         let base = "/app/llama-server -m /models/g.gguf --host 127.0.0.1 --port 9001 \
                     -ngl 99 -c 262144 -np 2 -fa on --jinja";
         let nothink = "/app/llama-server -m /models/g.gguf --host 127.0.0.1 --port 9006 \

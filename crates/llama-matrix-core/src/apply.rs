@@ -1,6 +1,6 @@
 //! Splice the generated `matrix:` block into the live llama-swap `config.yaml`,
 //! then let `-watch-config` hot-reload it. The live config is written in exactly
-//! one place — here (Principle #5): always after a backup, always anchored on the
+//! one place - here (Principle #5): always after a backup, always anchored on the
 //! generated marker, always with a basic post-write liveness check.
 //!
 //! llama-swap rejects an invalid config and keeps the old one, so a splice can't
@@ -71,10 +71,10 @@ pub fn splice(config_text: &str, block: &str) -> String {
 }
 
 /// Back up the config and splice in the block. With `verify`, also confirm
-/// llama-swap stays live after the write — a **liveness check only**: it does NOT
+/// llama-swap stays live after the write - a **liveness check only**: it does NOT
 /// load any model or touch the GPU (it just pings `/v1/models`), and it rolls back
 /// if the service dies. With `verify == false`, back up + splice and return without
-/// any network round-trip — llama-swap hot-reloads on its own and safely keeps the
+/// any network round-trip - llama-swap hot-reloads on its own and safely keeps the
 /// old config if the new one is invalid.
 pub fn apply(config_path: &Path, block: &str, endpoint: &str, verify: bool) -> Result<ApplyResult> {
     let original = std::fs::read_to_string(config_path)
@@ -91,7 +91,7 @@ pub fn apply(config_path: &Path, block: &str, endpoint: &str, verify: bool) -> R
         return Ok(ApplyResult {
             backup,
             verified: false,
-            note: "spliced (verify skipped) — llama-swap hot-reloads on its own".to_string(),
+            note: "spliced (verify skipped) - llama-swap hot-reloads on its own".to_string(),
         });
     }
 
@@ -101,26 +101,26 @@ pub fn apply(config_path: &Path, block: &str, endpoint: &str, verify: bool) -> R
         return Ok(ApplyResult {
             backup,
             verified: false,
-            note: "wrote config; endpoint unreachable — verify the reload manually".to_string(),
+            note: "wrote config; endpoint unreachable - verify the reload manually".to_string(),
         });
     }
 
     // Give -watch-config time to poll + reload, then confirm it still serves. A
     // rejected config leaves the old one live (still 200), so this proves the
-    // service survived, not that the new block parsed — check the logs to be sure.
+    // service survived, not that the new block parsed - check the logs to be sure.
     thread::sleep(Duration::from_secs(3));
     match agent.get(&models_url).call() {
         Ok(response) if response.status() == 200 => Ok(ApplyResult {
             backup,
             verified: true,
-            note: "spliced; llama-swap still serving (liveness check — confirm the reload in its logs)"
+            note: "spliced; llama-swap still serving (liveness check - confirm the reload in its logs)"
                 .to_string(),
         }),
         _ => {
             std::fs::write(config_path, &original).with_context(|| {
                 format!("rolling back {}", config_path.display())
             })?;
-            bail!("llama-swap stopped serving after the write — rolled back to the backup");
+            bail!("llama-swap stopped serving after the write - rolled back to the backup");
         }
     }
 }

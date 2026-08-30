@@ -342,7 +342,7 @@ impl Store {
         Ok(())
     }
 
-    /// Delete a model's file from the store (explicit prune only — never automatic).
+    /// Delete a model's file from the store (explicit prune only - never automatic).
     pub fn remove_model(&self, id: &str) -> Result<()> {
         let path = self.model_path(id);
         if path.exists() {

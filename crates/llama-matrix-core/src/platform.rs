@@ -4,7 +4,7 @@
 //!
 //! Backends: AMD `amdgpu` sysfs (unified VRAM + GTT), NVIDIA via `nvidia-smi`, and
 //! Apple Silicon (macOS) unified memory via `ioreg` + `sysctl`. When no backend is
-//! available, `measure` can't run — but `build` still works from a supplied
+//! available, `measure` can't run - but `build` still works from a supplied
 //! `--budget` and an existing measurement store, so the pure half never needs a
 //! sensor.
 
@@ -361,7 +361,7 @@ pub fn detect() -> Result<Box<dyn GpuMemory>> {
     }
     bail!(
         "no supported GPU memory sensor found (Apple Silicon, AMD amdgpu sysfs, or NVIDIA \
-         nvidia-smi) — pass --budget or set it in llama-matrix.toml to skip detection"
+         nvidia-smi) - pass --budget or set it in llama-matrix.toml to skip detection"
     )
 }
 

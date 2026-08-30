@@ -1,5 +1,5 @@
 #!/bin/sh
-# llama-matrix installer — no Homebrew, no compiler, no root. Downloads the
+# llama-matrix installer - no Homebrew, no compiler, no root. Downloads the
 # prebuilt binary for your OS/arch into a bin dir on your PATH.
 #
 #   curl -fsSL https://raw.githubusercontent.com/jakobhviid/llama-matrix/main/install.sh | sh
@@ -52,7 +52,7 @@ echo "Installed:${installed}"
 
 case ":$PATH:" in
     *":$BIN_DIR:"*) ;;
-    *) echo "note: ${BIN_DIR} is not on your PATH — add it, e.g.:"
+    *) echo "note: ${BIN_DIR} is not on your PATH - add it, e.g.:"
        echo "      export PATH=\"${BIN_DIR}:\$PATH\"" ;;
 esac
 

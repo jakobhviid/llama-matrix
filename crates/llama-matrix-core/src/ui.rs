@@ -1,8 +1,8 @@
 //! Output discipline so `--json` stays pipe-clean: human output → stdout,
 //! progress + status → stderr. Plus a tiny ANSI palette for human renderers.
 //!
-//! Colour is emitted only when stderr is a real terminal AND `NO_COLOR` is unset
-//! — so a redirect / pipe (including the `--json` path, which never calls the
+//! Colour is emitted only when stderr is a real terminal AND `NO_COLOR` is unset,
+//! so a redirect or pipe (including the `--json` path, which never calls the
 //! `info`/`warn`/`err` helpers) stays clean. The decision is computed once.
 
 use std::io::IsTerminal;

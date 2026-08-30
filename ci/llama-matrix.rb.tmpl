@@ -1,12 +1,12 @@
 class LlamaMatrix < Formula
-  desc "Measure llama-swap model memory footprints and generate a co-residency matrix so as many models run concurrently as physically fit — without exceeding VRAM"
+  desc "Measure llama-swap model memory footprints and generate a co-residency matrix so as many models run concurrently as physically fit - without exceeding VRAM"
   homepage "https://github.com/jakobhviid/llama-matrix"
   version "@VERSION@"
   license "MIT"
 
   # Prebuilt bottles so `brew install` pours (no C compiler / Xcode gate):
   # macOS on both arches, plus x86_64 Linux. Anything without a matching bottle
-  # — e.g. a macOS older than the build runner, or arm64 Linux — falls back to
+  # - e.g. a macOS older than the build runner, or arm64 Linux - falls back to
   # the url+install path below.
   bottle do
     root_url "https://github.com/jakobhviid/llama-matrix/releases/download/v@VERSION@"
