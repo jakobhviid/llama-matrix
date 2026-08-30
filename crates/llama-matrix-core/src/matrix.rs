@@ -72,6 +72,7 @@ mod tests {
         let models = vec![
             ModelFootprint {
                 host_gb: None,
+                assumed_cache: false,
                 id: "embed".into(),
                 model_type: ModelType::Embed,
                 primary_file: Some("/e.gguf".into()),
@@ -79,6 +80,7 @@ mod tests {
             },
             ModelFootprint {
                 host_gb: None,
+                assumed_cache: false,
                 id: "chat".into(),
                 model_type: ModelType::Llm,
                 primary_file: Some("/c.gguf".into()),

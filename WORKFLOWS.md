@@ -265,9 +265,11 @@ it cares about instead of parsing prose. Split by what they mean:
 | `below_weight_floor` | the footprint is under 0.90 of the weights on disk; partial offload is a legitimate cause | no, a signal |
 | `baseline`, `detected_total`, `host_baseline`, `host_total` | the box, as measured | no |
 
-`build --json` adds `host_ceiling` and `host_over` alongside `warnings`: a `null`
-ceiling means the host dimension was **not checked**, which is not the same as
-checked-and-fine.
+`build --json` adds `host_ceiling`, `host_over` and `host_cram_gb` alongside
+`warnings`: a `null` ceiling means the host dimension was **not checked**, which is
+not the same as checked-and-fine, and `host_cram_gb` is the largest uniform `-cram`
+that would bring every over-budget set under the ceiling (`null` with a non-empty
+`host_over` means no `-cram` can, because the overrun is in measured memory).
 
 The split that matters when deciding whether to stop: `unconfirmed_allocation`,
 `no_empty_pool` and a rising `baseline_was` can leave a matrix that does not fit.

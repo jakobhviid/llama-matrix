@@ -46,6 +46,13 @@ pub struct ModelFootprint {
     /// assumes. `None` where the store holds no host measurement, which disables the
     /// host check rather than guessing at it.
     pub host_gb: Option<f64>,
+    /// Does this model hold a host prompt cache whose size the *policy* assumed
+    /// rather than the command declaring it?
+    ///
+    /// Only these are worth suggesting a `-cram` for: an entry that already states
+    /// one has been decided, and a backend without the cache has nothing to bound.
+    /// Counting them per set is what turns "this set is over" into "set `-cram N`".
+    pub assumed_cache: bool,
 }
 
 /// A logical model: one or more interchangeable variants, sized by the largest.
@@ -59,6 +66,9 @@ struct Unit {
     size: f64,
     /// Host cost = the largest member's, for the same reason.
     host_size: Option<f64>,
+    /// One prompt cache, if any member holds an assumed one: a `|` group loads a
+    /// single member at a time.
+    assumed_caches: usize,
 }
 
 impl Unit {
@@ -87,6 +97,9 @@ pub struct EmittedSet {
     /// The same sum in host RAM: `host_baseline + Σ members + aux`. `None` when the
     /// host dimension is not being checked (see `MatrixPlan::host_ceiling`).
     pub host_footprint: Option<f64>,
+    /// How many of this set's members hold a prompt cache whose size the policy
+    /// assumed. The lever: it is what a `-cram` would divide.
+    pub host_assumed_caches: usize,
     /// Product of the expression's `|`-group sizes - must be ≤ 1000.
     pub fanout: usize,
 }
@@ -122,6 +135,10 @@ pub struct MatrixPlan {
     pub host_skipped: Option<String>,
     /// Sets whose host cost exceeds `host_ceiling`, with what they need.
     pub host_over: Vec<(String, f64)>,
+    /// The largest uniform `-cram` (in GB) that would bring every over-budget set
+    /// under the host ceiling, when one exists. `None` means either nothing is over,
+    /// or no `-cram` can fix it because the overrun is not in the caches.
+    pub host_cram_gb: Option<f64>,
 }
 
 /// Inputs to a build. `budget` is already resolved (policy override, else the
@@ -260,16 +277,24 @@ pub fn resolve_plan(
                 primary_file: record.primary_file.clone(),
                 d_total: measurement.d_total,
                 host_gb: Some(0.0),
+                assumed_cache: false,
             });
             continue;
         }
+        // A llama.cpp server holds a host prompt cache whether or not the command
+        // says so. Whether the *size* is declared decides both the number used and
+        // whether a `-cram` suggestion could help this entry.
+        let holds_cache = matches!(
+            record.model_type,
+            ModelType::Llm | ModelType::Embed | ModelType::Rerank
+        );
+        let declared_cache = crate::model::declared_cache_ram_gb(&record.cmd);
+        let assumed_cache = holds_cache && declared_cache.is_none();
         let host_gb = measurement.d_host.map(|measured| {
-            let cache = match record.model_type {
-                ModelType::Llm | ModelType::Embed | ModelType::Rerank => {
-                    crate::model::declared_cache_ram_gb(&record.cmd)
-                        .unwrap_or(policy.host_cache_gb)
-                }
-                _ => 0.0,
+            let cache = if holds_cache {
+                declared_cache.unwrap_or(policy.host_cache_gb)
+            } else {
+                0.0
             };
             measured + cache
         });
@@ -282,6 +307,7 @@ pub fn resolve_plan(
             primary_file: record.primary_file.clone(),
             d_total: measurement.d_total,
             host_gb,
+            assumed_cache,
         });
     }
 
@@ -394,6 +420,13 @@ fn sets_naming(sets: &[EmittedSet], ids: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// A `-cram` value as the flag takes it: whole MiB, rounded DOWN to a multiple of
+/// 256 so the suggestion is a round number that is never larger than what fits.
+fn cram_mib(gb: f64) -> u64 {
+    let mib = (gb * 1024.0) as u64;
+    (mib / 256) * 256
+}
+
 /// How many names a warning spells out before it starts counting instead.
 ///
 /// A 25-model roster produces a couple of hundred packs, and one unconfirmed aux
@@ -455,6 +488,7 @@ fn collapse_units(llm_models: &[&ModelFootprint], policy: &Policy) -> Vec<Unit> 
                 ids,
                 size,
                 host_size,
+                assumed_caches: usize::from(members.iter().any(|model| model.assumed_cache)),
             }
         })
         .collect();
@@ -474,6 +508,7 @@ fn apply_groups(units: Vec<Unit>, policy: &Policy) -> Vec<Unit> {
         let mut ids: Vec<String> = Vec::new();
         let mut size = 0.0_f64;
         let mut host_size = Some(0.0_f64);
+        let mut assumed_caches = 0;
         for (index, unit) in units.iter().enumerate() {
             if consumed.contains(&index) {
                 continue;
@@ -486,6 +521,7 @@ fn apply_groups(units: Vec<Unit>, policy: &Policy) -> Vec<Unit> {
                     (Some(largest), Some(host)) => Some(largest.max(host)),
                     _ => None,
                 };
+                assumed_caches = assumed_caches.max(unit.assumed_caches);
             }
         }
         if !ids.is_empty() {
@@ -494,6 +530,7 @@ fn apply_groups(units: Vec<Unit>, policy: &Policy) -> Vec<Unit> {
                 ids,
                 size,
                 host_size,
+                assumed_caches,
             });
         }
     }
@@ -628,6 +665,10 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
 
     let aux_cost: f64 = aux_models.iter().map(|model| model.d_total).sum();
     let aux_host: f64 = aux_models.iter().map(|model| host_of(model)).sum();
+    let caches_of = |models: &[&ModelFootprint]| -> usize {
+        models.iter().filter(|model| model.assumed_cache).count()
+    };
+    let aux_caches = caches_of(&aux_models);
     let has_aux = !aux_models.is_empty();
     // The ` & +aux` suffix is only valid when an `aux` set is actually emitted;
     // with no aux models it must be omitted, or the block would reference an
@@ -747,6 +788,7 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
             comment: format!("ride-along ({aux_cost:.1} GB)"),
             footprint: baseline + aux_cost,
             host_footprint: host_footprint(aux_host),
+            host_assumed_caches: aux_caches,
             fanout: 1,
         });
     }
@@ -761,6 +803,7 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
                 comment: format!("{:.1} GB (max variant)", unit.size),
                 footprint: baseline + unit.size + aux_cost,
                 host_footprint: host_footprint(unit.host_size.unwrap_or(0.0) + aux_host),
+                host_assumed_caches: unit.assumed_caches + aux_caches,
                 fanout: unit.fanout(),
             });
         }
@@ -784,6 +827,7 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
             host_footprint: host_footprint(
                 aux_host + image_models.iter().map(|model| host_of(model)).sum::<f64>(),
             ),
+            host_assumed_caches: aux_caches + caches_of(&image_models),
             fanout: 1,
         });
     }
@@ -814,6 +858,11 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
             comment: format!("{:.1} GB: {}", baseline + members_total + aux_cost, names.join("+")),
             footprint: baseline + members_total + aux_cost,
             host_footprint: host_footprint(members_host + aux_host),
+            host_assumed_caches: unit_indices
+                .iter()
+                .map(|&index| units[index].assumed_caches)
+                .sum::<usize>()
+                + aux_caches,
             fanout,
         });
     }
@@ -842,6 +891,7 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
                         + aux_host
                         + fitting.iter().map(|model| host_of(model)).sum::<f64>(),
                 ),
+                host_assumed_caches: unit.assumed_caches + aux_caches + caches_of(&fitting),
                 fanout: unit.fanout(),
             });
         }
@@ -892,6 +942,9 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
                     + if with_aux { aux_host } else { 0.0 }
                     + fitting.iter().map(|model| host_of(model)).sum::<f64>(),
             ),
+            host_assumed_caches: unit.assumed_caches
+                + if with_aux { aux_caches } else { 0 }
+                + caches_of(&fitting),
             fanout: unit.fanout(),
         });
     }
@@ -986,6 +1039,7 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
     // anything the matrix reports. `warn` is the default because one term of the
     // host sum is a declared cap rather than a measurement (see `OnHostOverflow`).
     let mut host_over: Vec<(String, f64)> = Vec::new();
+    let mut host_cram_gb: Option<f64> = None;
     if let Some(host_ceiling) = host_ceiling {
         for set in &sets {
             if let Some(needed) = set.host_footprint {
@@ -994,6 +1048,29 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
                 }
             }
         }
+        // The largest uniform `-cram` that would bring every over-budget set under the
+        // ceiling. Per set: everything except the assumed caches is fixed, so the
+        // allowance is what is left divided by how many caches the set holds. The
+        // binding set is the tightest of them, and a set that is over with NO assumed
+        // cache cannot be fixed by `-cram` at all - it is over on measured memory.
+        let mut cram_gb: Option<f64> = None;
+        let mut unfixable = false;
+        for set in sets.iter().filter(|set| {
+            set.host_footprint.is_some_and(|needed| needed > host_ceiling)
+        }) {
+            if set.host_assumed_caches == 0 {
+                unfixable = true;
+                continue;
+            }
+            let caches = set.host_assumed_caches as f64;
+            let fixed = set.host_footprint.unwrap_or(0.0) - caches * policy.host_cache_gb;
+            let allowance = (host_ceiling - fixed) / caches;
+            cram_gb = Some(cram_gb.map_or(allowance, |tightest: f64| tightest.min(allowance)));
+        }
+        // A suggestion is only a suggestion if it is a value someone can set.
+        let cram_gb = cram_gb.filter(|gb| *gb > 0.0 && !unfixable);
+        host_cram_gb = cram_gb;
+
         if !host_over.is_empty() {
             let listed = name_list(
                 &host_over
@@ -1005,12 +1082,25 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
                 "{} of the {} declared sets cost more HOST RAM than the {host_ceiling:.1} GB \
                  ceiling: \
                  {listed}. The GPU fit is unaffected; the risk is the host OOM killer picking a \
-                 llama-server, which presents as an unexplained upstream death. Bound it with \
-                 `-cram <MiB>` on the llama-server entries (its default is 8192 MiB per process, \
-                 taken whether or not the flag appears), raise `host_budget`, or set \
-                 `on_host_overflow = \"exclude\"` to leave those sets out",
+                 llama-server, which presents as an unexplained upstream death. {}",
                 host_over.len(),
-                sets.len()
+                sets.len(),
+                match cram_gb {
+                    // The whole point of computing it: a prescription, not a diagnosis.
+                    Some(gb) => format!(
+                        "Setting `-cram {}` on every llama-server entry brings all of them \
+                         under it (llama.cpp's default is 8192 MiB per process, taken whether \
+                         or not the flag appears). Or raise `host_budget`, or set \
+                         `on_host_overflow = \"exclude\"` to leave those sets out",
+                        cram_mib(gb)
+                    ),
+                    None =>
+                        "No `-cram` value fixes this: the overrun is in memory that was \
+                         measured, not in the prompt caches. Declare fewer co-resident models \
+                         (`strategy = \"family\"` + `[groups]`), raise `host_budget`, or set \
+                         `on_host_overflow = \"exclude\"` to leave those sets out"
+                            .to_string(),
+                }
             );
             match policy.on_host_overflow {
                 OnHostOverflow::Error => bail!("{advice}"),
@@ -1048,6 +1138,7 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
         // Filled by `resolve_plan` when it is the reason the check did not run.
         host_skipped: None,
         host_over,
+        host_cram_gb,
     })
 }
 
@@ -1307,6 +1398,7 @@ mod tests {
     ) -> ModelFootprint {
         ModelFootprint {
             host_gb: None,
+            assumed_cache: false,
             id: id.to_string(),
             model_type,
             primary_file: file.map(String::from),
@@ -1341,6 +1433,7 @@ mod tests {
     fn a_pack_over_the_host_ceiling_is_named_and_can_be_excluded() {
         let with_host = |id: &str, file: &str, gpu: f64, host: f64| ModelFootprint {
             host_gb: Some(host),
+            assumed_cache: true,
             id: id.to_string(),
             model_type: ModelType::Llm,
             primary_file: Some(file.to_string()),
@@ -1373,6 +1466,16 @@ mod tests {
         assert!((needed - 34.0).abs() < 0.01, "{needed}");
         assert!(plan.sets.iter().any(|set| set.name == "pack1"), "warn still emits it");
         assert!(plan.warnings.iter().any(|warning| warning.contains("HOST RAM")));
+        // The prescription, not just the diagnosis. Each of the three holds an
+        // assumed 8 GB cache, so the fixed part is 4 + 3*(10-8) = 10 GB and each
+        // cache may have (27.7 - 10) / 3 = 5.9 GB, which rounds DOWN to 5888 MiB.
+        let cram = plan.host_cram_gb.expect("a -cram value that would fit");
+        assert!((cram - 5.9).abs() < 0.01, "{cram}");
+        assert!(
+            plan.warnings.iter().any(|warning| warning.contains("-cram 5888")),
+            "{:?}",
+            plan.warnings
+        );
 
         // exclude: the same set is left out, which is a safe under-declaration.
         policy.on_host_overflow = OnHostOverflow::Exclude;
@@ -1396,6 +1499,42 @@ mod tests {
             host,
         })
         .is_err());
+    }
+
+    /// A `-cram` suggestion is only offered where it would actually work. Rounded
+    /// DOWN to a multiple of 256 MiB, so the round number is never larger than what
+    /// fits.
+    #[test]
+    fn a_cram_suggestion_is_a_settable_value_or_it_is_not_offered() {
+        assert_eq!(cram_mib(5.9), 5888);
+        assert_eq!(cram_mib(4.0), 4096);
+        // Never rounds up past the allowance.
+        assert!((cram_mib(2.999) as f64) <= 2.999 * 1024.0);
+
+        // Nothing to divide: a roster of image servers holds no prompt cache, so an
+        // overrun is in measured memory and no `-cram` touches it.
+        let image = |id: &str, file: &str| ModelFootprint {
+            host_gb: Some(20.0),
+            assumed_cache: false,
+            id: id.to_string(),
+            model_type: ModelType::Image,
+            primary_file: Some(file.to_string()),
+            d_total: 5.0,
+        };
+        let plan = build(&BuildInput {
+            models: &[image("i1", "/i1.gguf"), image("i2", "/i2.gguf")],
+            policy: &budgeted(OnUnconfirmed::Warn),
+            baseline: 0.16,
+            budget: 111.5,
+            host: Some(HostBudget { baseline: 4.0, total: 31.7 }),
+        })
+        .unwrap();
+        assert!(!plan.host_over.is_empty(), "the image pool is over the host ceiling");
+        assert_eq!(plan.host_cram_gb, None);
+        assert!(plan
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("No `-cram` value fixes this")));
     }
 
     /// With no host budget the plan is GPU-only and says so by leaving the host

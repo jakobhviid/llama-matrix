@@ -33,6 +33,10 @@ pub struct BuildPreview {
     pub host_ceiling: Option<f64>,
     /// Sets whose host cost is over that ceiling, as `[name, gb]`.
     pub host_over: Vec<(String, f64)>,
+    /// The largest uniform `-cram` (GB) that would bring them all under it, when one
+    /// exists. `null` with a non-empty `host_over` means no `-cram` can: the overrun
+    /// is in measured memory, not in the prompt caches.
+    pub host_cram_gb: Option<f64>,
     pub warnings: Vec<String>,
 }
 
@@ -49,6 +53,7 @@ impl BuildPreview {
             unconfirmed: plan.unconfirmed.clone(),
             host_ceiling: plan.host_ceiling,
             host_over: plan.host_over.clone(),
+            host_cram_gb: plan.host_cram_gb,
             warnings: plan.warnings.clone(),
         }
     }

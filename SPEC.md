@@ -617,6 +617,15 @@ answer: the load-trigger's one tiny prompt leaves it at the 1.64 GB end.
 compared against `host_ceiling = host_budget - host_margin`, exactly mirroring the
 GPU arithmetic. `on_host_overflow` decides the outcome (§1.1).
 
+**And it prescribes.** Everything in a set except the *assumed* caches is fixed, so
+the largest `-cram` that set can afford is `(host_ceiling - fixed) / caches`, and the
+largest uniform one that fixes the whole matrix is the tightest of those, rounded
+down to a multiple of 256 MiB. `build` reports it (`host_cram_gb`), so the warning
+names a value to set rather than a formula to apply. A set that is over with **no**
+assumed cache cannot be fixed by `-cram` at all - it is over on memory that was
+measured - and the tool says that instead of suggesting a number that would not
+work.
+
 **When it does not run.** The host dimension is optional throughout and is skipped,
 with a stated reason, when the box cannot report host RAM at all or when any model in
 the plan has no recorded `d_host`. A partial host sum is not a smaller answer, it is
