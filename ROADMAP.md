@@ -52,11 +52,29 @@ Roughly in order of value-to-effort:
    more compute-buffer slack) or from measured additivity variance, instead of a
    flat value.
 9. **Generation-peak budgeting.** Image servers transiently allocate more during a
-   diffusion step than at idle-load; budget the transient peak when co-running image
-   generation near the ceiling. `measure` samples occupancy throughout the load-trigger
-   and records the highest delta as `peak_total`, so this item is a *consumer* for that
-   field (fit against `max(d_total, peak_total)` under a policy knob), not a new
-   measurement.
+   diffusion step than they leave resident; budget that peak when co-running image
+   generation near the ceiling. `measure` already records the highest delta seen while
+   allocating as `peak_total`, so this is a *consumer* for that field (fit against
+   `max(d_total, peak_total)` under a policy knob), not a new measurement.
+
+   **The size of the effect is measured, and it is small.** Across five diffusion
+   models at `1024x1024`, the peak sits 0.47-0.73 GB above the resident footprint
+   (3-7%), and it reproduces to the hundredth of a GB across sweeps twenty days apart:
+
+   | model | resident | peak | over |
+   |---|---|---|---|
+   | `chroma1-hd-q6k` | 16.12 | 16.85 | +0.73 |
+   | `flux-kontext-edit` | 21.09 | 21.76 | +0.67 |
+   | `chroma1-hd-flash-q4km` | 14.18 | 14.91 | +0.73 |
+   | `z-image-turbo-q6k` | 8.44 | 9.02 | +0.58 |
+   | `one-obsession-v22-fp16` | 6.43 | 6.90 | +0.47 |
+
+   The default `margin` of 4.0 GB already covers that several times over, and only one
+   image pool is ever co-resident, so this stays deferred. It becomes worth doing if
+   `margin` is tuned close to zero, or if a backend turns up whose peak is a larger
+   fraction of its footprint. Re-measure before assuming the numbers above hold at a
+   different `probe_image_size`: the peak scales with the resolution, as the footprint
+   does.
 10. **More platform backends.** `rocm-smi` and other AMD paths where sysfs isn't
     available. (Apple Silicon via Metal unified memory has shipped: `total` from
     `hw.memsize`, `used` from the `ioreg` IOAccelerator counter.)
