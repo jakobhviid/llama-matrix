@@ -518,9 +518,20 @@ fn cmd_measure(
         // An *unconfirmed allocation* does escalate: unlike the serving check it is
         // clearable, it means a recorded footprint may be short, and `build` will pack
         // it by default, so it is exactly the case that must not look clean.
+        // A contended reading and a re-measure disagreement each get their own line
+        // below but do not flag the headline: both can only ever be *over*-measured
+        // (contamination adds occupancy; it never removes it), and over-measuring
+        // wastes packs rather than OOMing. Reserve the glyph for the cases that can
+        // leave a matrix that does not fit - which `no_empty_pool` is, since every
+        // footprint the sweep recorded was taken against a pool holding something
+        // else and the box floor could not be established at all.
         if summary.failed.is_empty()
             && summary.skipped_missing.is_empty()
             && summary.unconfirmed_allocation.is_empty()
+            && !summary.no_empty_pool
+            // A baseline that moved UP is the shape of a pool that only looked
+            // empty, and every delta this sweep took sits on top of it.
+            && !summary.baseline_was.is_some_and(|was| summary.baseline > was)
         {
             ui::ok(&headline);
         } else {
@@ -540,6 +551,37 @@ fn cmd_measure(
         }
         for suspect in &summary.below_weight_floor {
             ui::warn(&format!("{}: {}", suspect.id, suspect.reason));
+        }
+        if let Some(previous) = summary.baseline_was {
+            ui::warn(&format!(
+                "the empty-pool baseline moved from {previous:.2} GB to {:.2} GB. Everything \
+                 this sweep recorded is a delta over the new figure, so if nothing else on this \
+                 box took or released GPU memory, the pool was not really empty when it was \
+                 read - llama-swap can report nothing resident while the device still holds a \
+                 model it has stopped accounting for. Re-measure on a quiet box before trusting \
+                 the numbers",
+                summary.baseline
+            ));
+        }
+        if summary.no_empty_pool {
+            ui::warn(&format!(
+                "the pool was never seen empty during this sweep, so the box baseline could not \
+                 be established and the stored {:.2} GB was kept. Every footprint recorded here \
+                 was taken against a pool holding something else: stop whatever keeps loading \
+                 models and re-measure with --force",
+                summary.baseline
+            ));
+        }
+        for contended in &summary.contended {
+            ui::warn(&format!("{}: {}", contended.id, contended.reason));
+        }
+        for changed in &summary.changed {
+            ui::warn(&format!(
+                "{}: re-measured {:.2} GB, against {:.2} GB stored on {} for the same flags on \
+                 this box - at most one of those is right; take a third reading before \
+                 believing either, and prefer the lower one (contamination only adds)",
+                changed.id, changed.current, changed.previous, changed.previous_measured_at
+            ));
         }
         if !summary.unverified_serving.is_empty() {
             ui::warn(&format!(
@@ -791,6 +833,8 @@ mod doc_tests {
             serving_verified: Some(true),
             peak_total: Some(49.60),
             weights_gb: Some(49.90),
+            pool_baseline: Some(0.16),
+            contended: Some(false),
             params: "/app/llama-server -m /m.gguf -c 4096".into(),
             measured_at: "2026-01-01".into(),
         };

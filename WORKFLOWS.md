@@ -67,6 +67,12 @@ llama-matrix build --apply --no-verify   # …or a pure backup-and-splice (no ne
   exception: an entry whose allocation was never **confirmed** is re-measured rather
   than reused. A store holding no confirmations therefore sweeps in full (budget the
   time for it); one holding them re-loads only what is suspect.
+- **Quiesce the box before a sweep.** A footprint is a *solo* footprint, and any
+  client that asks llama-swap for a model during a sample window puts its memory in
+  someone else's number. Go looking for the periodic callers specifically: health
+  probes, RAG pollers, scheduled jobs. `measure` reports what it catches (a resident
+  that arrives is flagged `contended`, one that leaves fails the model outright, and
+  a moved empty-pool baseline flags the run), but a quiet box needs none of that.
 - Read the sweep's warnings before building. Two of them mean different things:
   *recorded WITHOUT confirming the allocation finished* is actionable (the number may
   be short - re-measure, and check the model's trigger works), while *recorded without

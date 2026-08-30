@@ -215,128 +215,167 @@ rather than excluding.
 
 ---
 
-## A measurement can silently absorb another model's footprint (open gap, not yet fixed)
+## The served command is verified against llama-swap's own record (after 1.6.3)
 
-`measure` unloads everything, reads one baseline for the sweep, then loads each model
-alone and records the delta. That is correct exactly while nothing else can put a
-model into the pool — and nothing enforces it.
+**A measurement that was correct before is still correct.** This changes what
+`measure` will *refuse* to record, and clears a warning that used to be permanent.
 
-### The gap
+### The change
 
-Any client that requests a model during a sample window causes the proxy to load it,
-and its footprint lands in the delta of the model under test. The tool neither
-prevents this nor notices it: a contaminated reading is recorded with
+llama-swap v251 reports the command it launched in `GET /running`. `measure` now reads
+it at the moment a model goes `ready` and compares it against the config's, on the
+memory command (the exact token set the param-hash is built from). Where llama-swap
+reports no command, the older `/props` context comparison still runs.
+
+Two consequences:
+
+- **Every backend can now be verified.** An image or STT server answers no `/props`,
+  so it used to sit in `unverified_serving` with no way to ever clear it. Re-measure
+  and it comes back verified.
+- **More real mismatches are caught.** The `/props` path only ever compared `-c` and
+  `-np`, and gave up entirely on `-c 0`. A quant swap, a `-b`/`-ub` change or a KV-type
+  change between the config on disk and the config llama-swap loaded now fails the
+  model instead of filing a footprint under a hash that never ran.
+
+### What you have to check
+
+If `measure` starts failing models with "llama-swap is serving a different command",
+llama-swap is serving a config other than the one being measured. That was true before
+too; it was just invisible. Reload llama-swap, or point `--config` at the file it
+actually loaded. The message names the tokens that differ.
+
+Nothing in the store is invalidated, and `build` is unaffected: this changes only what
+a new sweep will record.
+
+## Solo residency is now checked, and the baseline is per model (after 1.6.3)
+
+**If your box is quiet while you sweep, nothing changes** beyond a few extra seconds
+per model and two new fields in the store. Existing footprints are untouched; this
+only affects what a *new* sweep does.
+
+### The problem
+
+`measure` unloaded everything, read one baseline for the whole sweep, then loaded each
+model alone and recorded the delta. That is correct exactly while nothing else can put
+a model into the pool, and nothing enforced it. Any client that requested a model
+during a sample window made llama-swap load it, and its footprint landed in the delta
+of the model under test. The contaminated reading was recorded with
 `allocation_confirmed: true`, indistinguishable from a clean one.
 
 The case that surfaced it was a **container health check in an unrelated service**,
-probing an HTTP readiness endpoint that happened to embed a short string on every
-call. Interval 30 s; sample windows ~25-30 s. Contamination therefore hit roughly six
-times in seven, and the inflation was exactly the embedding model's own recorded
-footprint — 6.52 GB, turning a 32.16 GB entry into 38.68 GB.
-
-Health probes are the worst version of this. They are periodic, invisible during
-normal use, outlive any human at the keyboard, and the expensive ones are expensive
-for a reason that is not obvious from the endpoint's name.
+probing a readiness endpoint that embedded a short string on every call. Interval
+30 s, sample windows 25-30 s, so contamination hit roughly six times in seven, and
+the inflation was exactly the embedding model's own footprint: 6.52 GB, turning a
+32.16 GB entry into 38.68 GB.
 
 **The direction of risk is not symmetric.** Contamination during a *model's* window
-over-measures: the matrix reserves too much, wasting packs but never overcommitting.
-Contamination during the once-per-sweep *baseline* read is the dangerous one — the
-baseline is too high, so **every** delta in that sweep is under-measured by that
-amount, and the emitted matrix declares combinations that do not fit. That is the one
-failure the tool exists to prevent, and it is the quieter of the two.
+over-measures: wasted packs, never an overcommit. Contamination during the
+once-per-sweep *baseline* read is the dangerous one, because the baseline is then too
+high and **every** delta in that sweep is short by that amount, so the emitted matrix
+declares combinations that do not fit. That is the one failure the tool exists to
+prevent, and it was the quieter of the two.
 
-### `/running` is not sufficient to detect it
+### The change
 
-The obvious guard — assert exclusive residency at sample time — is not enough on its
-own. Polling `/running` once a second through a full 25-model sweep reported **zero**
-moments with two models resident, and the sweep still produced a reading 6.52 GB
-above the value the same configuration reproduces now. The same param-hash is still
-recorded twice in that store, from two model ids, 6.52 GB apart on the same box on
-the same day.
+Four mechanisms, sized to the asymmetry (SPEC §7.3).
 
-`/running` reflects the proxy's bookkeeping, not the device's occupancy. A model the
-proxy has marked unloaded can still be holding memory when the next sample is taken.
-An exclusivity check built only on `/running` would have passed while the number was
-wrong.
+- **The pool is cleared, not assumed cleared.** Unload, wait for `/running` to empty,
+  then wait for occupancy itself to settle, the same positive evidence §7.2 already
+  demanded after a load.
+- **Each model's baseline is read immediately before it loads**, and stored as
+  `pool_baseline`, so `abs_total - pool_baseline = d_total` is checkable afterwards.
+  This removes the dangerous shape rather than detecting it: there is no longer one
+  baseline whose contamination can shorten every delta in the sweep.
+- **A resident that *leaves* mid-window fails the model.** It was subtracted from the
+  reading and is not in it, so the delta would be short. Nothing is recorded.
+- **A resident that *arrives* mid-window sets `contended: true`** and is reported by
+  `measure` and again by `build`. It gates nothing, because arriving memory can only
+  make a reading too high.
 
-### What an operator should do today
+Two more numbers get checked because they were already on disk:
 
-- **Quiesce anything that can request a model before sweeping**, and go looking
-  specifically for periodic callers — health checks, RAG pollers, scheduled jobs — not
-  just the interactive clients you remember using.
-- **Take two samples for anything that reshapes the matrix.** Contamination is purely
-  additive, so where samples disagree the minimum is the better estimate.
-- **Be suspicious of any delta that equals another entry's recorded footprint.** That
-  arithmetic is what identified this, and the store already holds every number needed
-  to check it.
-- Treat a single reading as an estimate, not a fact. The gap between two samples of
-  one configuration was 20% here.
+- **A re-measure that disagrees** with the stored footprint for the same
+  `(model, param-hash)` by more than `max(0.25 GB, 2%)` names both values and the date
+  of the old one. The new value is still written; it is just no longer written
+  silently.
+- **A moved empty-pool baseline is reported**, and an upward move flags the run. This
+  is the check that catches what `/running` cannot: llama-swap can report nothing
+  resident while the device still holds a model it has stopped accounting for, and
+  such a reading passes every other test. Comparison against what the same box read
+  last time is the only thing that sees it.
 
-### If the tool were to cover it
+`_box.json`'s `baseline` is now the **lowest** reading taken with the pool verifiably
+empty, and a sweep that never saw one keeps the stored value and says so.
 
-Sketch, not a commitment, roughly in order of value per line of code:
+### What you have to check
 
-- **Sample twice, record on agreement.** Re-sample on a mismatch beyond a tolerance
-  and record the minimum, or record with a `contended: true` marker rather than
-  dropping the reading. The model is already loaded, so the second sample is cheap.
-- **Cross-check against the store.** If `delta` minus a plausible clean value lands
-  within a tolerance of some *other* entry's recorded footprint, warn. This is the
-  check that a human did by hand, and it is one pass over data already on disk.
-- **Re-read the baseline per model, not per sweep**, or at least require the pool to
-  return to the baseline before the next model loads. That converts the dangerous
-  under-measure into a detectable stall.
-- **Do not trust the proxy's unload as a memory event.** Wait for occupancy to settle
-  after unload the same way `stabilize` already waits for it to settle after load.
+- **A sweep on a busy box now says so, loudly.** Warnings you have not seen before do
+  not mean something new is broken; they mean it was always there. Read them before
+  building.
+- **A model may now fail where it previously produced a number**, if something left
+  the pool during its window. That is a refusal to record a footprint known to be
+  short, and it is the correct outcome. Quiesce the box and re-measure.
+- **Existing entries carry no `contended` field**, which reads as "the writer ran no
+  such check" and gates nothing. If you have an entry you suspect (the arithmetic
+  test still applies: be suspicious of any delta that equals another entry's recorded
+  footprint), `--force` it on a quiet box and let the disagreement report tell you.
+- **Budget a little more sweep time.** Waiting for occupancy to settle after each
+  unload costs a few seconds per model, in exchange for the baseline being a
+  measurement rather than an assumption.
 
-## A collapsed pair is measured once, and the other member inherits the number (open gap, not yet fixed)
+### Direction of risk
 
-The param-hash deliberately strips flags believed memory-neutral, so two entries that
-differ only in such a flag share one hash. That is the intended saving: one
-measurement serves both, and the emitted matrix collapses them into a single unit.
+Every part of this either removes a way for a footprint to come out **too low** or
+reports one that is **too high**. A matrix built after a clean sweep can only be the
+same or slightly larger (contaminated over-measurements are now visible and
+correctable); one built after a contaminated sweep is now labelled as such instead of
+looking clean.
 
-### The gap
+## Two ids sharing a param-hash: what actually happens
 
-The recorded footprint was produced by loading **one** of those ids. The other is
-never loaded, and nothing in the store or the output says so. If a stripped flag ever
-is not memory-neutral — on some model, some backend, some future build — the matrix
-under-reserves for the unmeasured member and there is no signal at all. The
-conservative default elsewhere in `param_hash.rs` is that an unknown flag is assumed
-to matter; a stripped flag is the one place that assumption is inverted, and it is
-inverted permanently rather than per-model.
+**No change, and no gap.** This entry exists to correct an earlier reading of the
+store that was wrong, and to keep the real, smaller surprise that sits next to it.
 
-There is a second, milder surprise in the same area. The strip list is not symmetric
-between related flags: on the box that raised this, `--reasoning` is stripped while
-`--reasoning-budget` is not. Adding a budget to one member of a pair therefore split a
-collapsed unit in two and changed the pack set, with the emitted diff as the only
-warning. That behaviour is correct — an unrecognised flag *should* be assumed to
-matter — but "these two flags are treated differently" is not discoverable before the
-fact.
+### Each id is measured, not one of them
 
-Together the two produced a genuinely misleading result. Splitting the pair gave the
-newly-distinct hash its own measurement, which came back 6.52 GB below its sibling's
-inherited number. Read at face value that says *this flag saves 6.52 GB*, and it was
-written up that way before a controlled 2x2 (flag on/off against an unrelated feature
-on/off) showed the flag is free and the difference was the instability described
-above. Hours went into explaining a difference that was never real.
+The param-hash strips flags believed memory-neutral, so two entries differing only in
+such a flag share one hash. It is easy to read that as "one measurement serves both,
+and the unmeasured member inherits a number nobody took". It does not: the store is
+**one file per model id**, and the hash keys entries *within* a file. `measure`'s
+cache lookup is `(id, param-hash)`, so a second id sharing a hash has no file of its
+own, misses, and is loaded and measured like any other model.
 
-### What an operator should do today
+The store on the box that raised this shows it directly. Seven `-nothink` twins share
+a hash with their base id, and every one is recorded under both ids, from two separate
+loads, agreeing to within 0.02 GB:
 
-- After changing a flag on one member of a collapsed pair, **diff the emitted block**.
-  If the unit count moved, the pair split — re-measure both members before believing
-  either number.
-- When a newly-split hash disagrees with the value its sibling had, suspect the
-  measurement before crediting the flag. Confirm with a matrix over the new flag and
-  one unrelated one; a real effect survives, an artefact does not.
+| hash | ids | footprints |
+|---|---|---|
+| `99c113c1f967` | `gemma-4-26b-a4b-q4qat`, `…-nothink` | 19.41, 19.42 |
+| `2940c07d184a` | `qwen3.8-27b-q4kxl`, `…-nothink` | 26.97, 26.95 |
+| `0a92a545d32d` | `qwen3.5-122b-a10b-q4kxl`, `…-nothink` | 80.00, 80.00 |
 
-### If the tool were to cover it
+`build` then collapses ids that share a **weight file** into one unit sized by the
+largest member, which is conservative by construction.
 
-- Record **which model id produced a shared measurement**, and surface it: `N ids
-  share this hash; measured from X`. A one-line addition to the store that makes the
-  inheritance visible instead of implicit.
-- On `--force`, measure each id in a collapsed group at least once. The cost is
-  bounded by the number of collapsed groups and it converts a silent assumption into
-  a checked one.
-- Warn when a `--force` re-measure of an existing hash differs from the stored value
-  by more than a tolerance. The store already holds the old number; today it is
-  overwritten without comment, which is how the same configuration came to be
-  recorded twice, 6.52 GB apart, with no trace that anything had changed.
+### The real surprise: the strip list is not symmetric
+
+`--reasoning` is stripped; `--reasoning-budget` is not. Adding a budget to one member
+of a pair therefore splits a collapsed unit in two and changes the pack set, with the
+emitted diff as the only warning. That behaviour is **correct** (an unrecognised flag
+must be assumed to matter, or the tool risks a wrong cache hit), but "these two flags
+are treated differently" is not discoverable before the fact.
+
+Splitting the pair gave the new hash its own measurement, and on the box that raised
+this it came back **identical** to its sibling's, 32.16 GB both ways, which is the
+evidence that `--reasoning-budget` is footprint-neutral. It is left in the hash
+anyway: one extra measurement is the price of the rule that keeps the cache safe.
+
+### What you have to check
+
+- After changing a flag on one member of a pair, **diff the emitted block**. If the
+  unit count moved, the pair split, and the new hash costs one measurement.
+- When a newly-split hash disagrees with its sibling, suspect the measurement before
+  crediting the flag. `measure` now reports a re-measure that disagrees with the
+  stored value, which is the check that would have shortened the original
+  investigation from hours to a line of output.

@@ -57,6 +57,18 @@ const STABILIZE_EPS: f64 = 0.03;
 /// Delay between occupancy samples while looking for a settled reading.
 const STABILIZE_INTERVAL: Duration = Duration::from_millis(1200);
 
+/// Occupancy above the sweep's lowest empty-pool reading that counts as "something
+/// else is resident" rather than sensor noise. Two orders of magnitude above
+/// `STABILIZE_EPS` and two below any model worth measuring, so it separates the two
+/// without a judgement call.
+const CONTENTION_EPS: f64 = 0.25;
+
+/// How far a re-measure may move from the stored footprint before it is reported.
+/// The absolute floor covers small models, where a percentage is meaningless; the
+/// fraction covers large ones, where 0.25 GB is inside normal allocator variation.
+const REMEASURE_EPS_GB: f64 = 0.25;
+const REMEASURE_EPS_FRACTION: f64 = 0.02;
+
 /// Knobs for a sweep.
 pub struct MeasureOptions {
     pub endpoint: String,
@@ -110,8 +122,51 @@ pub struct MeasureSummary {
     /// command names (below `cache::WEIGHT_FLOOR_RATIO` of the total on disk). A
     /// signal, not a verdict: partial offload legitimately sits lower.
     pub below_weight_floor: Vec<Failure>,
+    /// Models measured while the pool held something other than the model under
+    /// test, so the footprint may include memory that is not its own
+    /// (`cache::Measurement::contended`). Over-measured, therefore safe, therefore
+    /// reported rather than gated: the fix is to quiesce the box and `--force`.
+    pub contended: Vec<Failure>,
+    /// Models whose fresh footprint disagrees with the one already stored under the
+    /// same param-hash by more than a tolerance. Same box, same flags, two numbers:
+    /// at most one of them is right, and until this was reported the new one simply
+    /// overwrote the old with no trace that anything had changed.
+    pub changed: Vec<Remeasured>,
+    /// The sweep never saw the pool verifiably empty, so it could not establish the
+    /// box baseline and kept the stored one. Every footprint it did record was taken
+    /// against a pool holding something else.
+    pub no_empty_pool: bool,
+    /// The box baseline the previous sweep recorded, when it differs from this
+    /// sweep's by more than `CONTENTION_EPS`.
+    ///
+    /// The empty pool is the one quantity on the box that should not move, so a move
+    /// is worth a sentence either way. An *upward* one is the story: `/running` can
+    /// report the pool empty while the device is still holding a model llama-swap
+    /// has stopped accounting for, and that reading passes every check the sweep has
+    /// except this one - comparison against what the same box read last time.
+    pub baseline_was: Option<f64>,
     pub baseline: f64,
     pub detected_total: f64,
+}
+
+/// A re-measure that did not reproduce the stored footprint.
+#[derive(Debug, Clone, Serialize)]
+pub struct Remeasured {
+    pub id: String,
+    pub previous: f64,
+    pub current: f64,
+    /// When the stored number was taken, so a disagreement can be read against what
+    /// else changed on the box that day.
+    pub previous_measured_at: String,
+}
+
+impl Remeasured {
+    /// Do two footprints of the same `(model, param-hash)` disagree by enough to be
+    /// worth an operator's attention?
+    fn disagree(previous: f64, current: f64) -> bool {
+        let tolerance = REMEASURE_EPS_GB.max(previous.abs() * REMEASURE_EPS_FRACTION);
+        (previous - current).abs() > tolerance
+    }
 }
 
 /// A pid lockfile so two sweeps never share `/unload` and corrupt each other.
@@ -433,19 +488,71 @@ fn compare_context(declared: (u64, Option<u64>), served: (u64, u64)) -> Serving 
     }
 }
 
-/// Unload everything and wait until `/running` is empty, then settle.
-fn unload_all(agent: &ureq::Agent, endpoint: &str, settle: Duration) {
+/// The pool after an unload: its settled occupancy, and who was still in it.
+struct ClearedPool {
+    /// Settled occupancy in GB.
+    used: f64,
+    /// Ids llama-swap still reported after the unload and the wait. Empty is the
+    /// normal case and the only one where `used` is an *empty-pool* reading.
+    residents: Vec<String>,
+}
+
+/// Unload everything and wait for the pool to actually empty: `/running` clear,
+/// **then** occupancy settled.
+///
+/// The two waits are not redundant. `/running` is the proxy's bookkeeping, not the
+/// device's occupancy: a model llama-swap has marked unloaded can still be holding
+/// memory when the next sample is taken. Sleeping a fixed few seconds instead is a
+/// guess that a large model outlives. Waiting for occupancy to go quiet is the same
+/// positive evidence [`stabilize`] already demands after a *load*, applied to the
+/// unload, and it is what makes the returned number a baseline rather than a hope.
+fn clear_pool(agent: &ureq::Agent, endpoint: &str, gpu: &dyn GpuMemory) -> ClearedPool {
     let posted = agent.post(&format!("{endpoint}/api/models/unload")).call();
     if posted.is_err() {
         let _ = agent.get(&format!("{endpoint}/unload")).call(); // legacy fallback
     }
+    let mut residents = Vec::new();
     for _ in 0..20 {
-        if running(agent, endpoint).is_empty() {
+        residents = resident_ids(agent, endpoint, "");
+        if residents.is_empty() {
             break;
         }
         thread::sleep(Duration::from_secs(1));
     }
-    thread::sleep(settle);
+    ClearedPool {
+        used: stabilize(gpu, STABILIZE_MAX_WAIT, STABILIZE_INTERVAL, STABILIZE_EPS, STABILIZE_HOLD)
+            .used,
+        residents,
+    }
+}
+
+/// Lower the sweep's empty-pool floor to this reading, if it is one.
+///
+/// A reading taken while llama-swap still reported a model resident is not an
+/// empty-pool reading and must never become the box's floor: `build` treats that
+/// number as always-resident, so another model's footprint filed there would inflate
+/// the reserved floor of every future build.
+fn note_floor(floor: &mut Option<f64>, cleared: &ClearedPool) {
+    if cleared.residents.is_empty() {
+        *floor = Some(floor.map_or(cleared.used, |current: f64| current.min(cleared.used)));
+    }
+}
+
+/// Ids llama-swap reports resident, other than `except`, sorted so a message reads
+/// the same on every sweep.
+///
+/// Necessary but not sufficient on its own: `/running` reflects what the proxy
+/// believes, so a model it has already marked unloaded is invisible here while still
+/// occupying memory. It is decisive for the question [`sweep`] asks of it, which is
+/// not "is the pool clean" but "did the *set* of other residents change across this
+/// model's window" - see the departure check there.
+fn resident_ids(agent: &ureq::Agent, endpoint: &str, except: &str) -> Vec<String> {
+    let mut ids: Vec<String> = running(agent, endpoint)
+        .into_keys()
+        .filter(|id| id != except)
+        .collect();
+    ids.sort();
+    ids
 }
 
 /// What a load-trigger request did.
@@ -730,11 +837,16 @@ pub fn sweep(
         ..Default::default()
     };
 
-    // empty baseline (with its per-pool split, when the device has one, so the
-    // recorded deltas can be split the same way)
-    unload_all(&agent, &options.endpoint, Duration::from_secs(4));
-    summary.baseline = gpu.used_gb()?;
-    let baseline_split = gpu.used_split_gb();
+    // The empty-pool floor: the lowest settled occupancy seen with the pool
+    // **verifiably** empty, over the whole sweep. Each model's delta is taken
+    // against its own pre-load baseline (below); this is the box-level number
+    // `build` uses as the always-resident floor, and a minimum is the right
+    // estimator for it because contamination only ever adds occupancy.
+    //
+    // `None` until a clean reading is obtained, so a sweep run on a box that never
+    // emptied cannot quietly file a contaminated number as the box's floor.
+    let mut empty_pool_floor: Option<f64> = None;
+    note_floor(&mut empty_pool_floor, &clear_pool(&agent, &options.endpoint, gpu.as_ref()));
 
     // The roster llama-swap is actually serving. A model the config declares but
     // llama-swap doesn't know is the loud half of a config mismatch: measuring it
@@ -766,20 +878,47 @@ pub fn sweep(
         // (extra work beats wrong reuse), and it self-heals without the operator having
         // to know which entries to distrust. A store holding no confirmations therefore
         // re-measures in full, and one holding them re-measures only what is suspect.
-        if !options.force {
-            if let Some(existing) = store.select(&record.id, &record.param_hash)? {
-                if existing.is_confirmed() {
-                    summary.cached.push(record.id.clone());
-                    continue;
-                }
-            }
+        let stored = store.select(&record.id, &record.param_hash)?;
+        if !options.force && stored.as_ref().is_some_and(Measurement::is_confirmed) {
+            summary.cached.push(record.id.clone());
+            continue;
         }
 
         // Weights on disk: a floor on the footprint of a fully offloaded model, and
         // the one cross-check that needs no GPU and no cooperation from the backend.
         let weights = weights_gb(record, policy);
 
-        unload_all(&agent, &options.endpoint, Duration::from_secs(2));
+        // This model's own baseline, read after the pool is verifiably empty. Per
+        // model rather than once per sweep: a baseline that still counts a previous
+        // model makes every delta taken against it SHORT, and a short delta is the
+        // one error direction that OOMs (Principle 1). Reading it here also turns a
+        // pool that failed to clear into a visible, per-model signal instead of a
+        // silent bias spread across the rest of the sweep.
+        let cleared = clear_pool(&agent, &options.endpoint, gpu.as_ref());
+        let baseline_split = gpu.used_split_gb();
+        note_floor(&mut empty_pool_floor, &cleared);
+        let model_baseline = cleared.used;
+        let residents_before = cleared.residents;
+        // Above the floor with nothing loaded means memory the proxy no longer
+        // accounts for is still held: `/running` says empty, the device disagrees.
+        let mut contention: Vec<String> = Vec::new();
+        if let Some(floor) = empty_pool_floor {
+            if residents_before.is_empty() && model_baseline > floor + CONTENTION_EPS {
+                contention.push(format!(
+                    "the pool held {model_baseline:.2} GB before this model loaded, {:.2} GB \
+                     above the empty-pool floor seen this sweep, with llama-swap reporting \
+                     nothing resident",
+                    model_baseline - floor
+                ));
+            }
+        }
+        if !residents_before.is_empty() {
+            contention.push(format!(
+                "llama-swap still had {} resident when this model's baseline was read",
+                residents_before.join(", ")
+            ));
+        }
+
         let fired = trigger(&record.id, record.model_type, options);
         let ready = wait_ready(&agent, &options.endpoint, &record.id, options.load_timeout);
 
@@ -824,6 +963,7 @@ pub fn sweep(
                     params: memory_cmd(&record.cmd),
                     measured_at: today.clone(),
                     weights_gb: weights.map(round2),
+                    pool_baseline: Some(round2(model_baseline)),
                     ..Default::default()
                 })
             }
@@ -904,6 +1044,66 @@ pub fn sweep(
                                 });
                             }
 
+                            // Who else was in the pool when the reading was taken?
+                            // The two directions are not the same risk and must not
+                            // be handled the same way.
+                            let residents_after =
+                                resident_ids(&agent, &options.endpoint, &record.id);
+                            let departed: Vec<&String> = residents_before
+                                .iter()
+                                .filter(|id| !residents_after.contains(id))
+                                .collect();
+                            let arrived: Vec<&String> = residents_after
+                                .iter()
+                                .filter(|id| !residents_before.contains(id))
+                                .collect();
+                            if !arrived.is_empty() {
+                                contention.push(format!(
+                                    "llama-swap loaded {} during this model's measurement window",
+                                    arrived
+                                        .iter()
+                                        .map(|id| id.as_str())
+                                        .collect::<Vec<_>>()
+                                        .join(", ")
+                                ));
+                            }
+                            // A model that was in the baseline and is gone by the
+                            // sample was subtracted from the reading but is not in
+                            // it: the delta is SHORT by that model's footprint. That
+                            // is the one direction Principle 1 cannot tolerate, so
+                            // the reading is refused outright rather than recorded
+                            // with a caveat.
+                            if !departed.is_empty() {
+                                summary.failed.push(Failure {
+                                    id: record.id.clone(),
+                                    reason: format!(
+                                        "{} left the pool between this model's baseline and its \
+                                         reading, so the footprint would be SHORT by whatever \
+                                         they held - no footprint recorded. Quiesce anything \
+                                         that requests models and re-measure",
+                                        departed
+                                            .iter()
+                                            .map(|id| id.as_str())
+                                            .collect::<Vec<_>>()
+                                            .join(", ")
+                                    ),
+                                });
+                            }
+                            let short_by_departure = !departed.is_empty();
+                            if !contention.is_empty() {
+                                summary.contended.push(Failure {
+                                    id: record.id.clone(),
+                                    reason: format!(
+                                        "{} - a footprint is a SOLO footprint, so this one may \
+                                         include memory that is not this model's (it can only \
+                                         be too high, never too low). Quiesce anything that \
+                                         requests models - health probes and pollers especially \
+                                         - and re-measure with --force",
+                                        contention.join("; ")
+                                    ),
+                                });
+                            }
+
                             let used = settled.used;
                             // Read the split at the same settled point as the total.
                             // Both are None on a device with a single (or unified)
@@ -919,8 +1119,8 @@ pub fn sweep(
                                     ),
                                     _ => (None, None, None, None),
                                 };
-                            let d_total = round2(used - summary.baseline);
-                            let peak = trigger_peak.max(settled.peak) - summary.baseline;
+                            let d_total = round2(used - model_baseline);
+                            let peak = trigger_peak.max(settled.peak) - model_baseline;
                             let measurement = Measurement {
                                 status: "ok".to_string(),
                                 d_total,
@@ -934,9 +1134,25 @@ pub fn sweep(
                                 serving_verified,
                                 peak_total: Some(round2(peak.max(d_total))),
                                 weights_gb: weights.map(round2),
+                                pool_baseline: Some(round2(model_baseline)),
+                                contended: Some(!contention.is_empty()),
                                 params: memory_cmd(&record.cmd),
                                 measured_at: today.clone(),
                             };
+                            // Same box, same flags, a different number. Until this
+                            // was reported the fresh value simply overwrote the old
+                            // one, so a configuration could be recorded twice, far
+                            // apart, with nothing on disk saying so.
+                            if let Some(previous) = stored.as_ref().filter(|entry| entry.is_ok()) {
+                                if Remeasured::disagree(previous.d_total, d_total) {
+                                    summary.changed.push(Remeasured {
+                                        id: record.id.clone(),
+                                        previous: previous.d_total,
+                                        current: d_total,
+                                        previous_measured_at: previous.measured_at.clone(),
+                                    });
+                                }
+                            }
                             if let (true, Some(ratio), Some(weights)) = (
                                 measurement.below_weight_floor(),
                                 measurement.weight_ratio(),
@@ -955,8 +1171,12 @@ pub fn sweep(
                                     ),
                                 });
                             }
-                            summary.measured.push(record.id.clone());
-                            Some(measurement)
+                            if short_by_departure {
+                                None
+                            } else {
+                                summary.measured.push(record.id.clone());
+                                Some(measurement)
+                            }
                         }
                     }
                 }
@@ -967,9 +1187,37 @@ pub fn sweep(
             store_measurement(store, record, measurement)?;
         }
         // The trigger has been awaited (or waited out) by now, so nothing of this
-        // model's is still allocating; release the channel and clear the pool.
+        // model's is still allocating; release the channel. The pool is cleared at
+        // the top of the next model's window, which is also where its baseline is
+        // read, so the unload and the reading it has to precede cannot drift apart.
         drop(fired);
-        unload_all(&agent, &options.endpoint, Duration::from_secs(2));
+    }
+    // Leave the box as the sweep found it, and take one more empty-pool reading
+    // while doing so: on a single-model sweep it is the only second opinion there
+    // is about the floor.
+    note_floor(&mut empty_pool_floor, &clear_pool(&agent, &options.endpoint, gpu.as_ref()));
+
+    // The box baseline is what `build` treats as always resident, so it must come
+    // from a pool that was actually empty. A sweep that never saw one (a box with a
+    // client loading models throughout) keeps the stored value and says so, rather
+    // than filing another model's footprint as the box's floor - which would inflate
+    // the reserved floor for every future build.
+    let previous_box = store.read_box()?;
+    summary.baseline = match empty_pool_floor {
+        Some(floor) => floor,
+        None => {
+            summary.no_empty_pool = true;
+            previous_box.baseline
+        }
+    };
+    // The freshly read floor is what gets written - the empty pool genuinely moves
+    // when something else on the box takes or releases memory, and a stale baseline
+    // is its own kind of wrong. But a move is reported, because the other thing that
+    // produces one is a pool that only *looked* empty.
+    if previous_box.baseline > 0.0
+        && (summary.baseline - previous_box.baseline).abs() > CONTENTION_EPS
+    {
+        summary.baseline_was = Some(round2(previous_box.baseline));
     }
 
     store.write_box(&BoxMeta {
@@ -1378,6 +1626,37 @@ mod tests {
             check_serving(&poll_agent(), "http://127.0.0.1:1", &sd, None),
             Serving::Unconfirmed
         );
+    }
+
+    /// The tolerance separates allocator jitter from a reading that changed, at
+    /// both ends of the size range: 0.25 GB is noise on an 80 GB model and a fifth
+    /// of a small one, so neither a flat GB nor a flat percentage works alone.
+    #[test]
+    fn a_remeasure_disagrees_only_outside_the_tolerance() {
+        // Small model: the absolute floor decides.
+        assert!(!Remeasured::disagree(1.80, 1.82));
+        assert!(Remeasured::disagree(1.80, 2.20));
+        // Large model: 2% of 80 GB is 1.6 GB, so ordinary variation is not a story.
+        assert!(!Remeasured::disagree(80.00, 81.00));
+        assert!(Remeasured::disagree(80.00, 82.00));
+        // The case that motivated it: a 32.16 GB entry that came back 6.52 GB high,
+        // exactly another model's footprint.
+        assert!(Remeasured::disagree(32.16, 38.68));
+    }
+
+    /// Only the model under test may be resident; anything else llama-swap reports
+    /// is named, sorted, so the message reads the same on every sweep.
+    #[test]
+    fn foreign_residents_names_everything_but_the_model_under_test() {
+        let entries = parse_running(
+            r#"{"running":[{"model":"under-test","state":"ready"},
+                           {"model":"rag-embed","state":"ready"},
+                           {"model":"aux-tts","state":"starting"}]}"#,
+        );
+        let mut others: Vec<String> =
+            entries.into_keys().filter(|id| id != "under-test").collect();
+        others.sort();
+        assert_eq!(others, vec!["aux-tts".to_string(), "rag-embed".to_string()]);
     }
 
     #[test]

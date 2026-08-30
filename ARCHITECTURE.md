@@ -83,7 +83,10 @@ file — the pure half never needs a sensor.
 For each model in the config worklist:
 
 1. Unload everything (`POST /api/models/unload`; `GET /unload` is a legacy
-   fallback); settle to a clean baseline (read once per sweep).
+   fallback), wait for `/running` to go empty, then wait for occupancy itself to
+   settle - the proxy's bookkeeping is not the device's occupancy. The settled
+   reading is **this model's** baseline, so a pool that failed to clear shortens one
+   delta visibly instead of every delta silently (SPEC §7.3).
 2. Trigger the model to load via its type's endpoint, on its own thread so the load
    is in flight while `/running` is polled.
 3. Poll `/running` until the model's state is `ready` — the only go signal.

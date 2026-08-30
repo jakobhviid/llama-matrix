@@ -143,6 +143,11 @@ pub fn resolve_plan(
     let mut unconfirmed: Vec<String> = Vec::new();
     let mut dropped_unconfirmed: Vec<String> = Vec::new();
     let mut suspect: Vec<String> = Vec::new();
+    // Footprints measured while something else was in the pool (SPEC §7.3). Named
+    // because they explain a thinner matrix than the box can actually hold: they can
+    // only be too high, so they cost packs rather than risking a pack that does not
+    // fit, and re-measuring on a quiet box is what recovers them.
+    let mut contended: Vec<String> = Vec::new();
     for record in &parsed.models {
         let Some(measurement) = store.select(&record.id, &record.param_hash)? else {
             unmeasured.push(record.id.clone());
@@ -180,6 +185,9 @@ pub fn resolve_plan(
                 ratio * 100.0
             ));
         }
+        if measurement.contended == Some(true) {
+            contended.push(record.id.clone());
+        }
         footprints.push(ModelFootprint {
             id: record.id.clone(),
             model_type: record.model_type,
@@ -196,6 +204,16 @@ pub fn resolve_plan(
     })?;
     plan.excluded.extend(unmeasured);
     plan.warnings.extend(suspect);
+    if !contended.is_empty() {
+        plan.warnings.push(format!(
+            "{} footprint(s) were measured while something else was resident, so they are \
+             probably too high and this matrix is probably smaller than the box can hold: {}. \
+             Quiesce anything that requests models - health probes and pollers especially - and \
+             re-measure with `llama-matrix measure --force`",
+            contended.len(),
+            contended.join(", ")
+        ));
+    }
     if !dropped_unconfirmed.is_empty() {
         plan.warnings.push(format!(
             "{} footprint(s) were recorded without confirming that the model finished allocating, \

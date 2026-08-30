@@ -120,6 +120,27 @@ pub struct Measurement {
     /// its weights, which makes this a cheap, backend-agnostic sanity floor.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub weights_gb: Option<f64>,
+    /// The empty-pool occupancy this delta was taken against, in GB.
+    ///
+    /// Read immediately before this model loaded, so `abs_total - pool_baseline =
+    /// d_total` is checkable after the fact and a baseline that still counted a
+    /// previous model cannot silently shorten the delta.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool_baseline: Option<f64>,
+    /// Was anything other than this model in the pool during its measurement window?
+    ///
+    /// A footprint is a *solo* footprint, and nothing stops a client (a health probe,
+    /// a RAG poller, a scheduled job) from asking llama-swap for another model
+    /// mid-sweep. `Some(true)` means the sweep saw evidence of exactly that, so the
+    /// number may include memory that is not this model's. `None` means the writer
+    /// ran no such check.
+    ///
+    /// It does not gate anything, because the risk direction is favourable:
+    /// contamination adds occupancy, so a contended reading is *over*-measured, and
+    /// over-measuring wastes packs but never OOMs (Principle 1). It is reported so
+    /// the operator can quiesce the box and `--force` the entries back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contended: Option<bool>,
     /// The hashed (memory) command, human-readable.
     #[serde(default)]
     pub params: String,

@@ -137,7 +137,7 @@ property of `(model, box)`, so they must not travel with the weights).
 
 ```json
 {
-  "baseline": 0.16,           // GB, empty pool occupancy
+  "baseline": 0.16,           // GB, empty pool occupancy: the LOWEST settled reading of the sweep (§7.3)
   "detected_total": 111.5,    // GB physical pool at sweep time (build may override via budget)
   "date": "2026-01-01",       // last sweep
   "additivity_check": { "combo": ["a","b","c"], "predicted": 73.15, "measured": 73.15, "error": 0.0 }
@@ -163,6 +163,8 @@ one entry per distinct footprint it has been measured at:
       "serving_verified": true,       // did /props confirm the served cmd? (§7.1)
       "peak_total": 49.60,    // highest delta seen while allocating (insight only)
       "weights_gb": 49.90,    // total size of the weight files the cmd names
+      "pool_baseline": 0.16,  // empty-pool occupancy this delta was taken against (§7.3)
+      "contended": false,     // was anything else in the pool during the window? (§7.3)
       "params": "…the hashed (memory) cmd, human-readable…",
       "measured_at": "2026-01-01"
     }
@@ -491,6 +493,55 @@ warnings. A **warning, never a verdict**: partial offload (`-ngl` below all laye
 `-ot`, `--cpu-moe`) is a legitimate reason to sit lower, and two verified image
 measurements sat at 0.97-0.98, which is why the floor is not 1.0. It needs no GPU and no
 cooperation from the backend, which is what makes it the cheapest cross-check available.
+
+
+### 7.3 Solo residency (a footprint is a *solo* footprint)
+
+Every delta is `occupancy with the model loaded - occupancy with the pool empty`, and
+that subtraction is only a footprint while **nothing else can put a model into the
+pool**. Any client that requests a model during a sample window makes llama-swap load
+it, and its memory lands in the delta of the model under test. Periodic callers are
+the worst version: a health probe or a RAG poller outlives whoever is at the
+keyboard, fires on a cycle comparable to a sample window, and is expensive for a
+reason its endpoint name does not advertise.
+
+Three mechanisms, because the risk is not symmetric.
+
+1. **The pool is cleared, not assumed cleared.** Unload, wait for `/running` to go
+   empty, *then* wait for occupancy to settle. `/running` is the proxy's bookkeeping,
+   not the device's occupancy: a model llama-swap has marked unloaded can still be
+   holding memory. This is the same positive evidence §7.2 demands after a load,
+   applied to the unload.
+
+2. **Each model's baseline is read immediately before it loads**, and stored with the
+   measurement as `pool_baseline`, so `abs_total - pool_baseline = d_total` is
+   checkable after the fact. A once-per-sweep baseline is the dangerous shape: if the
+   pool was not empty when it was taken, the baseline is too high and **every** delta
+   in the sweep is short by that amount, which is the one error direction that OOMs
+   (§1 of `PRINCIPLES.md`). Per-model baselines remove that failure mode rather than
+   detect it.
+
+3. **Contention is looked for from two sides**, since neither is sufficient alone. A
+   baseline more than 0.25 GB above the sweep's lowest empty-pool reading means the
+   pool did not come back: something was already resident. `/running` at sample time
+   naming any id but the model under test means something *arrived* during the
+   window. Either sets `contended: true` on the measurement and reports the model.
+
+`_box.json`'s `baseline` is the **lowest** settled empty-pool reading of the sweep.
+Contamination only ever adds occupancy, so the minimum is the best estimate of what
+the box holds with nothing loaded, which is what `build` uses as its always-resident
+floor.
+
+`contended` gates nothing, and that is deliberate: contamination *adds*, so a
+contended reading is over-measured, and over-measuring wastes packs but cannot OOM.
+It is reported so the operator can quiesce the box and `--force` the entries back.
+Compare `allocation_confirmed`, which is the opposite direction and does gate.
+
+**A re-measure that disagrees is reported.** When a fresh reading of an existing
+`(model, param-hash)` differs from the stored one by more than `max(0.25 GB, 2%)`,
+the sweep names both numbers and the date of the old one. Same box, same flags, two
+answers: at most one is right, and the higher one is the likelier contaminated. The
+new value is still written - it is the more recent evidence - but never silently.
 
 ## 8. Server control endpoints (llama-swap)
 
