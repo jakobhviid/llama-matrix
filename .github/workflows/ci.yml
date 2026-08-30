@@ -1,0 +1,35 @@
+# The green gate, run BEFORE merge.
+#
+# release.yml runs the same clippy + test on push to main, but that is after the
+# merge: a red gate there means no release is cut and the breakage is already on the
+# branch. This runs the identical two commands on the pull request, so the same
+# failure is found while it is still a proposal.
+#
+# Deliberately separate from release.yml rather than a `pull_request` trigger added
+# to it: a release workflow that can run without releasing is a workflow whose
+# purpose has to be re-derived from its `if:` conditions every time it is read.
+name: ci
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+# A new push to a PR makes the previous run's answer irrelevant.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # The same two commands release.yml gates on. Keep them identical: a gate that
+      # differs from the one that decides a release is a gate that can pass and still
+      # block the release.
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace

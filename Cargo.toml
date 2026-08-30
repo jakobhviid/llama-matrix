@@ -8,6 +8,14 @@ edition = "2021"
 license = "MIT"
 homepage = "https://github.com/jakobhviid/llama-matrix"
 
+# The clippy policy lives here so a bare local `cargo clippy` enforces the same gate
+# release.yml runs (`-D warnings`), instead of the gate existing only in CI where it
+# is found after a push. Deliberately clippy-only: denying rustc `warnings` here would
+# turn an unused variable into a build error mid-edit, which is a different and worse
+# trade than a lint gate.
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+
 [profile.release]
 opt-level = 3
 lto = true

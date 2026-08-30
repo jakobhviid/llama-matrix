@@ -95,16 +95,9 @@ above; each notes why it is not yet done.
   llama-matrix does network (HTTP to llama-swap), so it does not ban the TLS/crypto
   stacks dotsync bans. Advisories deliberately excluded, since a new CVE must never
   block an unrelated release; review them out of band.
-- **PR-triggered CI + build caching.** The release workflow only runs the green
-  gate on push to main (after merge). Add a `pull_request`-triggered clippy+test
-  workflow with `Swatinem/rust-cache`, so the gate runs before merge and CI is
-  faster. The whole fleet shares this gap.
 - **`regressions.rs`.** Adopt the temper/dotsync bug-to-regression-test discipline:
   a dedicated integration-test file where every confirmed bug gets a reproducing
   test before its fix.
-- **`[workspace.lints.clippy]` in `Cargo.toml`.** Declare the clippy policy in the
-  manifest (dotsync does), so a bare local `cargo clippy` enforces the same gate CI
-  runs, not only the `-D warnings` flag in release.yml.
 - **Finish moving CLI orchestration into core (guidelines D6).** `resolve_plan` now
   lives in core; the remaining provisioning glue in `main.rs` (the legacy-store
   migration decision in `open_store`, and `prune` / `setup` discovery) could follow,
