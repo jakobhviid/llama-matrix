@@ -1429,20 +1429,36 @@ pub fn validate(
     records: &[ModelRecord],
     store: &Store,
     options: &MeasureOptions,
+    only: Option<&str>,
     progress: &dyn Fn(Progress),
 ) -> Result<Option<Validation>> {
     let gpu = platform::detect().context("validate needs a GPU sensor")?;
     let _lock = LockGuard::acquire(store.dir())?;
     let agent = poll_agent();
 
-    // The tightest set that names more than one loadable model. A single-model set
-    // proves nothing about additivity, and an `aux`-only set is already inside every
-    // other set's prediction.
+    // The tightest set that names more than one loadable model, or the one named. A
+    // single-model set proves nothing about additivity, and an `aux`-only set is
+    // already inside every other set's prediction.
+    //
+    // The default is the tightest because it is the binding claim and everything
+    // smaller is implied by it. `--set` exists because "implied by" is an argument
+    // about footprints, and an operator with a specific worry (a diffusion server
+    // that allocates transiently, a combination that failed once) should be able to
+    // put that exact combination on the device instead of arguing about it.
     let by_id: HashMap<&str, &ModelRecord> =
         records.iter().map(|record| (record.id.as_str(), record)).collect();
+    if let Some(name) = only {
+        if !plan.sets.iter().any(|set| set.name == name) {
+            bail!(
+                "this config declares no set named `{name}`; `llama-matrix build` prints the \
+                 names it emits"
+            );
+        }
+    }
     let Some((set, combo)) = plan
         .sets
         .iter()
+        .filter(|set| only.is_none_or(|name| set.name == name))
         .filter_map(|set| {
             let combo: Vec<String> = crate::build::set_member_ids(&plan.sets, set)
                 .into_iter()

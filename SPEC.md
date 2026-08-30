@@ -650,6 +650,13 @@ the binding claim, everything smaller is implied by it, and loading it is not a 
 the operator is not already taking, because llama-swap will load exactly that
 combination on demand. A single-model set proves nothing about additivity.
 
+`--set <name>` tests a named set instead. "Implied by" is an argument about
+footprints, and an operator with a specific worry (a diffusion server that allocates
+transiently, a combination that failed once) should be able to put that exact
+combination on the device rather than argue about it. The result overwrites
+`additivity_check` either way; the record names the `combo` it tested, so which claim
+it is evidence for is never in doubt.
+
 The result goes to `_box.json` as `additivity_check`, with `error = measured -
 predicted`:
 

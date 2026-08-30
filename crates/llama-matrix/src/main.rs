@@ -115,6 +115,9 @@ enum Cmd {
         /// llama-swap base URL (default: from config, else http://localhost:8080).
         #[arg(long)]
         endpoint: Option<String>,
+        /// Test this declared set instead of the tightest one (e.g. `pack1`).
+        #[arg(long = "set", value_name = "NAME")]
+        set: Option<String>,
     },
     /// Provision llama-matrix.toml (find config + endpoint, detect the budget).
     Setup {
@@ -251,7 +254,9 @@ fn run(cli: Cli) -> Result<()> {
         }) => cmd_measure(config, endpoint, force, only, json)?,
         Some(Cmd::Setup { config, endpoint }) => cmd_setup(config, endpoint, json)?,
         Some(Cmd::Drift) => cmd_drift(json)?,
-        Some(Cmd::Validate { config, endpoint }) => cmd_validate(config, endpoint, json)?,
+        Some(Cmd::Validate { config, endpoint, set }) => {
+            cmd_validate(config, endpoint, set, json)?
+        }
         Some(Cmd::Prune { yes }) => cmd_prune(yes, json)?,
     }
     Ok(())
@@ -396,7 +401,12 @@ fn cmd_drift(json: bool) -> Result<()> {
 
 /// `setup` - provision llama-matrix.toml (discover config + endpoint, probe budget).
 /// `validate` - load one declared combination and see whether it really fits.
-fn cmd_validate(config: Option<String>, endpoint: Option<String>, json: bool) -> Result<()> {
+fn cmd_validate(
+    config: Option<String>,
+    endpoint: Option<String>,
+    set: Option<String>,
+    json: bool,
+) -> Result<()> {
     use llama_matrix_core::measure::{
         validate, MeasureOptions, Progress, DEFAULT_LOAD_TIMEOUT, DEFAULT_TRIGGER_TIMEOUT,
     };
@@ -427,14 +437,21 @@ fn cmd_validate(config: Option<String>, endpoint: Option<String>, json: bool) ->
         }
     };
 
-    let Some(result) = validate(&plan, &parsed.models, &store, &options, &show_progress)? else {
+    let Some(result) =
+        validate(&plan, &parsed.models, &store, &options, set.as_deref(), &show_progress)?
+    else {
         if json {
             println!("{}", serde_json::to_string(&report::Status { status: "nothing-to-validate" })?);
         } else {
-            ui::warn(
-                "no declared set names more than one loadable model, so there is no co-residency \
-                 claim to test",
-            );
+            ui::warn(&match &set {
+                Some(name) => format!(
+                    "`{name}` names at most one loadable model, so there is no co-residency claim \
+                     in it to test"
+                ),
+                None => "no declared set names more than one loadable model, so there is no \
+                         co-residency claim to test"
+                    .to_string(),
+            });
         }
         return Ok(());
     };

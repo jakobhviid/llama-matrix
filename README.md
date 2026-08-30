@@ -124,7 +124,7 @@ image pool), and you can retune a tier or pin a single model in `[evict_costs]`
 | `measure` | load each model, record its real footprint (GPU-touching, stateful) |
 | `build` | generate the matrix block; `--out FILE` to write it, `--apply` to splice it |
 | `drift` | show whether the live matrix block matches a fresh build (read-only) |
-| `validate` | load the tightest declared combination and check it really fits (GPU-touching) |
+| `validate` | load the tightest declared combination and check it really fits (`--set <name>` for a specific one; GPU-touching) |
 | `configure` | get/set the scalar settings (budget, margin, strategy, …) |
 | `prune` | drop measurements whose weight files are gone (`--yes` to delete) |
 

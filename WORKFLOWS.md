@@ -106,7 +106,9 @@ llama-matrix validate                # …then load the tightest declared combo:
   reports which ones never became ready and records nothing). A **positive** error is
   the one that matters: the models together hold more than their solo footprints
   predicted, so every declared combination is closer to the ceiling than the plan
-  says. It is reported against `margin`, which is what has to absorb it.
+  says. It is reported against `margin`, which is what has to absorb it. `--set
+  <name>` tests a named set instead of the tightest, for when you have a specific
+  worry rather than a general one.
 
 Add `--json` to any step to capture structured output for an agent to inspect and
 feed to the next.
