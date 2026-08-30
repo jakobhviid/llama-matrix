@@ -16,7 +16,7 @@ use anyhow::{bail, Result};
 use crate::cache::Store;
 use crate::config;
 use crate::model::ModelType;
-use crate::policy::{CostRole, OnHostOverflow, OnOverflow, OnUnconfirmed, Policy, Strategy};
+use crate::policy::{CostRole, OnHostOverflow, OnOverflow, OnUnconfirmed, Policy};
 
 /// Work budget for maximal-pack enumeration. Enumerating maximal fitting packs is
 /// worst-case exponential in the light-unit count, so the recursion runs under a
@@ -53,6 +53,14 @@ pub struct ModelFootprint {
     /// one has been decided, and a backend without the cache has nothing to bound.
     /// Counting them per set is what turns "this set is over" into "set `-cram N`".
     pub assumed_cache: bool,
+    /// Does this model hold a host prompt cache at all (a llama.cpp server), whether
+    /// or not its size is declared? This is what `max_cache_holders_per_set` counts,
+    /// because it is what spends the host budget.
+    pub holds_cache: bool,
+    /// Does this model occupy a residency slot? A proxy entry fronts a service
+    /// llama-swap does not allocate for, so it is reserved overhead like `margin`
+    /// rather than something the cap should spend a slot on.
+    pub occupies_slot: bool,
 }
 
 /// A logical model: one or more interchangeable variants, sized by the largest.
@@ -69,6 +77,11 @@ struct Unit {
     /// One prompt cache, if any member holds an assumed one: a `|` group loads a
     /// single member at a time.
     assumed_caches: usize,
+    /// Residency slots one loaded member costs: 1, or 0 for a proxy-only unit.
+    slots: usize,
+    /// Cache-holder slots one loaded member costs. Conservative across an
+    /// alternation: if any member is a llama.cpp server, the unit can be one.
+    cache_slots: usize,
 }
 
 impl Unit {
@@ -102,6 +115,70 @@ pub struct EmittedSet {
     pub host_assumed_caches: usize,
     /// Product of the expression's `|`-group sizes - must be ≤ 1000.
     pub fanout: usize,
+}
+
+/// The two cardinality budgets a declared set spends, and what is left of them.
+///
+/// Separate from the GB ceiling because a count is not a quantity: no budget in
+/// gigabytes can say "at most five models", and no model count can say "under
+/// 107.5 GB". `usize::MAX` means uncapped, so an unset knob costs nothing and
+/// behaves exactly as before.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Slots {
+    /// Models resident at once. Proxies do not count: they front a service
+    /// llama-swap does not allocate for (see [`ModelFootprint::occupies_slot`]).
+    models: usize,
+    /// Of those, llama.cpp servers holding a host prompt cache. This is the count
+    /// that tracks what the host budget actually spends.
+    caches: usize,
+}
+
+impl Slots {
+    fn none() -> Slots {
+        Slots { models: 0, caches: 0 }
+    }
+
+    /// The cap from policy; an unset knob is `usize::MAX`, not zero.
+    fn cap(policy: &Policy) -> Slots {
+        Slots {
+            models: policy.max_models_per_set.unwrap_or(usize::MAX),
+            caches: policy.max_cache_holders_per_set.unwrap_or(usize::MAX),
+        }
+    }
+
+    fn is_capped(self) -> bool {
+        self.models != usize::MAX || self.caches != usize::MAX
+    }
+
+    fn plus(self, unit: &Unit) -> Slots {
+        Slots {
+            models: self.models.saturating_add(unit.slots),
+            caches: self.caches.saturating_add(unit.cache_slots),
+        }
+    }
+
+    /// What is left of `self` after `spent`, floored at zero.
+    fn minus(self, spent: Slots) -> Slots {
+        Slots {
+            models: self.models.saturating_sub(spent.models),
+            caches: self.caches.saturating_sub(spent.caches),
+        }
+    }
+
+    /// Does a budget of `self` admit a set costing `wanted`?
+    fn admits(self, wanted: Slots) -> bool {
+        wanted.models <= self.models && wanted.caches <= self.caches
+    }
+}
+
+/// The per-set cardinality caps in force, and the largest set actually emitted, so a
+/// reader can tell whether a cap is binding or merely set.
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+pub struct SetCaps {
+    pub max_models: Option<usize>,
+    pub max_cache_holders: Option<usize>,
+    pub largest_models: usize,
+    pub largest_cache_holders: usize,
 }
 
 /// Smallest saving worth telling an operator about. Below this it is measurement
@@ -170,6 +247,9 @@ pub struct MatrixPlan {
     pub host_ceiling: Option<f64>,
     /// Why the host check did not run, when it did not.
     pub host_skipped: Option<String>,
+    /// The cardinality caps in force and how close the emitted block came to them;
+    /// `None` when neither cap is set.
+    pub caps: Option<SetCaps>,
     /// Sets whose host cost exceeds `host_ceiling`, with what they need.
     pub host_over: Vec<(String, f64)>,
     /// The largest uniform `-cram` (in GB) that would bring every over-budget set
@@ -333,6 +413,9 @@ pub fn resolve_plan(
                 d_total: measurement.d_total,
                 host_gb: Some(0.0),
                 assumed_cache: false,
+                holds_cache: false,
+                // Reserved overhead, not a scheduled unit: see the field's docs.
+                occupies_slot: false,
             });
             continue;
         }
@@ -363,6 +446,8 @@ pub fn resolve_plan(
             d_total: measurement.d_total,
             host_gb,
             assumed_cache,
+            holds_cache,
+            occupies_slot: true,
         });
     }
 
@@ -538,6 +623,15 @@ fn push_unique(ids: &mut Vec<String>, id: &str) {
     }
 }
 
+/// A cap for a message: the number, or "unset" for `usize::MAX`.
+fn render_cap(cap: usize) -> String {
+    if cap == usize::MAX {
+        "unset".to_string()
+    } else {
+        cap.to_string()
+    }
+}
+
 /// A `-cram` value as the flag takes it: whole MiB, rounded DOWN to a multiple of
 /// 256 so the suggestion is a round number that is never larger than what fits.
 fn cram_mib(gb: f64) -> u64 {
@@ -607,11 +701,18 @@ fn collapse_units(llm_models: &[&ModelFootprint], policy: &Policy) -> Vec<Unit> 
                 size,
                 host_size,
                 assumed_caches: usize::from(members.iter().any(|model| model.assumed_cache)),
+                slots: usize::from(members.iter().any(|model| model.occupies_slot)),
+                cache_slots: usize::from(members.iter().any(|model| model.holds_cache)),
             }
         })
         .collect();
 
-    if policy.strategy == Strategy::Family && !policy.groups.is_empty() {
+    // A declared group applies whenever it is declared. It used to be gated behind
+    // `strategy = "family"`, which made a hand-written `[groups]` silently inert on
+    // the default strategy: no warning, no error, an emitted block identical to the
+    // one before it, which reads as "I misunderstood the syntax" rather than "the
+    // feature is off". That is the same failure `[roles]` had, and the same fix.
+    if !policy.groups.is_empty() {
         units = apply_groups(units, policy);
     }
     units
@@ -627,6 +728,8 @@ fn apply_groups(units: Vec<Unit>, policy: &Policy) -> Vec<Unit> {
         let mut size = 0.0_f64;
         let mut host_size = Some(0.0_f64);
         let mut assumed_caches = 0;
+        let mut slots = 0;
+        let mut cache_slots = 0;
         for (index, unit) in units.iter().enumerate() {
             if consumed.contains(&index) {
                 continue;
@@ -640,6 +743,8 @@ fn apply_groups(units: Vec<Unit>, policy: &Policy) -> Vec<Unit> {
                     _ => None,
                 };
                 assumed_caches = assumed_caches.max(unit.assumed_caches);
+                slots = slots.max(unit.slots);
+                cache_slots = cache_slots.max(unit.cache_slots);
             }
         }
         if !ids.is_empty() {
@@ -649,6 +754,8 @@ fn apply_groups(units: Vec<Unit>, policy: &Policy) -> Vec<Unit> {
                 size,
                 host_size,
                 assumed_caches,
+                slots,
+                cache_slots,
             });
         }
     }
@@ -672,12 +779,15 @@ fn apply_groups(units: Vec<Unit>, policy: &Policy) -> Vec<Unit> {
 /// the walk stops and returns `false` (truncated). The packs collected so far are
 /// still valid and safe - a smaller declaration never OOMs (Principle #1) - and the
 /// caller warns and applies `on_overflow`. Returns `true` iff the walk completed.
+#[allow(clippy::too_many_arguments)]
 fn enumerate_maximal_packs(
     start: usize,
     chosen: &mut Vec<usize>,
     running_total: f64,
-    sizes: &[f64],
+    running_slots: Slots,
+    candidates: &[&Unit],
     limit: f64,
+    room: Slots,
     node_budget: &mut usize,
     results: &mut Vec<Vec<usize>>,
 ) -> bool {
@@ -686,25 +796,34 @@ fn enumerate_maximal_packs(
     }
     *node_budget -= 1;
 
-    // Maximal ⟺ no unit outside `chosen` still fits in the headroom. (A fitting
-    // superset would add exactly such a unit, so "nothing addable" is precisely
-    // "no fitting superset" - the predicate the old O(subsets²) filter computed.)
-    let nothing_addable = (0..sizes.len())
+    let admits = |index: usize, total: f64, slots: Slots| {
+        total + candidates[index].size <= limit && room.admits(slots.plus(candidates[index]))
+    };
+
+    // Maximal ⟺ no unit outside `chosen` still fits, in GB *or* in slots. A cap
+    // therefore changes what maximal means rather than filtering the results: a
+    // six-unit pack dropped afterwards would take the five-unit combinations it
+    // licensed with it, since llama-swap treats any subset of a declared set as
+    // valid. (A fitting superset would add exactly such a unit, so "nothing
+    // addable" is precisely "no fitting superset".)
+    let nothing_addable = (0..candidates.len())
         .filter(|index| !chosen.contains(index))
-        .all(|index| running_total + sizes[index] > limit);
+        .all(|index| !admits(index, running_total, running_slots));
     if nothing_addable && !chosen.is_empty() {
         results.push(chosen.clone());
     }
 
-    for index in start..sizes.len() {
-        if running_total + sizes[index] <= limit {
+    for index in start..candidates.len() {
+        if admits(index, running_total, running_slots) {
             chosen.push(index);
             let completed = enumerate_maximal_packs(
                 index + 1,
                 chosen,
-                running_total + sizes[index],
-                sizes,
+                running_total + candidates[index].size,
+                running_slots.plus(candidates[index]),
+                candidates,
                 limit,
+                room,
                 node_budget,
                 results,
             );
@@ -787,6 +906,11 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
         models.iter().filter(|model| model.assumed_cache).count()
     };
     let aux_caches = caches_of(&aux_models);
+    let slot_cap = Slots::cap(policy);
+    let aux_slots = Slots {
+        models: aux_models.iter().filter(|model| model.occupies_slot).count(),
+        caches: aux_models.iter().filter(|model| model.holds_cache).count(),
+    };
     let has_aux = !aux_models.is_empty();
     // The ` & +aux` suffix is only valid when an `aux` set is actually emitted;
     // with no aux models it must be omitted, or the block would reference an
@@ -794,7 +918,14 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
     let aux_ref = if has_aux { " & +aux" } else { "" };
 
     // ---- logical units + heavy classification ----
+    //
+    // The image pool goes through the same collapse as the LLM roster, which is what
+    // lets `[groups]` reach it: a declared group of image models becomes one
+    // alternation, so "one diffusion server at a time" is expressible. Before this
+    // the pool was a flat list of `ModelFootprint`s that `[groups]` never saw, and an
+    // operator who wrote the group got no group and no diagnostic.
     let units = collapse_units(&llm_models, policy);
+    let image_units = collapse_units(&image_models, policy);
     let smallest_other_unit = |index: usize| -> f64 {
         units
             .iter()
@@ -818,17 +949,34 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
     //     (short-circuits the powerset for the common "everything co-resides" case);
     //   • otherwise a bounded recursive walk, which fails over (below) if a roster
     //     of many pairwise-fitting distinct units would produce too many packs.
-    let light_sizes: Vec<f64> = light_indices.iter().map(|&index| units[index].size).collect();
+    let light_units: Vec<&Unit> = light_indices.iter().map(|&index| &units[index]).collect();
     let members_limit = ceiling - baseline - aux_cost;
+    // Aux rides along in nearly every set, so its slots come off the top before the
+    // knapsack sees a budget. On a roster whose aux is a whisper server and a proxy,
+    // that is one model slot and no cache slot.
+    let members_room = slot_cap.minus(aux_slots);
+    let whole_roster = light_units.iter().fold(Slots::none(), |spent, unit| spent.plus(unit));
     let mut raw_packs: Vec<Vec<usize>> = Vec::new();
-    let completed = if light_sizes.iter().sum::<f64>() <= members_limit {
-        if !light_sizes.is_empty() {
-            raw_packs.push((0..light_sizes.len()).collect());
+    let completed = if light_units.iter().map(|unit| unit.size).sum::<f64>() <= members_limit
+        && members_room.admits(whole_roster)
+    {
+        if !light_units.is_empty() {
+            raw_packs.push((0..light_units.len()).collect());
         }
         true
     } else {
         let mut node_budget = ENUM_NODE_BUDGET;
-        enumerate_maximal_packs(0, &mut Vec::new(), 0.0, &light_sizes, members_limit, &mut node_budget, &mut raw_packs)
+        enumerate_maximal_packs(
+            0,
+            &mut Vec::new(),
+            0.0,
+            Slots::none(),
+            &light_units,
+            members_limit,
+            members_room,
+            &mut node_budget,
+            &mut raw_packs,
+        )
     };
     let enumeration_truncated = !completed || raw_packs.len() > MAX_PACKS;
     raw_packs.truncate(MAX_PACKS);
@@ -849,7 +997,7 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
     // the remaining ties. Two packs that are genuinely the same size now always order
     // the same way, whatever the sensor did that day.
     let pack_size = |pack: &BTreeSet<usize>| -> i64 {
-        let total: f64 = pack.iter().map(|&position| light_sizes[position]).sum();
+        let total: f64 = pack.iter().map(|&position| light_units[position].size).sum();
         (total * 10.0).round() as i64
     };
     let pack_members = |pack: &BTreeSet<usize>| -> Vec<&str> {
@@ -864,16 +1012,21 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
     });
 
     // ---- images that fit beside a unit (largest subset, smallest-first) ----
-    let mut images_by_size: Vec<&ModelFootprint> = image_models.clone();
+    let mut images_by_size: Vec<&Unit> = image_units.iter().collect();
     images_by_size
-        .sort_by(|left, right| left.d_total.partial_cmp(&right.d_total).unwrap_or(std::cmp::Ordering::Equal));
-    let images_fitting = |free: f64| -> Vec<&ModelFootprint> {
-        let mut chosen = Vec::new();
+        .sort_by(|left, right| left.size.partial_cmp(&right.size).unwrap_or(std::cmp::Ordering::Equal));
+    // Smallest first, within whatever GB and slot budget is left. An alternation
+    // costs one slot however many members it names, which is the point of grouping.
+    let images_fitting = |free: f64, room: Slots| -> Vec<&Unit> {
+        let mut chosen: Vec<&Unit> = Vec::new();
         let mut total = 0.0;
+        let mut spent = Slots::none();
         for image in &images_by_size {
-            if total + image.d_total <= free {
-                chosen.push(*image);
-                total += image.d_total;
+            let next = spent.plus(image);
+            if total + image.size <= free && room.admits(next) {
+                chosen.push(image);
+                total += image.size;
+                spent = next;
             }
         }
         chosen
@@ -883,6 +1036,15 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
     // box holds anyway, plus each resident model's own host cost.
     let host_footprint = |members: f64| -> Option<f64> {
         host.map(|host| host.baseline + members)
+    };
+
+    // A unit is referenced by its `g_` helper when it alternates, else by its bare id.
+    let unit_reference = |unit: &Unit| -> String {
+        if unit.ids.len() > 1 {
+            format!("+g_{}", unit.key)
+        } else {
+            unit.ids[0].clone()
+        }
     };
 
     // ---- emit ----
@@ -930,9 +1092,9 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
         });
     }
 
-    // helper set per light unit with >1 variant
-    for &index in &light_indices {
-        let unit = &units[index];
+    // helper set per alternating unit, image pool included: a set referenced as
+    // `+g_<key>` has to exist, or the emitted block dangles.
+    for unit in light_indices.iter().map(|&index| &units[index]).chain(image_units.iter()) {
         if unit.ids.len() > 1 {
             sets.push(EmittedSet {
                 name: format!("g_{}", unit.key),
@@ -947,37 +1109,33 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
     }
 
     // images pool
-    if !image_models.is_empty() {
-        let images_joined = image_models
+    // The whole image pool, as far as the caps allow. A grouped pool is one
+    // alternation and therefore one slot, which is what makes "one diffusion server
+    // at a time" expressible.
+    let whole_pool = images_fitting(f64::INFINITY, slot_cap.minus(aux_slots));
+    if !whole_pool.is_empty() {
+        let images_joined = whole_pool
             .iter()
-            .map(|model| model.id.clone())
+            .map(|unit| unit_reference(unit))
             .collect::<Vec<_>>()
             .join(" & ");
         let expr = format!("{images_joined}{aux_ref}");
         let footprint: f64 =
-            baseline + aux_cost + image_models.iter().map(|model| model.d_total).sum::<f64>();
+            baseline + aux_cost + whole_pool.iter().map(|unit| unit.size).sum::<f64>();
         sets.push(EmittedSet {
             name: "images".to_string(),
             expr,
             comment: "any image subset + aux".to_string(),
             footprint,
             host_footprint: host_footprint(
-                aux_host + image_models.iter().map(|model| host_of(model)).sum::<f64>(),
+                aux_host + whole_pool.iter().map(|unit| unit.host_size.unwrap_or(0.0)).sum::<f64>(),
             ),
-            host_assumed_caches: aux_caches + caches_of(&image_models),
-            fanout: 1,
+            host_assumed_caches: aux_caches
+                + whole_pool.iter().map(|unit| unit.assumed_caches).sum::<usize>(),
+            fanout: whole_pool.iter().map(|unit| unit.fanout()).product(),
         });
     }
 
-    // helper-or-id reference for a light unit
-    let unit_reference = |index: usize| -> String {
-        let unit = &units[index];
-        if unit.ids.len() > 1 {
-            format!("+g_{}", unit.key)
-        } else {
-            unit.ids[0].clone()
-        }
-    };
 
     // packs, each carrying whatever images still fit beside it
     //
@@ -996,19 +1154,29 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
     // the case it exists for at no cost.
     for (position, pack) in packs.iter().enumerate() {
         let unit_indices: Vec<usize> = pack.iter().map(|&light_position| light_indices[light_position]).collect();
-        let references: Vec<String> = unit_indices.iter().map(|&index| unit_reference(index)).collect();
+        let references: Vec<String> = unit_indices.iter().map(|&index| unit_reference(&units[index])).collect();
         let members_total: f64 = unit_indices.iter().map(|&index| units[index].size).sum();
         let members_host: f64 =
             unit_indices.iter().map(|&index| units[index].host_size.unwrap_or(0.0)).sum();
-        let riding = images_fitting(ceiling - baseline - members_total - aux_cost);
+        let members_slots = unit_indices
+            .iter()
+            .fold(aux_slots, |spent, &index| spent.plus(&units[index]));
+        let riding = images_fitting(
+            ceiling - baseline - members_total - aux_cost,
+            slot_cap.minus(members_slots),
+        );
         let images_suffix = riding
             .iter()
-            .map(|model| format!(" & {}", model.id))
+            .map(|unit| format!(" & {}", unit_reference(unit)))
             .collect::<Vec<_>>()
             .concat();
         let expr = format!("{}{images_suffix}{aux_ref}", references.join(" & "));
-        let images_total: f64 = riding.iter().map(|model| model.d_total).sum();
-        let fanout: usize = unit_indices.iter().map(|&index| units[index].fanout()).product();
+        let images_total: f64 = riding.iter().map(|unit| unit.size).sum();
+        let fanout: usize = unit_indices
+            .iter()
+            .map(|&index| units[index].fanout())
+            .chain(riding.iter().map(|unit| unit.fanout()))
+            .product();
         let names: Vec<&str> = unit_indices.iter().map(|&index| units[index].key.as_str()).collect();
         let footprint = baseline + members_total + aux_cost + images_total;
         let images_note = match riding.len() {
@@ -1021,14 +1189,16 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
             comment: format!("{footprint:.1} GB: {}{images_note}", names.join("+")),
             footprint,
             host_footprint: host_footprint(
-                members_host + aux_host + riding.iter().map(|model| host_of(model)).sum::<f64>(),
+                members_host
+                    + aux_host
+                    + riding.iter().map(|unit| unit.host_size.unwrap_or(0.0)).sum::<f64>(),
             ),
             host_assumed_caches: unit_indices
                 .iter()
                 .map(|&index| units[index].assumed_caches)
                 .sum::<usize>()
                 + aux_caches
-                + caches_of(&riding),
+                + riding.iter().map(|unit| unit.assumed_caches).sum::<usize>(),
             fanout,
         });
     }
@@ -1037,16 +1207,16 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
     for &index in &light_indices {
         let unit = &units[index];
         let free = ceiling - baseline - unit.size - aux_cost;
-        let fitting = images_fitting(free);
+        let fitting = images_fitting(free, slot_cap.minus(aux_slots.plus(unit)));
         if !fitting.is_empty() {
             let images_expr = fitting
                 .iter()
-                .map(|model| model.id.clone())
+                .map(|image| unit_reference(image))
                 .collect::<Vec<_>>()
                 .join(" & ");
-            let expr = format!("{} & {}{aux_ref}", unit_reference(index), images_expr);
+            let expr = format!("{} & {}{aux_ref}", unit_reference(unit), images_expr);
             let footprint =
-                baseline + unit.size + aux_cost + fitting.iter().map(|model| model.d_total).sum::<f64>();
+                baseline + unit.size + aux_cost + fitting.iter().map(|image| image.size).sum::<f64>();
             sets.push(EmittedSet {
                 name: format!("llmimg_{}", unit.key),
                 expr,
@@ -1055,10 +1225,13 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
                 host_footprint: host_footprint(
                     unit.host_size.unwrap_or(0.0)
                         + aux_host
-                        + fitting.iter().map(|model| host_of(model)).sum::<f64>(),
+                        + fitting.iter().map(|image| image.host_size.unwrap_or(0.0)).sum::<f64>(),
                 ),
-                host_assumed_caches: unit.assumed_caches + aux_caches + caches_of(&fitting),
-                fanout: unit.fanout(),
+                host_assumed_caches: unit.assumed_caches
+                    + aux_caches
+                    + fitting.iter().map(|image| image.assumed_caches).sum::<usize>(),
+                fanout: unit.fanout()
+                    * fitting.iter().map(|image| image.fanout()).product::<usize>(),
             });
         }
     }
@@ -1078,13 +1251,15 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
         }
         let with_aux = has_aux && baseline + unit.size + aux_cost <= ceiling;
         let reserved = if with_aux { aux_cost } else { 0.0 };
-        let fitting = images_fitting(ceiling - baseline - unit.size - reserved);
+        let heavy_spent = if with_aux { aux_slots.plus(unit) } else { Slots::none().plus(unit) };
+        let fitting =
+            images_fitting(ceiling - baseline - unit.size - reserved, slot_cap.minus(heavy_spent));
         let images_suffix = if fitting.is_empty() {
             String::new()
         } else {
             format!(
                 " & {}",
-                fitting.iter().map(|model| model.id.clone()).collect::<Vec<_>>().join(" & ")
+                fitting.iter().map(|image| unit_reference(image)).collect::<Vec<_>>().join(" & ")
             )
         };
         let aux_suffix = if with_aux { " & +aux" } else { "" };
@@ -1096,7 +1271,7 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
             ));
         }
         let footprint =
-            baseline + unit.size + reserved + fitting.iter().map(|model| model.d_total).sum::<f64>();
+            baseline + unit.size + reserved + fitting.iter().map(|image| image.size).sum::<f64>();
         let aux_note = if has_aux && !with_aux { ", no aux" } else { "" };
         sets.push(EmittedSet {
             name: format!("heavy_{}", unit.key),
@@ -1106,12 +1281,12 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
             host_footprint: host_footprint(
                 unit.host_size.unwrap_or(0.0)
                     + if with_aux { aux_host } else { 0.0 }
-                    + fitting.iter().map(|model| host_of(model)).sum::<f64>(),
+                    + fitting.iter().map(|image| image.host_size.unwrap_or(0.0)).sum::<f64>(),
             ),
             host_assumed_caches: unit.assumed_caches
                 + if with_aux { aux_caches } else { 0 }
-                + caches_of(&fitting),
-            fanout: unit.fanout(),
+                + fitting.iter().map(|image| image.assumed_caches).sum::<usize>(),
+            fanout: unit.fanout() * fitting.iter().map(|image| image.fanout()).product::<usize>(),
         });
     }
 
@@ -1184,6 +1359,49 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
         .collect();
     let mut seen: BTreeSet<String> = BTreeSet::new();
     sets.retain(|set| referenced.contains(&set.name) || seen.insert(set.expr.clone()));
+
+    // ---- guard 4: the cardinality caps ----
+    // Computed from the emitted expressions rather than carried along from the
+    // enumeration, so it is an independent check of the same claim: `set_member_ids`
+    // expands helpers and takes one member per alternation, which is exactly what
+    // llama-swap holds resident.
+    let cost_of: std::collections::HashMap<&str, (usize, usize)> = models
+        .iter()
+        .map(|model| {
+            (
+                model.id.as_str(),
+                (usize::from(model.occupies_slot), usize::from(model.holds_cache)),
+            )
+        })
+        .collect();
+    let mut largest = Slots::none();
+    for set in &sets {
+        let spent = set_member_ids(&sets, set).iter().fold(Slots::none(), |spent, id| {
+            let (models, caches) = cost_of.get(id.as_str()).copied().unwrap_or((1, 0));
+            Slots { models: spent.models + models, caches: spent.caches + caches }
+        });
+        if !slot_cap.admits(spent) {
+            bail!(
+                "internal error: emitted set `{}` holds {} models ({} of them cache-holders), \
+                 over the cap of {} / {} - refusing to emit a set the policy forbids",
+                set.name,
+                spent.models,
+                spent.caches,
+                render_cap(slot_cap.models),
+                render_cap(slot_cap.caches)
+            );
+        }
+        largest = Slots {
+            models: largest.models.max(spent.models),
+            caches: largest.caches.max(spent.caches),
+        };
+    }
+    let caps = slot_cap.is_capped().then_some(SetCaps {
+        max_models: policy.max_models_per_set,
+        max_cache_holders: policy.max_cache_holders_per_set,
+        largest_models: largest.models,
+        largest_cache_holders: largest.caches,
+    });
 
     // ---- guard 2: the 1000-combination cap (Principle #7 - never emit invalid) ----
     // `error` refuses; `group` OMITS the over-cap set (a safe under-declaration -
@@ -1316,6 +1534,7 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
         aux_cost,
         n_packs,
         n_heavies,
+        caps,
         host_ceiling,
         // Filled by `resolve_plan` when it is the reason the check did not run.
         host_skipped: None,
@@ -1581,6 +1800,8 @@ mod tests {
         ModelFootprint {
             host_gb: None,
             assumed_cache: false,
+            holds_cache: false,
+            occupies_slot: true,
             id: id.to_string(),
             model_type,
             primary_file: file.map(String::from),
@@ -1616,6 +1837,8 @@ mod tests {
         let with_host = |id: &str, file: &str, gpu: f64, host: f64| ModelFootprint {
             host_gb: Some(host),
             assumed_cache: true,
+            holds_cache: true,
+            occupies_slot: true,
             id: id.to_string(),
             model_type: ModelType::Llm,
             primary_file: Some(file.to_string()),
@@ -1723,6 +1946,138 @@ mod tests {
         let pack = plan.sets.iter().find(|set| set.name == "pack1").expect("a pack");
         assert!(pack.expr.contains("chat-q4"), "{}", pack.expr);
         assert!(pack.expr.contains("chat-q6"), "{}", pack.expr);
+    }
+
+    /// `[groups]` reaches image models, which is what makes "one diffusion server at
+    /// a time" expressible. Before this the pool was a flat list the grouping code
+    /// never saw, so an operator who wrote the group got no group and no diagnostic.
+    #[test]
+    fn a_declared_group_makes_the_image_pool_mutually_exclusive() {
+        let image = |id: &str, gb: f64| ModelFootprint {
+            host_gb: Some(1.0),
+            assumed_cache: false,
+            holds_cache: false,
+            occupies_slot: true,
+            id: id.to_string(),
+            model_type: ModelType::Image,
+            primary_file: Some(format!("/{id}.gguf")),
+            d_total: gb,
+        };
+        let models =
+            vec![image("flux", 21.0), image("chroma", 16.0), image("z-image", 8.0)];
+
+        // Ungrouped: all three co-resident, 45 GB.
+        let shared = build(&BuildInput {
+            models: &models,
+            policy: &budgeted(OnUnconfirmed::Warn),
+            baseline: 0.16,
+            budget: 111.5,
+            host: None,
+        })
+        .unwrap();
+        let pool = shared.sets.iter().find(|set| set.name == "images").expect("an image pool");
+        assert!((pool.footprint - (0.16 + 45.0)).abs() < 0.01, "{}", pool.footprint);
+
+        // Grouped: one at a time, sized by the largest. No `strategy` to set - a
+        // declared group applies because it is declared.
+        let mut policy = budgeted(OnUnconfirmed::Warn);
+        policy.groups.insert(
+            "images".to_string(),
+            vec!["flux".into(), "chroma".into(), "z-image".into()],
+        );
+        let exclusive = build(&BuildInput {
+            models: &models,
+            policy: &policy,
+            baseline: 0.16,
+            budget: 111.5,
+            host: None,
+        })
+        .unwrap();
+        let pool = exclusive.sets.iter().find(|set| set.name == "images").expect("an image pool");
+        assert!((pool.footprint - (0.16 + 21.0)).abs() < 0.01, "{}", pool.footprint);
+        // Emitted as an alternation, through the helper the pack references.
+        let helper = exclusive
+            .sets
+            .iter()
+            .find(|set| set.name == "g_images")
+            .expect("a helper for the grouped pool");
+        assert!(helper.expr.contains('|'), "{}", helper.expr);
+        assert!(pool.expr.contains("+g_images"), "{}", pool.expr);
+    }
+
+    /// The cap goes into the knapsack, not into a filter over the finished block:
+    /// llama-swap treats any subset of a declared set as valid, so dropping an
+    /// over-cap pack afterwards would take the smaller combinations it licensed too.
+    #[test]
+    fn a_cap_bounds_set_size_and_counts_the_right_things() {
+        let model = |id: &str, kind: ModelType, cache: bool, slot: bool| ModelFootprint {
+            host_gb: Some(1.0),
+            assumed_cache: cache,
+            holds_cache: cache,
+            occupies_slot: slot,
+            id: id.to_string(),
+            model_type: kind,
+            primary_file: Some(format!("/{id}.gguf")),
+            d_total: 10.0,
+        };
+        let models = vec![
+            model("a", ModelType::Llm, true, true),
+            model("b", ModelType::Llm, true, true),
+            model("c", ModelType::Llm, true, true),
+            model("d", ModelType::Llm, true, true),
+            // aux: a whisper server holds no prompt cache, a proxy holds nothing and
+            // occupies no slot (it is reserved overhead, like margin).
+            model("whisper", ModelType::Stt, false, true),
+            model("tts", ModelType::TtsProxy, false, false),
+        ];
+        let counts = |plan: &MatrixPlan, name: &str| {
+            let set = plan.sets.iter().find(|set| set.name == name).expect(name);
+            set_member_ids(&plan.sets, set).len()
+        };
+
+        // Uncapped: all four LLMs plus aux co-reside.
+        let open = build(&BuildInput {
+            models: &models,
+            policy: &budgeted(OnUnconfirmed::Warn),
+            baseline: 0.16,
+            budget: 111.5,
+            host: None,
+        })
+        .unwrap();
+        assert_eq!(counts(&open, "pack1"), 6, "4 LLMs + whisper + the proxy");
+        assert!(open.caps.is_none(), "no cap set, nothing to report");
+
+        // Capped at 4 models. The proxy does not count, so aux spends 1 and three
+        // LLMs fit: 3 + whisper + the uncounted proxy = 5 ids in the expression.
+        let mut policy = budgeted(OnUnconfirmed::Warn);
+        policy.max_models_per_set = Some(4);
+        let capped = build(&BuildInput {
+            models: &models,
+            policy: &policy,
+            baseline: 0.16,
+            budget: 111.5,
+            host: None,
+        })
+        .unwrap();
+        assert_eq!(counts(&capped, "pack1"), 5);
+        let caps = capped.caps.expect("a cap in force");
+        assert_eq!(caps.max_models, Some(4));
+        assert_eq!(caps.largest_models, 4, "the cap is binding");
+
+        // Capped at 2 cache-holders. Neither whisper nor the proxy holds one, so this
+        // bites only the LLMs: 2 + whisper + proxy.
+        let mut policy = budgeted(OnUnconfirmed::Warn);
+        policy.max_cache_holders_per_set = Some(2);
+        let by_cache = build(&BuildInput {
+            models: &models,
+            policy: &policy,
+            baseline: 0.16,
+            budget: 111.5,
+            host: None,
+        })
+        .unwrap();
+        assert_eq!(counts(&by_cache, "pack1"), 4);
+        assert_eq!(by_cache.caps.expect("a cap").largest_cache_holders, 2);
     }
 
     /// A pack is maximal in LLM units, which does not mean the ceiling is full. An
@@ -1945,6 +2300,8 @@ mod tests {
         let image = |id: &str, file: &str| ModelFootprint {
             host_gb: Some(20.0),
             assumed_cache: false,
+            holds_cache: false,
+            occupies_slot: true,
             id: id.to_string(),
             model_type: ModelType::Image,
             primary_file: Some(file.to_string()),
@@ -2043,7 +2400,6 @@ mod tests {
 
     #[test]
     fn family_strategy_collapses_declared_groups() {
-        use crate::policy::Strategy;
         // Two DISTINCT gemma models (different files) that `flat` would keep
         // separate. Under `family` with a [groups] declaration they collapse into
         // one mutually-exclusive unit, sized by the larger (23).
@@ -2054,7 +2410,6 @@ mod tests {
             footprint("other", ModelType::Llm, Some("/o.gguf"), 25.0),
         ];
         let mut policy = Policy {
-            strategy: Strategy::Family,
             ..Policy::default()
         };
         policy.groups.insert(
@@ -2102,7 +2457,7 @@ mod tests {
 
     #[test]
     fn overflow_group_omits_the_over_cap_set_and_error_refuses() {
-        use crate::policy::{OnOverflow, Strategy};
+        use crate::policy::OnOverflow;
         // Two family groups of 32 tiny variants each → a pack pairing them has a
         // fan-out of 32×32 = 1024 (> the 1000 cap).
         let mut models = Vec::new();
@@ -2117,7 +2472,6 @@ mod tests {
             }
         }
         let mut group_policy = Policy {
-            strategy: Strategy::Family,
             ..Policy::default()
         };
         group_policy

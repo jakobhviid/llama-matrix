@@ -17,17 +17,6 @@ pub fn default_probe_image_size() -> String {
     "1024x1024".to_string()
 }
 
-/// The packing strategy: how models become knapsack units.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Strategy {
-    /// No grouping - every model is independent; declare everything that fits.
-    #[default]
-    Flat,
-    /// Collapse the `[groups]` declarations into single mutually-exclusive units.
-    Family,
-}
-
 /// What to do when a generated set would exceed llama-swap's 1000-combination cap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -227,7 +216,26 @@ pub struct Policy {
     /// own value, and a build with no such cache takes `0`.
     pub host_cache_gb: f64,
     pub on_host_overflow: OnHostOverflow,
-    pub strategy: Strategy,
+    /// Cap on how many models a declared set may hold at once; `None` = no cap.
+    ///
+    /// A count is the one axis no budget in gigabytes can express. `budget`/`margin`
+    /// already cap a set's VRAM and `host_budget`/`host_margin` its host RAM; this
+    /// caps the *number* of servers, which is what bounds process count, swap churn
+    /// and anything that scales per-process rather than per-gigabyte.
+    ///
+    /// Proxy entries do not count (see [`crate::build::ModelFootprint::occupies_slot`]),
+    /// and an alternation costs one whatever it names, so grouping models is also how
+    /// you spend fewer slots.
+    pub max_models_per_set: Option<usize>,
+    /// Cap on how many **llama.cpp servers** a declared set may hold at once; `None`
+    /// = no cap.
+    ///
+    /// The sharper of the two, because a llama.cpp server holds a host prompt cache
+    /// (8192 MiB by default, §7.4) and nothing else on a typical roster does: an
+    /// image, STT or proxy entry costs a model slot but no cache slot. Where
+    /// `host_budget` is unusable because the store has no `d_host` yet, this bounds
+    /// the same resource by counting instead of measuring.
+    pub max_cache_holders_per_set: Option<usize>,
     pub on_overflow: OnOverflow,
     pub on_unconfirmed: OnUnconfirmed,
     /// `WxH` for the image load-trigger. What a diffusion model allocates scales
@@ -237,7 +245,13 @@ pub struct Policy {
     /// Container → host weight-dir mapping (empty for native deployments).
     pub paths: IndexMap<String, String>,
     pub roles: Roles,
-    /// Named groups of distinct model ids, consulted only by reduction strategies.
+    /// Named groups of distinct model ids, each collapsed into one mutually
+    /// exclusive unit (`(a | b | c)`, sized by the largest member).
+    ///
+    /// Applies to **any** model type, images included, and applies whenever it is
+    /// declared. There is no separate switch to turn it on: a table an operator wrote
+    /// by hand that quietly does nothing is the failure mode this tool has already
+    /// been bitten by once.
     pub groups: IndexMap<String, Vec<String>>,
     /// Per-id model-type overrides, e.g. `"my-sd-fork" = "image"`.
     ///
@@ -264,7 +278,8 @@ impl Default for Policy {
             host_margin: 4.0,
             host_cache_gb: 8.0,
             on_host_overflow: OnHostOverflow::Warn,
-            strategy: Strategy::Flat,
+            max_models_per_set: None,
+            max_cache_holders_per_set: None,
             on_overflow: OnOverflow::Group,
             on_unconfirmed: OnUnconfirmed::Warn,
             probe_image_size: default_probe_image_size(),
@@ -337,7 +352,6 @@ mod tests {
         let p = Policy::load("/no/such/llama-matrix.toml").unwrap();
         assert_eq!(p.endpoint, "http://localhost:8080");
         assert_eq!(p.margin, 4.0);
-        assert_eq!(p.strategy, Strategy::Flat);
         assert!(p.budget.is_none());
     }
 
@@ -346,7 +360,6 @@ mod tests {
         let src = r#"
 budget = 50.0
 margin = 6.0
-strategy = "family"
 on_overflow = "error"
 [paths]
 "/models" = "/srv/w"
@@ -363,7 +376,6 @@ image = 2
         let p: Policy = toml::from_str(src).unwrap();
         assert_eq!(p.budget, Some(50.0));
         assert_eq!(p.margin, 6.0);
-        assert_eq!(p.strategy, Strategy::Family);
         assert_eq!(p.on_overflow, OnOverflow::Error);
         assert_eq!(p.to_host("/models/a.gguf"), "/srv/w/a.gguf");
         assert_eq!(p.roles.aux, vec!["e", "r"]);

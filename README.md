@@ -125,7 +125,7 @@ image pool), and you can retune a tier or pin a single model in `[evict_costs]`
 | `build` | generate the matrix block; `--out FILE` to write it, `--apply` to splice it |
 | `drift` | show whether the live matrix block matches a fresh build (read-only) |
 | `validate` | load the tightest declared combination and check it really fits (`--set <name>` for a specific one; GPU-touching) |
-| `configure` | get/set the scalar settings (budget, margin, strategy, …) |
+| `configure` | get/set the scalar settings (budget, margin, caps, …) |
 | `prune` | drop measurements whose weight files are gone (`--yes` to delete) |
 
 Every command takes `--json`, and `llama-matrix --llm` prints the full guide (every
@@ -152,9 +152,10 @@ unit, then finds every *maximal* combination that fits under
 as valid, declaring the maximal groups licenses all the smaller ones too. Each
 combination is totalled against **host RAM** as well, since llama.cpp holds a
 host-side prompt cache of 8192 MiB per server by default and four co-resident LLMs
-can exhaust a 32 GB box while sitting comfortably inside VRAM. The default strategy
-declares everything that fits (maximum flexibility); grouping to shrink the matrix is
-opt-in. `build --apply` backs up your config, splices on a generated marker, waits
+can exhaust a 32 GB box while sitting comfortably inside VRAM. By default it declares
+everything that fits (maximum flexibility); `[groups]` collapses models you want
+mutually exclusive, and `max_models_per_set` / `max_cache_holders_per_set` cap how
+many may be resident at once. `build --apply` backs up your config, splices on a generated marker, waits
 for the hot-reload, verifies, and rolls back on any anomaly.
 
 Because the store keeps one footprint per distinct set of memory flags, `build` can

@@ -41,12 +41,16 @@ it is used - never quietly promoted to a footprint (SPEC §7.2).
 
 ## 3. Flexibility first. Declare everything that fits.
 
-The default strategy (`flat`) treats every model as an independent unit and
-declares **every maximal combination that physically fits**. Any two models that
-fit together may co-reside - nothing is artificially forbidden. The goal is: *any
-model within the memory budget stays loaded until an incompatible request needs
-its space.* Grouping models to shrink the matrix is an **opt-in** trade of
-flexibility for a smaller declaration, never the default.
+By default every model is an independent unit and the tool declares **every maximal
+combination that physically fits**. Any two models that fit together may co-reside -
+nothing is artificially forbidden. The goal is: *any model within the memory budget
+stays loaded until an incompatible request needs its space.*
+
+Narrowing that is always **opt-in**, never the default, and there are two doors:
+`[groups]` makes models mutually exclusive, and `max_models_per_set` /
+`max_cache_holders_per_set` cap how many may be resident at once. Both trade
+flexibility for a smaller declaration, which is safe in the direction that matters
+(#1) and is the operator's call, not the tool's.
 
 ## 4. Collapse a model with itself, never distinct models (by default).
 
@@ -58,8 +62,9 @@ largest member: the matrix has to be safe for whichever one is loaded.
 Two *different* quant files are two units, each at its own measured footprint. They
 are different weights that happen to share a lineage, and nothing physical stops a
 box holding both. Merging them is a judgement about how you want the box used, not a
-fact about memory, so it is opt-in through `[groups]` with `strategy = "family"` -
-the same door that groups genuinely distinct models (#3).
+fact about memory, so it is opt-in through `[groups]` - the same door that groups
+genuinely distinct models (#3), and the same one that makes an image pool mutually
+exclusive.
 
 ## 5. The live config is written in exactly one place.
 

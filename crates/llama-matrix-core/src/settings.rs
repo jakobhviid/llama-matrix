@@ -21,6 +21,8 @@ pub enum Kind {
     Enum(&'static [&'static str]),
     /// A `WxH` pixel size (e.g. `1024x1024`).
     Size,
+    /// A positive whole number (a cap on how many of something).
+    Count,
 }
 
 /// One settable scalar: its key (mirrors the `llama-matrix.toml` key), value
@@ -83,10 +85,16 @@ pub const SETTINGS: &[Setting] = &[
         default: "warn",
     },
     Setting {
-        key: "strategy",
-        kind: Kind::Enum(&["flat", "family"]),
-        desc: "packing strategy",
-        default: "flat",
+        key: "max_models_per_set",
+        kind: Kind::Count,
+        desc: "cap on models resident at once in any declared set (unset = no cap)",
+        default: "(no cap)",
+    },
+    Setting {
+        key: "max_cache_holders_per_set",
+        kind: Kind::Count,
+        desc: "cap on llama.cpp servers (host prompt-cache holders) per set (unset = no cap)",
+        default: "(no cap)",
     },
     Setting {
         key: "on_overflow",
@@ -137,6 +145,21 @@ fn normalize(setting: &Setting, value: &str) -> Result<(String, toml_edit::Item)
                 bail!("`{}` expects one of {:?}, got `{value}`", setting.key, allowed);
             }
             Ok((chosen.clone(), toml_edit::value(chosen)))
+        }
+        Kind::Count => {
+            let count: usize = value
+                .trim()
+                .parse()
+                .with_context(|| format!("`{}` expects a whole number, got `{value}`", setting.key))?;
+            if count == 0 {
+                // A cap of zero declares that nothing may ever load, which is not a
+                // matrix. Unset the key to mean "no cap"; that is a different thing.
+                bail!(
+                    "`{} = 0` would allow no model to load at all; unset it to remove the cap",
+                    setting.key
+                );
+            }
+            Ok((count.to_string(), toml_edit::value(count as i64)))
         }
         Kind::Size => {
             let size = value.trim().to_lowercase();
@@ -208,6 +231,10 @@ fn effective(text: &str, setting: &Setting) -> String {
             .and_then(|value| value.as_float())
             .map(|number| format!("{number}"))
             .unwrap_or_else(|| setting.default.to_string()),
+        Kind::Count => raw
+            .and_then(|value| value.as_integer())
+            .map(|number| format!("{number}"))
+            .unwrap_or_else(|| setting.default.to_string()),
         _ => raw
             .and_then(|value| value.as_str().map(str::to_string))
             .unwrap_or_else(|| setting.default.to_string()),
@@ -227,8 +254,20 @@ mod tests {
         assert_eq!(get(&file, "budget").unwrap(), "(auto-detect)");
         set(&file, "budget", "50").unwrap();
         assert_eq!(get(&file, "budget").unwrap(), "50");
-        set(&file, "strategy", "FAMILY").unwrap(); // case-insensitive
-        assert_eq!(get(&file, "strategy").unwrap(), "family");
+        set(&file, "on_overflow", "ERROR").unwrap(); // case-insensitive
+        assert_eq!(get(&file, "on_overflow").unwrap(), "error");
+
+        // A count is a whole number, and zero is not "no cap": it would forbid every
+        // model from loading, so unsetting the key is the way to remove the cap.
+        assert_eq!(get(&file, "max_models_per_set").unwrap(), "(no cap)");
+        assert_eq!(set(&file, "max_models_per_set", "5").unwrap(), "5");
+        assert_eq!(get(&file, "max_models_per_set").unwrap(), "5");
+        assert!(set(&file, "max_models_per_set", "0").is_err());
+        assert!(set(&file, "max_models_per_set", "2.5").is_err());
+        assert!(set(&file, "max_models_per_set", "many").is_err());
+        assert_eq!(get(&file, "max_models_per_set").unwrap(), "5");
+        unset(&file, "max_models_per_set").unwrap();
+        assert_eq!(get(&file, "max_models_per_set").unwrap(), "(no cap)");
 
         // the hand-written comment survives a comment-preserving edit
         assert!(std::fs::read_to_string(&file).unwrap().contains("# hand-written header"));
@@ -269,7 +308,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("llama-matrix.toml");
         assert!(set(&file, "nope", "x").is_err());
-        assert!(set(&file, "strategy", "bogus").is_err());
+        assert!(set(&file, "on_overflow", "bogus").is_err());
         assert!(set(&file, "margin", "lots").is_err());
     }
 

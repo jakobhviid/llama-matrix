@@ -892,6 +892,37 @@ fn cmd_build(
                 ));
             }
         }
+        // Say whether a cap is actually biting. A cap that is set but never reached
+        // is worth one line saying so, because the alternative is an operator
+        // wondering whether it took effect at all.
+        if let Some(caps) = plan.caps {
+            // "reached" is what can honestly be said without building twice: whether
+            // the cap removed anything is a different question from whether sets are
+            // packed up to it.
+            let render = |cap: Option<usize>, largest: usize, what: &str| match cap {
+                Some(limit) if largest >= limit => {
+                    Some(format!("{what} capped at {limit}; sets are packed up to it"))
+                }
+                Some(limit) => Some(format!(
+                    "{what} capped at {limit}, but the largest emitted set holds only {largest}, \
+                     so nothing is being held back"
+                )),
+                None => None,
+            };
+            for line in [
+                render(caps.max_models, caps.largest_models, "models per set"),
+                render(
+                    caps.max_cache_holders,
+                    caps.largest_cache_holders,
+                    "cache-holders per set",
+                ),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                ui::info(&line);
+            }
+        }
         if plan.unvalidated {
             ui::info(
                 "co-residency never validated on this box: every footprint here was measured \
@@ -963,6 +994,37 @@ fn cmd_build(
                     "    …and {} more; `--json` lists them all",
                     plan.cheaper.len() - 5
                 ));
+            }
+        }
+        // Say whether a cap is actually biting. A cap that is set but never reached
+        // is worth one line saying so, because the alternative is an operator
+        // wondering whether it took effect at all.
+        if let Some(caps) = plan.caps {
+            // "reached" is what can honestly be said without building twice: whether
+            // the cap removed anything is a different question from whether sets are
+            // packed up to it.
+            let render = |cap: Option<usize>, largest: usize, what: &str| match cap {
+                Some(limit) if largest >= limit => {
+                    Some(format!("{what} capped at {limit}; sets are packed up to it"))
+                }
+                Some(limit) => Some(format!(
+                    "{what} capped at {limit}, but the largest emitted set holds only {largest}, \
+                     so nothing is being held back"
+                )),
+                None => None,
+            };
+            for line in [
+                render(caps.max_models, caps.largest_models, "models per set"),
+                render(
+                    caps.max_cache_holders,
+                    caps.largest_cache_holders,
+                    "cache-holders per set",
+                ),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                ui::info(&line);
             }
         }
         if plan.unvalidated {

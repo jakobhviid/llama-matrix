@@ -235,9 +235,14 @@ because the matrix has to be safe for whichever llama-swap loads.
 
 The key is the weight path, so **different quant files do not collapse** - they are
 different weights, and nothing physical stops a box holding both. Under the default
-`flat` strategy each is an independent knapsack unit at its own measured footprint.
-Merging distinct models (including two quants of one lineage) is the opt-in `family`
-strategy over a declared `[groups]` (see `SPEC.md`).
+default each is an independent knapsack unit at its own measured footprint.
+
+Merging *distinct* models is what `[groups]` is for, and it applies to **any** model
+type: a declared group becomes one `(a | b | c)` alternation sized by its largest
+member, in the LLM roster or in the image pool. That is how "one diffusion server at a
+time" is said. A group applies whenever it is declared; there is no switch, because a
+hand-written table that quietly does nothing is the failure this tool has already been
+bitten by once.
 
 ### 4.2 Roles
 
@@ -468,7 +473,7 @@ crates/llama-matrix/            # thin CLI: clap, --json/--llm/-v, delegates to 
 crates/llama-matrix-core/
   src/lib.rs
   src/config.rs                 # parse llama-swap config.yaml (roster + cmds); macro expansion
-  src/policy.rs                 # llama-matrix.toml: budget/margin/host budget/strategy/roles/groups/types/paths/evict_costs
+  src/policy.rs                 # llama-matrix.toml: budget/margin/host budget/caps/roles/groups/types/paths/evict_costs
   src/settings.rs               # `configure` get/set/unset/list/keys (SETTINGS table)
   src/model.rs                  # per-model record: id, cmd, type, file, mem_cmd, param_hash
   src/param_hash.rs             # strip-list → hash; the memory-command diff

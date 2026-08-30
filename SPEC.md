@@ -27,7 +27,8 @@ host_margin = 4.0                        # GB safety slack inside the host budge
 host_cache_gb = 8.0                      # GB of host prompt cache to assume per
                                          #   llama-server when `-cram` is unstated.
 on_host_overflow = "warn"                # warn | exclude | error  (host-RAM overflow, §7.4)
-strategy    = "flat"                     # flat | family
+max_models_per_set        = 5            # cap on models resident at once, any set (§1.4)
+max_cache_holders_per_set = 3            # cap on llama.cpp servers per set (§1.4)
 on_overflow = "group"                    # group | error  (over-cap / too-many-combos handling)
 on_unconfirmed  = "warn"                 # warn | exclude | error  (unconfirmed footprints, §7.2)
 probe_image_size = "1024x1024"           # WxH the image load-trigger generates at (§7)
@@ -52,9 +53,12 @@ images = ["image-a", "image-b"]
 # tts-proxy. An unrecognised value is an error, not a no-op.
 "my-sd-fork" = "image"
 
-[groups]                   # only consulted by reduction strategies / on_overflow.
-# A named group of DISTINCT model ids treated as one mutually-exclusive unit.
-gemma = ["gemma-27b-q4", "gemma-27b-q4-nothink", "gemma-27b-abliterated-q5"]
+[groups]                   # DISTINCT model ids collapsed into one mutually exclusive unit.
+# Emitted as `(a | b | c)` and sized by the largest member, so the set reserves room
+# for whichever one loads. Applies to ANY model type, images included, and applies
+# whenever declared: there is no switch to turn it on.
+gemma  = ["gemma-27b-q4", "gemma-27b-q4-nothink", "gemma-27b-abliterated-q5"]
+images = ["flux", "chroma", "z-image"]   # one diffusion server at a time
 
 [evict_costs]              # which model the solver keeps under pressure (§1.3).
 llm   = 10                 # per-role tiers; higher = costlier to evict = prefer to keep
@@ -77,7 +81,8 @@ aux   = 5
 | `host_margin` | float (GB) | `4.0` | `host_ceiling = host_budget − host_margin` |
 | `host_cache_gb` | float (GB) | `8.0` | host prompt cache to assume per llama-server whose command does not state `-cram`. llama.cpp's own default is 8192 MiB **per process** and is taken whether or not the flag appears; a command that states `-cram` uses its own value, and a build with no such cache takes `0`. The one assumed term in the host arithmetic (§7.4) |
 | `on_host_overflow` | enum | `warn` | what `build` does with a set that costs more host RAM than the host ceiling. `warn` = emit it and name it with the arithmetic; `exclude` = leave it out (a safe under-declaration); `error` = refuse. `warn` is the default because one term of the sum is a declared cap rather than a measurement |
-| `strategy` | enum | `flat` | `flat` = no grouping (max flexibility); `family` = collapse `[groups]` |
+| `max_models_per_set` | integer | *no cap* | at most this many models resident at once in any declared set (§1.4). Proxy entries do not count; an alternation counts once |
+| `max_cache_holders_per_set` | integer | *no cap* | as above, but counting only llama.cpp servers, which are what hold a host prompt cache (§7.4) |
 | `on_overflow` | enum | `group` | applies to **both** the 1000-combination cap and an intractably large maximal-pack enumeration. `group` = drop the over-cap set / keep the bounded packs + warn (a safe under-declaration); `error` = refuse |
 | `on_unconfirmed` | enum | `warn` | what `build` does with a footprint whose allocation was never confirmed (§7.2, and every entry written before that was recorded). `warn` = plan with it, but name it *and* the declared sets that depend on it; `exclude` = leave the model out of the matrix (a safe under-declaration); `error` = refuse to build |
 | `probe_image_size` | string `WxH` | `1024x1024` | resolution the image load-trigger generates at. A diffusion model's allocation scales with it, so this decides what an image footprint **means** - probe at the size you actually serve, since a footprint measured at 256x256 is only a floor for anything larger |
@@ -134,6 +139,61 @@ Costs are a tie-break among sets that **already fit** - they never affect the fi
 predicate or the knapsack.
 
 ---
+
+### 1.4 Capping how many models a set may hold
+
+Three things bound a declared set, and they are not interchangeable:
+
+| bound | knob | unit |
+|---|---|---|
+| VRAM | `budget` − `margin` | gigabytes, always enforced |
+| host RAM | `host_budget` − `host_margin` | gigabytes, enforced per `on_host_overflow` |
+| **how many** | `max_models_per_set`, `max_cache_holders_per_set` | a count |
+
+A count is the axis no quantity can express. Use it for what scales per *process*
+rather than per gigabyte: llama-swap's own swap churn, file descriptors, scheduler
+pressure, or simply a rule of thumb you want the matrix to respect.
+
+**What counts as one.** Each `&`-joined member is one. An alternation `(a | b)` is
+**one**, because llama-swap loads a single member: grouping models is therefore also
+how you spend fewer slots. `+aux` expands and each aux member counts, because they
+really are resident. A **proxy entry does not count at all** (§6): it fronts a service
+llama-swap does not allocate for, so it is reserved overhead like `margin`, not a unit
+the knapsack schedules.
+
+**`max_cache_holders_per_set` is the sharper of the two.** A llama.cpp server holds a
+host prompt cache (§7.4) and nothing else on a typical roster does, so an image, STT
+or proxy entry costs a model slot but no cache slot. Where `host_budget` cannot help
+because the store has no `d_host` yet, this bounds the same resource by counting
+instead of measuring. Where it can, prefer `host_budget`: it is a measurement, and
+this is a proxy for one.
+
+**Choosing values.** Start from what the box has, not from a round number:
+
+- `max_cache_holders_per_set` ≈ `(host RAM − host_baseline − headroom) / cache size`,
+  where cache size is `-cram` if declared and `host_cache_gb` (8 GB) if not. On a
+  31 GB box with a 6 GB baseline and 8 GB caches, that is two, maybe three.
+- `max_models_per_set` is the blunt one: pick it from process-level limits or from
+  what you are willing to have swap at once. Remember aux comes off the top.
+
+**The counter-intuitive part: a cap can make the block bigger.** Packs are maximal by
+GB, so capping cardinality makes *every* combination of exactly the capped size
+maximal. A 14-unit roster capped to three units per pack emits up to C(14,3) = 364
+packs where it emitted 208 before, and capped to four, C(14,4) = 1001, past the
+`MAX_PACKS` guard. The cap declares strictly *less* co-residency and strictly *more*
+sets. Watch `on_overflow` if you set one low on a wide roster.
+
+**How it is enforced, and why that matters.** The caps go into the knapsack, not into
+a filter over the finished block. llama-swap treats any subset of a declared set as
+valid, so dropping an over-cap six-member pack afterwards would take with it the
+five-member combinations it licensed. Instead "maximal" means *no further unit fits,
+in GB or in slots*. A final guard re-derives each emitted set's counts from its
+expression and fails the build if one is over, which is an independent check of the
+same claim rather than a restatement of it.
+
+Both are unset by default, and unset costs nothing: the enumeration sees `usize::MAX`
+and behaves exactly as it did before. A cap can only ever remove declarations, so it
+cannot make a matrix less safe (Principle 1).
 
 ## 2. The measurement store - the measure↔build contract
 

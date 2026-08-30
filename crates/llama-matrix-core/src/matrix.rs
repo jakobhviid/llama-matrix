@@ -73,6 +73,8 @@ mod tests {
             ModelFootprint {
                 host_gb: None,
                 assumed_cache: false,
+                holds_cache: false,
+                occupies_slot: true,
                 id: "embed".into(),
                 model_type: ModelType::Embed,
                 primary_file: Some("/e.gguf".into()),
@@ -81,6 +83,8 @@ mod tests {
             ModelFootprint {
                 host_gb: None,
                 assumed_cache: false,
+                holds_cache: false,
+                occupies_slot: true,
                 id: "chat".into(),
                 model_type: ModelType::Llm,
                 primary_file: Some("/c.gguf".into()),

@@ -37,6 +37,9 @@ pub struct BuildPreview {
     /// exists. `null` with a non-empty `host_over` means no `-cram` can: the overrun
     /// is in measured memory, not in the prompt caches.
     pub host_cram_gb: Option<f64>,
+    /// The per-set cardinality caps in force and how close the block came to them;
+    /// `null` when neither is set.
+    pub caps: Option<crate::build::SetCaps>,
     /// Models this box has already measured at a smaller footprint under other flags.
     pub cheaper: Vec<crate::build::Cheaper>,
     pub warnings: Vec<String>,
@@ -56,6 +59,7 @@ impl BuildPreview {
             host_ceiling: plan.host_ceiling,
             host_over: plan.host_over.clone(),
             host_cram_gb: plan.host_cram_gb,
+            caps: plan.caps,
             cheaper: plan.cheaper.clone(),
             warnings: plan.warnings.clone(),
         }

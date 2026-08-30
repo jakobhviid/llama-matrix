@@ -20,7 +20,7 @@ Compiled into `--llm`.
 - **What llama-matrix touches.** Your llama-swap `config.yaml` (the roster -
   llama-matrix reads it, and only ever rewrites the generated block). A
   `measurements/` directory (one small JSON per model, the per-box cache
-  llama-matrix owns). `llama-matrix.toml` (your policy - budget, margin, strategy).
+  llama-matrix owns). `llama-matrix.toml` (your policy - budget, margin, caps, groups).
 - **Golden rule.** Under-declaring a fitting combo is safe; over-declaring OOMs. So
   after any change to a model's *memory* settings (`-c`, `-np`, quant, add/remove),
   re-measure the affected model and regenerate.
@@ -165,24 +165,51 @@ you carve out room for other apps on the box.
 
 ---
 
-## Loop 4 - Change the packing strategy
+## Loop 4 - Curate what may co-reside
 
-Default is `flat` (no grouping: any models that fit may co-reside - maximum
-flexibility). Opt into grouping only to curate or to relieve the combo cap:
+By default anything that fits may co-reside. Two knobs narrow that, and they narrow
+different things.
+
+**`[groups]` makes models mutually exclusive.** A declared group becomes one
+`(a | b | c)` alternation sized by its largest member, so a set reserves room for
+whichever one loads. It applies to **any** model type, images included, and it applies
+whenever declared - there is no switch to turn it on:
+
+```toml
+[groups]
+gemma  = ["gemma-27b-q4", "gemma-27b-q4-nothink"]
+images = ["flux", "chroma", "z-image"]    # one diffusion server at a time
+```
+
+That last line is usually the big one. Five diffusion servers co-resident is the sum
+of five footprints; grouped, it is the largest of them, and it costs one slot instead
+of five.
+
+**The caps limit how many may be resident**, which no GB budget can say (`SPEC.md`
+§1.4):
 
 ```
-llama-matrix configure set strategy family   # collapse [groups] into single units
+llama-matrix configure set max_models_per_set 5         # any set, at most 5 models
+llama-matrix configure set max_cache_holders_per_set 3  # at most 3 llama.cpp servers
 ```
 
-Then declare your groups in `llama-matrix.toml` under `[groups]` (see `SPEC.md` §1).
-A group of distinct models becomes one mutually-exclusive slot - smaller matrix,
-less flexibility.
+Proxy entries do not count against either (they front a service llama-swap does not
+allocate for, so they are reserved overhead like `margin`), and an alternation counts
+once. Prefer `max_cache_holders_per_set` when the concern is host RAM: it counts the
+servers that hold a prompt cache. Prefer `host_budget` over both when the store has
+`d_host`, because that is a measurement and these are proxies for one.
+
+**Expect the block to get bigger, not smaller.** Packs are maximal by GB, so capping
+cardinality makes every combination of exactly the capped size maximal. Measured on a
+14-unit roster: uncapped 208 packs, capped to 5 models **294**, to 4 models 267, to 3
+models 81. It declares strictly less co-residency and often strictly more sets, so
+watch `on_overflow` if you cap low on a wide roster.
 
 **If a build would exceed llama-swap's 1000-combination cap**, llama-matrix never
 emits an invalid block. By default (`on_overflow = "group"`) it **omits** the
 over-cap set and warns (a `# WARNING:` in the block and a `--json` warning) -
 omitting a combination is safe (it just declares less, never OOMs). To cover those
-combinations, split the offending family in `[groups]`. Set `on_overflow = "error"`
+combinations, split the offending group in `[groups]`. Set `on_overflow = "error"`
 to make it refuse the whole build instead.
 
 ---
@@ -192,7 +219,7 @@ to make it refuse the whole build instead.
 ```
 llama-matrix drift        # current config's matrix vs what build would generate now
 llama-matrix build        # print the would-be block (no writes)
-llama-matrix configure list   # effective budget / margin / strategy / endpoint
+llama-matrix configure list   # effective budget / margin / caps / endpoint
 ```
 
 All read-only and safe to run anytime.
