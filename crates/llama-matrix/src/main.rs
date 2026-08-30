@@ -128,7 +128,7 @@ enum Cmd {
         #[arg(long)]
         endpoint: Option<String>,
     },
-    /// Get/set llama-matrix.toml scalar settings (budget, margin, strategy, …).
+    /// Get/set llama-matrix.toml scalar settings (budget, margin, caps, …).
     Configure {
         #[command(subcommand)]
         action: ConfigureAction,

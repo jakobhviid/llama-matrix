@@ -94,6 +94,46 @@ fn a_warning_does_not_list_every_pack_by_name() {
     assert!(warning.len() < 400, "warning is {} chars: {warning}", warning.len());
 }
 
+/// `strategy` was retired when `[groups]` became authoritative, but three build
+/// warnings and the `configure` help still told the reader to set it. Advice from the
+/// tool IS documentation, and it outranks the docs: an agent reading
+/// "reduce it with `strategy = \"family\"`" put the dead key back into a live config
+/// twice, correctly citing the tool as its source.
+///
+/// Fixed in the commit adding this test. A retired setting has to leave every surface
+/// that names it, not only the prose.
+#[test]
+fn no_surface_tells_you_to_set_a_retired_setting() {
+    let surfaces = [vec!["--llm"], vec!["configure", "--help"], vec!["--help"], vec!["build", "--help"]];
+    for args in surfaces {
+        let output = Command::cargo_bin("llama-matrix")
+            .unwrap()
+            .args(&args)
+            .output()
+            .unwrap();
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        for dead in ["strategy = \"family\"", "strategy = \"flat\"", "configure set strategy"] {
+            assert!(
+                !text.contains(dead),
+                "`llama-matrix {}` still tells the reader to set `{dead}`",
+                args.join(" ")
+            );
+        }
+    }
+
+    // …and it is not settable, so following such advice fails loudly rather than
+    // writing a key nothing reads.
+    Command::cargo_bin("llama-matrix")
+        .unwrap()
+        .args(["configure", "set", "strategy", "family"])
+        .assert()
+        .failure();
+}
+
 /// `allocation_confirmed` asks whether the load-trigger finished. A hand-set proxy
 /// entry never loads, so it could never answer, and the build carried an unconfirmed
 /// warning no amount of measuring could clear. Because such a model is usually aux, it

@@ -1121,14 +1121,15 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
             OnOverflow::Group => warnings.push(format!(
                 "the light-unit roster ({} units) produces too many co-residency combinations to \
                  enumerate exhaustively - emitted {} maximal packs and stopped (a safe \
-                 under-declaration; a smaller matrix never OOMs). Reduce it with \
-                 `strategy = \"family\"` + `[groups]`, or set `on_overflow = \"error\"` to refuse.",
+                 under-declaration; a smaller matrix never OOMs). Reduce it by collapsing models \
+                 into mutually exclusive units in `[groups]`, or capping set size with \
+                 `max_models_per_set`, or set `on_overflow = \"error\"` to refuse.",
                 light_indices.len(),
                 packs.len()
             )),
             OnOverflow::Error => bail!(
                 "the light-unit roster ({} units) produces too many co-residency combinations to \
-                 enumerate; reduce it with `strategy = \"family\"` + `[groups]` (or allow a \
+                 enumerate; reduce it with `[groups]` or `max_models_per_set` (or allow a \
                  truncated matrix with `on_overflow = \"group\"`)",
                 light_indices.len()
             ),
@@ -1664,7 +1665,8 @@ pub fn build(input: &BuildInput) -> Result<MatrixPlan> {
                     None =>
                         "No `-cram` value fixes this: the overrun is in memory that was \
                          measured, not in the prompt caches. Declare fewer co-resident models \
-                         (`strategy = \"family\"` + `[groups]`), raise `host_budget`, or set \
+                         (`[groups]`, or `max_cache_holders_per_set`), raise `host_budget`, \
+                         or set \
                          `on_host_overflow = \"exclude\"` to leave those sets out"
                             .to_string(),
                 }
@@ -2612,7 +2614,7 @@ mod tests {
     }
 
     #[test]
-    fn family_strategy_collapses_declared_groups() {
+    fn a_declared_group_collapses_into_one_unit() {
         // Two DISTINCT gemma models (different files) that `flat` would keep
         // separate. Under `family` with a [groups] declaration they collapse into
         // one mutually-exclusive unit, sized by the larger (23).
