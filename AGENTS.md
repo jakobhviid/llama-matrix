@@ -89,22 +89,57 @@ A bug only visible inside one function gets its reproducing test next to that
 function instead. The rule is that the bug is reproduced *before* it is fixed, not
 that every test lives in one file.
 
-## A backlog is not documentation
+## The docs describe the tool as it is. They are not a log.
 
-`ROADMAP.md` says what the tool does **not** do yet. The moment an item ships, its
-explanation belongs in the docs that describe behaviour - `README.md`,
-`WORKFLOWS.md`, `SPEC.md`, `ARCHITECTURE.md`, `PRINCIPLES.md` - and the item leaves
-the roadmap. Do not leave a "this has shipped" note behind: a reader looking for how
-the tool behaves does not read the backlog, and would not trust it if they did.
+Every document in this repository answers one of two questions, and mixing them is
+the failure this section exists to prevent.
 
-The same rule killed `ADOPT.md`, which had grown into a parallel description of
-shipped behaviour under upgrade-note headings. What a version changed is what the
-release history is for; how the tool behaves goes in one place, where someone
-looking for it will find it.
+**What the tool does** goes in the behaviour docs, in present tense, as though it had
+always worked this way:
 
-An item may state the minimum baseline needed to define its gap ("images take the
-headroom the LLM knapsack left rather than competing for it"). It should not restate
-evidence that lives in the docs - cross-reference the section instead.
+| file | answers |
+|---|---|
+| `README.md` | what this is and why it exists; the front door |
+| `WORKFLOWS.md` | what you run and when; the operating loops |
+| `SPEC.md` | schemas and contracts of record: config, store, DSL, param-hash |
+| `ARCHITECTURE.md` | how it is built; the memory model and the module map |
+| `PRINCIPLES.md` | the design rules, and why they are the rules |
+
+**What the tool does not do yet** goes in `ROADMAP.md`, and nowhere else.
+
+**What changed between two versions** goes in the commit message and the release
+history. That is what they are for, they carry a date and a diff, and nothing else
+has to be kept in step with them.
+
+### ROADMAP.md
+
+- It lists **only unbuilt work**. An item that ships is **deleted** from the file; its
+  explanation moves into the behaviour docs above.
+- **Never leave a "this has shipped" note behind.** A reader looking for how the tool
+  behaves does not read the backlog, and would not trust it if they did. Two parallel
+  descriptions also drift, and the one in the backlog is the one nobody updates.
+- No "v1.0 scope" section, no summary of what already works. If a reader needs to know
+  what the tool does, they are in the wrong file and the roadmap should not answer.
+- An item **may** state the minimum baseline needed to define its gap ("images take
+  the headroom the LLM knapsack left rather than competing for it"). It may **not**
+  restate evidence, tables or measurements that live in the docs: cross-reference the
+  section instead, so there is one copy and it is the maintained one.
+
+### ADOPT.md, when it exists
+
+`ADOPT.md` is a **temporary** file with a defined end. It exists only while there is
+something an existing config must know about that is **not yet handled by the tool**:
+an open gap, or a migration in flight. It is a holding area, not a document.
+
+- The moment the implementation is complete, whatever in it is durable moves into the
+  behaviour docs, and **`ADOPT.md` is deleted**. Not trimmed, not left with the
+  entries marked done. Deleted.
+- It must never accumulate entries for shipped behaviour. An entry that begins "this
+  changed in 1.x" and then explains how the tool works is behaviour documentation
+  filed under the wrong heading, where nobody looking for it will read it.
+- If you find it present with every entry implemented, the correct action is to move
+  what is durable and `git rm` the file. That has happened once already; the entries
+  had grown into a second, parallel description of shipped behaviour.
 
 ## "Documenting the diff": the doc failure mode, named
 
