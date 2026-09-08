@@ -414,8 +414,8 @@ pub fn resolve_plan(
             measurement.weights_gb,
         ) {
             suspect.push(format!(
-                "`{}` measured {:.2} GB, only {:.0}% of the {weights:.2} GB of weight files its \
-                 command names - a fully offloaded model cannot hold much less than its weights, \
+                "`{}` measured {:.2} GB, only {:.0}% of the {weights:.2} GB of weights its \
+                 command loads - a fully offloaded model cannot hold much less than its weights, \
                  so this footprint may be under-measured (partial offload with -ngl/-ot/--cpu-moe \
                  is a legitimate reason to sit lower)",
                 record.id,

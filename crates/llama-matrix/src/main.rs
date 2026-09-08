@@ -707,6 +707,16 @@ fn cmd_measure(
         for suspect in &summary.below_weight_floor {
             ui::warn(&format!("{}: {}", suspect.id, suspect.reason));
         }
+        for unknown in &summary.weights_unknown {
+            ui::warn(&format!("{}: {}", unknown.id, unknown.reason));
+        }
+        if summary.weights_refreshed > 0 {
+            ui::info(&format!(
+                "corrected the weights-on-disk total on {} stored measurement(s) against the \
+                 files on disk; no footprint was re-measured",
+                summary.weights_refreshed
+            ));
+        }
         if let Some(previous) = summary.baseline_was {
             ui::warn(&format!(
                 "the empty-pool baseline moved from {previous:.2} GB to {:.2} GB. Everything \

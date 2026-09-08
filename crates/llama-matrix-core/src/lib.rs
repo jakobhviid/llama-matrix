@@ -28,3 +28,4 @@ pub mod policy; // llama-matrix.toml: budget/margin/caps/roles/groups/types/path
 pub mod report; // typed --json report shapes (one source of truth per verb; D16)
 pub mod settings; // the `configure` get/set/unset/list/keys surface (scalars)
 pub mod ui; // stdout/stderr discipline + colour
+pub mod weights; // what a command loads off disk: shard chains, the weights-on-disk floor

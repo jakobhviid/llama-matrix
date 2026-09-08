@@ -84,8 +84,8 @@ pub fn primary_file(cmd: &str) -> Option<String> {
 /// Extensions that name a weight file a backend loads into memory.
 ///
 /// Used to total a model's weights on disk, which is a floor on the footprint of a
-/// fully offloaded model (see `measure`). Deliberately extension-driven rather than
-/// a flag allowlist: one command names its weights across many flags (`-m`,
+/// fully offloaded model (see `crate::weights`). Deliberately extension-driven
+/// rather than a flag allowlist: one command names its weights across many flags (`-m`,
 /// `--diffusion-model`, `--vae`, `--t5xxl`, `--llm`, `--mmproj`, ...) and the next
 /// backend invents more, so an allowlist silently misses one while the extension
 /// keeps holding.
@@ -93,8 +93,9 @@ const WEIGHT_EXTENSIONS: &[&str] = &[".gguf", ".safetensors", ".bin", ".ckpt", "
 
 /// Every weight file the command names, in order, deduplicated.
 ///
-/// Callers stat these, so a token that merely looks like a path costs nothing and a
-/// path that isn't readable (an unmapped container path) simply doesn't count.
+/// What the command *names*, which is not everything it *loads*: a split GGUF names
+/// one shard and loads the chain. `crate::weights` resolves that and decides what a
+/// token that merely looks like a path is worth, so collection here stays loose.
 pub fn weight_files(cmd: &str) -> Vec<String> {
     let mut files: Vec<String> = Vec::new();
     for token in cmd.split_whitespace() {

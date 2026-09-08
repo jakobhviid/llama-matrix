@@ -293,7 +293,7 @@ one entry per distinct footprint it has been measured at:
       "allocation_confirmed": true,   // was the load-trigger seen to finish? (§7.2)
       "serving_verified": true,       // did /props confirm the served cmd? (§7.1)
       "peak_total": 49.60,    // highest delta seen while allocating (insight only)
-      "weights_gb": 49.90,    // total size of the weight files the cmd names
+      "weights_gb": 49.90,    // total weights the cmd loads, shard chains resolved
       "d_host": 1.10,         // GB host RAM the load added - a floor, see §7.4
       "pool_baseline": 0.16,  // empty-pool occupancy this delta was taken against (§7.3)
       "contended": false,     // was anything else in the pool during the window? (§7.3)
@@ -344,8 +344,8 @@ what makes a disagreement between them visible). Only a confirmed entry is adopt
 > 0.47-0.73 GB above the resident footprint (3-7%), matching to the hundredth of a GB
 > across sweeps twenty days apart, well inside the default 4.0 GB `margin`. It scales
 > with `probe_image_size`, as the footprint does. A llama.cpp model's peak equals its
-> resident footprint. `weights_gb` totals the weight files the command names, when
-> they were readable at measure time.
+> resident footprint. `weights_gb` totals the weights the command loads (§7.2), and is
+> absent rather than partial when any of them could not be accounted for.
 
 **Consumer rule (build):** for each model, compute its param-hash from the *current*
 config, read `measurements/<id>.json`, and select `measurements[hash]`.
@@ -660,12 +660,40 @@ Two consequences that are part of the contract:
   is suspect.
 
 **The weights-on-disk floor.** A fully offloaded model cannot hold much less than its
-weights, so `measure` totals the weight files its command names (`weights_gb`) and flags
-any footprint below **0.90** of that total, in the sweep output and again in `build`'s
+weights, so `measure` totals the weights its command loads (`weights_gb`) and flags any
+footprint below **0.90** of that total, in the sweep output and again in `build`'s
 warnings. A **warning, never a verdict**: partial offload (`-ngl` below all layers,
 `-ot`, `--cpu-moe`) is a legitimate reason to sit lower, and two verified image
 measurements sat at 0.97-0.98, which is why the floor is not 1.0. It needs no GPU and no
 cooperation from the backend, which is what makes it the cheapest cross-check available.
+
+**What the command loads, not what it names.** A split GGUF is one model across several
+files, and llama.cpp is handed the first and resolves the siblings itself, so the total
+resolves the whole chain from the name it is given: `-%05d-of-%05d.gguf` stripped to a
+stem and reformatted per index, which is llama.cpp's own naming contract, and the same
+convention `.safetensors` shards use. This matters most where the floor is worth most.
+The common split conventions emit a **metadata-only first shard holding no tensors**, so
+a 77 GiB model's named file is a few MB, and a total over that file alone would be a
+floor two orders of magnitude too low: it could not trip, and a check that cannot trip
+reads exactly like one that passed.
+
+**A partial total is not a total.** `weights_gb` is **absent** unless every file was
+accounted for, and absent means no floor is claimed (Principle 7). A gap has two causes
+worth acting on, and both are named in the sweep output: a path no `[paths]` prefix maps
+to, and an incomplete shard set. A command naming no weight file at all (a fronted
+proxy) likewise carries no total, since zero is the absence of a floor rather than a
+floor at zero. A `.gguf` that declares no tensors while naming no chain is treated the
+same way: it is a stub of a split convention this build cannot follow, and reporting its
+size would reintroduce a floor that silently cannot trip.
+
+**A stale total heals without GPU time.** The figure is derived from the command and the
+filesystem, so every sweep re-stats the weight files and corrects the stored totals that
+disagree, including a fully cached sweep where nothing is loaded at all. Each entry is
+recomputed from its own `params`, so entries filed under a param-hash the config no
+longer names are corrected too. A total is only ever replaced, never cleared: a box that
+cannot see the weight directories does not wipe figures it has no way to recompute. The
+param-hash covers the command and not this field, so no re-measure is ever owed for it,
+which is the same reasoning that keeps `-cram` out of it (§7.4).
 
 
 ### 7.3 Solo residency (a footprint is a *solo* footprint)

@@ -24,10 +24,11 @@ use anyhow::{bail, Context, Result};
 use serde::Serialize;
 
 use crate::cache::{BoxMeta, Measurement, ModelStore, Store};
-use crate::model::{weight_files, ModelRecord, ModelType};
+use crate::model::{ModelRecord, ModelType};
 use crate::param_hash::{memory_cmd, token_difference};
-use crate::platform::{self, GpuMemory, BYTES_PER_GIB};
+use crate::platform::{self, GpuMemory};
 use crate::policy::Policy;
+use crate::weights;
 
 /// How long to wait for `/running` to report a model `ready`.
 pub const DEFAULT_LOAD_TIMEOUT: Duration = Duration::from_secs(300);
@@ -134,10 +135,21 @@ pub struct MeasureSummary {
     /// when sampling stopped). Unlike `unverified_serving` this is clearable, and
     /// `build` treats it as policy (`on_unconfirmed`), so it does escalate.
     pub unconfirmed_allocation: Vec<Failure>,
-    /// Models whose footprint came out implausibly small for the weight files their
-    /// command names (below `cache::WEIGHT_FLOOR_RATIO` of the total on disk). A
-    /// signal, not a verdict: partial offload legitimately sits lower.
+    /// Models whose footprint came out implausibly small for the weights their command
+    /// loads (below `cache::WEIGHT_FLOOR_RATIO` of the total on disk). A signal, not a
+    /// verdict: partial offload legitimately sits lower.
     pub below_weight_floor: Vec<Failure>,
+    /// Models for which no weights-on-disk total could be established, so their
+    /// footprint carries no floor at all, and which files were unaccountable.
+    ///
+    /// A partial total would be worse than none: it is a floor far below the real one,
+    /// so it cannot trip, and a check that cannot trip reads exactly like a check that
+    /// passed. Reported rather than approximated (Principle 7).
+    pub weights_unknown: Vec<Failure>,
+    /// Stored `weights_gb` figures the files on disk disagreed with and that this
+    /// sweep corrected. Costs no GPU time: the total is derived from the command and
+    /// the filesystem, so it is re-stat'ed on every sweep including a fully cached one.
+    pub weights_refreshed: usize,
     /// Models measured while the pool held something other than the model under
     /// test, so the footprint may include memory that is not its own
     /// (`cache::Measurement::contended`). Over-measured, therefore safe, therefore
@@ -795,20 +807,51 @@ fn stabilize(
     Stabilized { used: current, settled: false, peak: peak.max(current) }
 }
 
-/// Total size in GB of the weight files the command names, host-mapped and stat'ed.
+/// Correct every stored `weights_gb` the files on disk disagree with, and return how
+/// many entries moved.
 ///
-/// `None` when none of them can be read (an unmapped container path, a remote mount),
-/// in which case no floor check is possible and none is claimed.
-fn weights_gb(record: &ModelRecord, policy: &Policy) -> Option<f64> {
-    let mut total = 0.0;
-    let mut readable = false;
-    for file in weight_files(&record.cmd) {
-        if let Ok(metadata) = std::fs::metadata(policy.to_host(&file)) {
-            total += metadata.len() as f64 / BYTES_PER_GIB;
-            readable = true;
+/// The total is derived from the command and the filesystem, never from the GPU: no
+/// load, no trigger, a handful of `stat`s per model. It nonetheless lives inside a
+/// measurement, so without this the only way to correct one would be a `--force`
+/// re-measure of the models it is most expensive to re-measure. Two precedents in
+/// this crate settle the shape: `build` reads `-cram` off the live command rather than
+/// out of a measurement ([`crate::cache::Measurement::d_host`]), and the store already
+/// corrects a derived field on read rather than carrying a per-entry schema version
+/// (`ModelStore::normalize_pool_split`).
+///
+/// Each entry is recomputed from **its own** `params`, which is the memory command and
+/// carries every weight path the launch command did: entries filed under a param-hash
+/// the config no longer names are corrected too, and no config is needed to do it.
+/// Entries written before that field existed carry no command and are left alone.
+///
+/// A total is only ever **replaced**, never cleared. A box that cannot see the weight
+/// directories today must not wipe figures it has no way to recompute.
+fn refresh_weights(store: &Store, policy: &Policy) -> Result<usize> {
+    let mut refreshed = 0;
+    for id in store.list_ids() {
+        let Some(mut model_store) = store.read_model(&id)? else {
+            continue;
+        };
+        let mut wrote = false;
+        for measurement in model_store.measurements.values_mut() {
+            if measurement.params.is_empty() {
+                continue;
+            }
+            let Some(total) = weights::on_disk(&measurement.params, policy).total else {
+                continue;
+            };
+            let total = round2(total);
+            if measurement.weights_gb != Some(total) {
+                measurement.weights_gb = Some(total);
+                wrote = true;
+                refreshed += 1;
+            }
+        }
+        if wrote {
+            store.write_model(&id, &model_store)?;
         }
     }
-    readable.then_some(total)
+    Ok(refreshed)
 }
 
 /// Upsert one measurement into the model's store file, refreshing the type/file the
@@ -870,11 +913,16 @@ pub fn sweep(
     let gpu = platform::detect().context("measure needs a GPU sensor")?;
     let _lock = LockGuard::acquire(store.dir())?;
     let agent = poll_agent();
+    // Before anything is read back for a floor check, so the sweep's own warnings rest
+    // on the files present at sweep time rather than on whatever the entry was written
+    // against.
+    let weights_refreshed = refresh_weights(store, policy)?;
     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
 
     let mut summary = MeasureSummary {
         detected_total: gpu.total_gb()?,
         store_written_by_newer: store.written_by_newer()?,
+        weights_refreshed,
         ..Default::default()
     };
 
@@ -922,14 +970,40 @@ pub fn sweep(
             progress(Progress::Done { index, total, id: &record.id, outcome });
         };
 
-        // pre-check the weight file exists on the host (skip a doomed load)
+        // pre-check the weight files exist on the host (skip a doomed load). A split
+        // GGUF is loaded as a chain - llama.cpp resolves the siblings of the file the
+        // command names - so a chain one shard short is just as doomed as an absent
+        // file, and is named here rather than discovered 45 s into a load.
         if let Some(container_path) = &record.primary_file {
-            let host_path = policy.to_host(container_path);
-            if !Path::new(&host_path).exists() {
+            let missing: Vec<String> = weights::shard_chain(container_path)
+                .into_iter()
+                .filter(|file| !Path::new(&policy.to_host(file)).exists())
+                .collect();
+            if !missing.is_empty() {
                 summary.skipped_missing.push(record.id.clone());
-                report("skipped, weight file missing".to_string());
+                report(format!("skipped, weight file missing: {}", missing.join(", ")));
                 continue;
             }
+        }
+
+        // Weights on disk: a floor on the footprint of a fully offloaded model, and
+        // the one cross-check that needs no GPU and no cooperation from the backend.
+        // Read before the cache is consulted, because whether a model *has* a floor is
+        // a fact about the box that holds whether or not this sweep loads anything: a
+        // roster where one entry's weights cannot be accounted for would otherwise go
+        // quiet the moment that entry is cached.
+        let on_disk = weights::on_disk(&record.cmd, policy);
+        let weights = on_disk.total;
+        if !on_disk.unresolved.is_empty() {
+            summary.weights_unknown.push(Failure {
+                id: record.id.clone(),
+                reason: format!(
+                    "no weights-on-disk floor for this footprint: {} could not be accounted \
+                     for, and a total over the rest would be a floor too low to ever trip \
+                     (check `[paths]`, and that the shard set is complete)",
+                    on_disk.unresolved.join(", ")
+                ),
+            });
         }
 
         // cache hit? An *unconfirmed* entry is not one: it may be a mid-load plateau
@@ -960,10 +1034,6 @@ pub fn sweep(
                 continue;
             }
         }
-
-        // Weights on disk: a floor on the footprint of a fully offloaded model, and
-        // the one cross-check that needs no GPU and no cooperation from the backend.
-        let weights = weights_gb(record, policy);
 
         progress(Progress::Loading { index, total, id: &record.id });
 
@@ -1252,7 +1322,7 @@ pub fn sweep(
                                     id: record.id.clone(),
                                     reason: format!(
                                         "footprint {d_total:.2} GB is only {:.0}% of the \
-                                         {weights:.2} GB of weight files its command names; a \
+                                         {weights:.2} GB of weights its command loads; a \
                                          fully offloaded model cannot hold much less than its \
                                          weights, so this may be under-measured (partial offload \
                                          with -ngl/-ot/--cpu-moe is a legitimate reason to sit \
@@ -1723,33 +1793,6 @@ mod tests {
             }
             other => panic!("expected Unconfirmed, got {other:?}"),
         }
-    }
-
-    /// The weights floor totals every weight file the command names, through the
-    /// container→host path map, and ignores what it cannot read.
-    #[test]
-    fn weights_are_totalled_across_host_mapped_files() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("unet.gguf"), vec![0u8; 3 * 1024 * 1024]).unwrap();
-        std::fs::write(dir.path().join("vae.safetensors"), vec![0u8; 1024 * 1024]).unwrap();
-        let mut policy = Policy::default();
-        policy.paths.insert("/sd".to_string(), dir.path().display().to_string());
-
-        let record = ModelRecord::from_expanded(
-            "img",
-            "/opt/sdcpp/bin/sd-server --diffusion-model /sd/unet.gguf \
-             --vae /sd/vae.safetensors --t5xxl /sd/absent.safetensors",
-        );
-        // 4 MiB readable; the missing file contributes nothing rather than aborting.
-        let total = weights_gb(&record, &policy).expect("readable weights");
-        assert!((total - 4.0 / 1024.0).abs() < 1e-9, "total {total}");
-
-        // Nothing readable at all → no floor is claimed (an unmapped container path).
-        let unmapped = ModelRecord::from_expanded(
-            "img",
-            "/opt/sdcpp/bin/sd-server --diffusion-model /elsewhere/u.gguf",
-        );
-        assert_eq!(weights_gb(&unmapped, &Policy::default()), None);
     }
 
     /// A failed load must not erase a footprint that was measured successfully: the

@@ -124,9 +124,13 @@ pub struct Measurement {
     /// and for future peak budgeting. `build` plans against `d_total`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peak_total: Option<f64>,
-    /// Total size in GB of the weight files the command names, when they were
-    /// readable at measure time. A fully offloaded model cannot hold much less than
-    /// its weights, which makes this a cheap, backend-agnostic sanity floor.
+    /// Total size in GB of the weights the command loads, shard chains resolved. A
+    /// fully offloaded model cannot hold much less than its weights, which makes this
+    /// a cheap, backend-agnostic sanity floor.
+    ///
+    /// `None` unless every file was accounted for. A total over whichever files were
+    /// readable is a floor below the real one, so it cannot trip, and a check that
+    /// cannot trip reads exactly like a check that passed. See `crate::weights`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub weights_gb: Option<f64>,
     /// The empty-pool occupancy this delta was taken against, in GB.
@@ -168,7 +172,7 @@ pub struct Measurement {
     pub measured_at: String,
 }
 
-/// A footprint below this fraction of its weights on disk is implausible for a
+/// A footprint below this fraction of the weights it loads is implausible for a
 /// fully offloaded model. Not 1.0: not every component is resident at once, and two
 /// verified image measurements sat at 0.97-0.98 of their file total, so the floor
 /// has to clear those while still catching a half-measured load.

@@ -390,7 +390,9 @@ either way - so it is read from the store and turned into policy by `on_unconfir
 
 The weights-on-disk floor is re-checked here too, from the stored `weights_gb`, so a
 suspiciously small footprint is surfaced at the moment a matrix is generated from it and
-not only in the sweep that recorded it.
+not only in the sweep that recorded it. It reads the stored figure rather than the files,
+which is what lets a matrix be planned off-box from a copied store; keeping the store
+authoritative is why `measure` is the component that re-stats and corrects it (SPEC §7.2).
 
 ### 4.6 The invariant every build asserts
 
@@ -505,6 +507,7 @@ crates/llama-matrix-core/
   src/apply.rs                  # backup → splice → reload wait → verify → rollback
   src/report.rs                 # typed --json shapes, one per verb
   src/ui.rs                     # stdout/stderr discipline + colour
+  src/weights.rs                # what a cmd loads off disk: shard chains, the weights floor
 ```
 
 The CLI is a thin `--json`-emitting layer; every capability is a typed function in

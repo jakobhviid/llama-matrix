@@ -379,7 +379,7 @@ it cares about instead of parsing prose. Split by what they mean:
 |---|---|---|
 | `measured`, `cached`, `adopted` | ids that now have a footprint (loaded, reused, or recovered from a renamed id) | no |
 | `failed` | `{id, reason}`; excluded from the matrix | **yes**, surface it |
-| `skipped_missing` | the weight file is not on this host | **yes**, the config or the mount is wrong |
+| `skipped_missing` | a weight file, or a shard of one, is not on this host | **yes**, the config or the mount is wrong |
 | `unconfirmed_allocation` | `{id, reason}`; the footprint may be **short**, which is the direction that OOMs | **yes**, re-measure |
 | `no_empty_pool` | the pool was never seen empty, so every footprint here is a delta over something else | **yes**, quiesce and re-measure |
 | `baseline_was` | the empty-pool baseline moved; an increase is what a pool that only *looked* empty produces | **yes** if it went up |
@@ -387,6 +387,8 @@ it cares about instead of parsing prose. Split by what they mean:
 | `changed` | `{id, previous, current, previous_measured_at}`; same box, same flags, a different number | no, but at most one of them is right |
 | `unverified_serving` | llama-swap could not confirm which command it ran | no, informational |
 | `below_weight_floor` | the footprint is under 0.90 of the weights on disk; partial offload is a legitimate cause | no, a signal |
+| `weights_unknown` | `{id, reason}`; the weights could not be totalled, so this footprint carries no floor at all | **yes**, a `[paths]` gap or a short shard set |
+| `weights_refreshed` | stored weight totals corrected against the files on disk; costs no GPU time | no |
 | `baseline`, `detected_total`, `host_baseline`, `host_total` | the box, as measured | no |
 
 `build` also reads back what `validate` last recorded: an additivity error the
