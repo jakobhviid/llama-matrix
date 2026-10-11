@@ -214,4 +214,7 @@ jobs:
           git config user.email "tap-bot@users.noreply.github.com"
           git add Formula/llama-matrix.rb
           git commit -m "llama-matrix ${VERSION}" || { echo "no formula change"; exit 0; }
-          git push
+          # To a candidate branch, not main: the tap's gate installs and tests the
+          # formula on every platform it claims and lands it only if it passes,
+          # opening an issue there if not. Force: the branch holds one candidate.
+          git push --force origin "HEAD:refs/heads/auto/formula-llama-matrix"
