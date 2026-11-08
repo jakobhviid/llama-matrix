@@ -29,7 +29,35 @@ permissions:
   contents: write
 
 jobs:
+  gate:
+    # `!no-release` in a commit subject (AGENTS.md): when every commit in a push carries it, the push cuts no
+    # release, and the version never counts those commits. A run started by hand always releases.
+    runs-on: ubuntu-latest
+    outputs:
+      release: ${{ steps.marker.outputs.release }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - id: marker
+        name: Release unless every commit pushed is marked !no-release
+        shell: bash
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          release=true
+          if [ "$GITHUB_EVENT_NAME" = push ] && git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+            subjects=$(git log --format=%s "$BEFORE..$GITHUB_SHA")
+            if [ -n "$subjects" ] && ! printf '%s\n' "$subjects" | grep -qv -- '!no-release'; then
+              release=false
+            fi
+          fi
+          echo "release=$release" >> "$GITHUB_OUTPUT"
+          echo "release=$release"
+
   test:
+    needs: gate
+    if: needs.gate.outputs.release == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -70,7 +98,7 @@ jobs:
           # scanned (subjects only, so a BREAKING CHANGE footer never matched -
           # see the guidelines' DECISIONS.md D9):
           #   type!: -> major | feat: -> minor | else -> patch.
-          v=$(git log --reverse --format='%H%x09%s' | awk -F'\t' 'BEGIN{maj=1;min=0;pat=0;started=0}{s=$2;if(s~/RELEASE-BASELINE-1\.0\.0/){maj=1;min=0;pat=0;started=1;next}if(!started)next;if(s~/^[A-Za-z]+(\([^)]*\))?!:/){maj++;min=0;pat=0}else if(s~/^feat(\([^)]*\))?:/){min++;pat=0}else{pat++}}END{print maj"."min"."pat}')
+          v=$(git log --reverse --format='%H%x09%s' | awk -F'\t' 'BEGIN{maj=1;min=0;pat=0;started=0}{s=$2;if(s~/RELEASE-BASELINE-1\.0\.0/){maj=1;min=0;pat=0;started=1;next}if(!started)next;if(s~/!no-release/)next;if(s~/^[A-Za-z]+(\([^)]*\))?!:/){maj++;min=0;pat=0}else if(s~/^feat(\([^)]*\))?:/){min++;pat=0}else{pat++}}END{print maj"."min"."pat}')
           tmp=$(mktemp)
           sed -E "s/^version = \"[^\"]*\"/version = \"$v\"/" Cargo.toml > "$tmp" && mv "$tmp" Cargo.toml
           echo "stamped $v"
@@ -132,7 +160,7 @@ jobs:
           # counted from the RELEASE-BASELINE-1.0.0 commit. Breaking = `!` in the
           # subject (type!:); footers are not scanned (DECISIONS.md D9):
           #   type!: -> major | feat: -> minor | else -> patch.
-          VERSION=$(git log --reverse --format='%H%x09%s' | awk -F'\t' 'BEGIN{maj=1;min=0;pat=0;started=0}{s=$2;if(s~/RELEASE-BASELINE-1\.0\.0/){maj=1;min=0;pat=0;started=1;next}if(!started)next;if(s~/^[A-Za-z]+(\([^)]*\))?!:/){maj++;min=0;pat=0}else if(s~/^feat(\([^)]*\))?:/){min++;pat=0}else{pat++}}END{print maj"."min"."pat}')
+          VERSION=$(git log --reverse --format='%H%x09%s' | awk -F'\t' 'BEGIN{maj=1;min=0;pat=0;started=0}{s=$2;if(s~/RELEASE-BASELINE-1\.0\.0/){maj=1;min=0;pat=0;started=1;next}if(!started)next;if(s~/!no-release/)next;if(s~/^[A-Za-z]+(\([^)]*\))?!:/){maj++;min=0;pat=0}else if(s~/^feat(\([^)]*\))?:/){min++;pat=0}else{pat++}}END{print maj"."min"."pat}')
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
 
           # Repackage the prebuilt binary as Homebrew bottles so `brew install`

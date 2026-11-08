@@ -49,6 +49,19 @@ commit **subject prefix** decides the bump:
   footer is **not** scanned (the version awk reads commit subjects only).
 - anything else (`docs:`, `chore:`, `refactor:`, …) or an un-prefixed subject →
   **patch** bump
+- `!no-release` anywhere in the subject (e.g. `docs: fix a README typo !no-release`) →
+  **no release and no bump**
+
+**`!no-release`: changes that need no new version.** Use it for the project page
+(`site/`), docs that need not reach users right away, CI tweaks and anything else
+that should not cut a release. When *every* commit in a push carries it, the
+release workflow's `gate` job skips the release (the `pages` workflow still
+publishes the site), and the version awk skips marked commits, so version numbers
+stay contiguous. A push that mixes marked and unmarked commits releases as usual,
+counting only the unmarked ones. It is not the breaking-change bang, which sits
+right before the colon (`feat!:`). Prefer it over `[skip ci]`, which also stops
+the `pages` workflow. Docs compiled into the binary (`--llm`) reach users with the
+next real release.
 
 So **pick the right commit-subject prefix for the change** and the release version
 follows automatically. Never hand-edit `version` in `Cargo.toml` to release - CI
