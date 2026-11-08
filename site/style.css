@@ -75,6 +75,8 @@ code, pre { font-family: var(--mono); }
 
 /* The hero: the name, one line on what it does, and the command that installs it. */
 .hero { padding: 3.5rem 0 2.5rem; }
+.hero-title { display: flex; align-items: center; gap: 1.1rem; }
+.hero-icon { flex-shrink: 0; width: 88px; height: 88px; }
 .hero h1 {
   margin: 0;
   font-family: var(--mono);
@@ -170,6 +172,7 @@ footer p { margin: 0 0 0.6rem; max-width: 46rem; }
   body { font-size: 16px; }
   .hero { padding-top: 2rem; }
   .hero h1 { font-size: 2.3rem; }
+  .hero-icon { width: 64px; height: 64px; }
   .tagline { font-size: 1.2rem; }
   .features { grid-template-columns: 1fr; }
 }

@@ -9,6 +9,7 @@
   <title>llama-matrix: measured co-residency for llama-swap</title>
   <meta name="description" content="llama-matrix measures how much memory each of your llama-swap models really uses, then generates a matrix block that lets as many models run at once as fit, without exceeding VRAM. macOS and Linux.">
   <link rel="canonical" href="https://jakob.hviid.phd/llama-matrix/">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -19,7 +20,7 @@
     </nav>
 
     <header class="hero">
-      <h1>llama-matrix</h1>
+      <div class="hero-title"><img class="hero-icon" src="icon.svg" alt="" width="88" height="88"><h1>llama-matrix</h1></div>
       <p class="tagline">Measure how much memory each of your llama-swap models really uses, then let as many of them run
         at once as fit, without exceeding VRAM.</p>
       <pre class="command"><code>brew trust --tap jakobhviid/tap</code><code>brew install jakobhviid/tap/llama-matrix</code></pre>
