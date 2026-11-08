@@ -1,0 +1,57 @@
+# llama-matrix
+
+> llama-matrix measures how much memory each of your llama-swap models really uses, then generates a matrix block that lets as many models run at once as fit, without exceeding VRAM. macOS and Linux.
+
+Measure how much memory each of your llama-swap models really uses, then let as many of them run at once as fit, without exceeding VRAM. The complete reference, for people and LLMs, is built into the tool: run `llama-matrix --llm`.
+llama-matrix is one of the software projects by Jakob Hviid, all listed at https://jakob.hviid.phd/software/ (for LLMs: https://jakob.hviid.phd/llms.txt).
+
+## What it does
+
+- **Measures real footprints**: `measure` loads each model alone, waits for its allocation to settle and records the GPU memory it occupies, and host RAM the same way. A footprint is cached by its memory-affecting flags, so an unrelated config edit never forces a re-measure.
+- **Declares everything that fits**: `build` finds every maximal combination whose measured footprints sum under the budget minus a safety margin, and checks each one against host RAM as well. `--budget` keeps room for other apps.
+- **Applies, then checks**: `build --apply` backs up `config.yaml`, splices in the block, waits for the hot-reload and rolls back on any anomaly. `validate` loads the tightest declared combination and compares what it occupies with the prediction.
+- **Made for scripts and agents**: Every command takes `--json`, and `llama-matrix --llm` prints the full guide, every command plus the design, for a person or an AI agent.
+
+## Install
+
+Homebrew, on macOS and Linux. Installs a prebuilt binary, so no compiler is needed. The tap is trusted once first, as Homebrew 6 and later ask.
+
+```sh
+brew trust --tap jakobhviid/tap
+brew install jakobhviid/tap/llama-matrix
+```
+
+Or one line, without Homebrew. No compiler and no root: downloads the prebuilt binary to `~/.local/bin`.
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/jakobhviid/llama-matrix/main/install.sh | sh
+```
+
+Or from source. Needs a Rust toolchain. The binary lands in `target/release/llama-matrix`.
+
+```sh
+cargo build --release
+```
+
+Then point it at your llama-swap, once. Finds your `config.yaml` and endpoint, detects the GPU budget and writes `llama-matrix.toml`. It needs a running llama-swap with the matrix engine.
+
+```sh
+llama-matrix setup
+```
+
+## Docs
+
+- [README](https://raw.githubusercontent.com/jakobhviid/llama-matrix/main/README.md): requirements, every command and the known limitations
+- [WORKFLOWS.md](https://raw.githubusercontent.com/jakobhviid/llama-matrix/main/WORKFLOWS.md): the operating loops, from setup to measure, build and apply
+- [ARCHITECTURE.md](https://raw.githubusercontent.com/jakobhviid/llama-matrix/main/ARCHITECTURE.md): the memory model and how it is built
+- [SPEC.md](https://raw.githubusercontent.com/jakobhviid/llama-matrix/main/SPEC.md): the config, the measurement store and the matrix format
+- [PRINCIPLES.md](https://raw.githubusercontent.com/jakobhviid/llama-matrix/main/PRINCIPLES.md): the design rules
+- [ROADMAP.md](https://raw.githubusercontent.com/jakobhviid/llama-matrix/main/ROADMAP.md): what it does not do yet
+
+## Optional
+
+- [Project page](https://jakob.hviid.phd/llama-matrix/): the page this file accompanies
+- [Source](https://github.com/jakobhviid/llama-matrix): MIT licensed
+- [Releases](https://github.com/jakobhviid/llama-matrix/releases)
+- [All software by Jakob Hviid](https://jakob.hviid.phd/software/)
+- [Jakob Hviid's site, for LLMs](https://jakob.hviid.phd/llms.txt)
