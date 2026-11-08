@@ -1,0 +1,35 @@
+name: pages
+
+# The project page at jakob.hviid.phd/llama-matrix: site/ published as it is, with no build step. It runs when site/
+# changes on main, or by hand. It needs GitHub Pages on, with GitHub Actions as its source. The page's layout and
+# style.css are shared with the other tools' pages (jakobhviid.github.io/_software-template/).
+on:
+  push:
+    branches: [main]
+    paths:
+      - "site/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: site
+      - id: deploy
+        uses: actions/deploy-pages@v5

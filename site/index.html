@@ -1,0 +1,157 @@
+<!doctype html>
+<!-- llama-matrix's project page at jakob.hviid.phd/llama-matrix, published from site/ by .github/workflows/pages.yml. The layout
+     and style.css are shared by every command-line tool's page; the canonical copy is in
+     jakobhviid.github.io/_software-template/. Only the words and examples here are llama-matrix's own. -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>llama-matrix: measured co-residency for llama-swap</title>
+  <meta name="description" content="llama-matrix measures how much memory each of your llama-swap models really uses, then generates a matrix block that lets as many models run at once as fit, without exceeding VRAM. macOS and Linux.">
+  <link rel="canonical" href="https://jakob.hviid.phd/llama-matrix/">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="wrap">
+    <nav class="bar">
+      <span class="crumbs"><a href="https://jakob.hviid.phd/">Jakob Hviid</a><span class="sep">/</span><a href="https://jakob.hviid.phd/software/">Software</a><span class="sep">/</span><strong>llama-matrix</strong></span>
+      <span class="links"><a href="#install">Install</a><a href="https://github.com/jakobhviid/llama-matrix">GitHub</a></span>
+    </nav>
+
+    <header class="hero">
+      <h1>llama-matrix</h1>
+      <p class="tagline">Measure how much memory each of your llama-swap models really uses, then let as many of them run
+        at once as fit, without exceeding VRAM.</p>
+      <pre class="command"><code>brew trust --tap jakobhviid/tap</code><code>brew install jakobhviid/tap/llama-matrix</code></pre>
+      <p class="actions">
+        <a class="button" href="#install">Install</a>
+        <a class="button ghost" href="https://github.com/jakobhviid/llama-matrix#readme">Read the README</a>
+      </p>
+      <p class="platforms">macOS and Linux, x86_64 and arm64 · AMD, NVIDIA and Apple Silicon GPUs · MIT licensed</p>
+    </header>
+
+    <main>
+      <section id="what">
+        <h2>What it does</h2>
+        <p class="section-lead"><a href="https://github.com/mostlygeek/llama-swap">llama-swap</a> can keep several
+          models resident at once, but it only trusts the combinations declared in its <code>matrix:</code> block and
+          does not check free memory. Declare one that does not fit and a model runs out of memory; declare too few and
+          headroom is wasted. llama-matrix is a companion to llama-swap, a separate project: it measures each model on
+          your machine and writes that block for you. It does nothing to your model weights.</p>
+        <div class="features">
+          <div class="feature">
+            <h3>Measures real footprints</h3>
+            <p><code>measure</code> loads each model alone, waits for its allocation to settle and records the GPU
+              memory it occupies, and host RAM the same way. A footprint is cached by its memory-affecting flags, so an
+              unrelated config edit never forces a re-measure.</p>
+          </div>
+          <div class="feature">
+            <h3>Declares everything that fits</h3>
+            <p><code>build</code> finds every maximal combination whose measured footprints sum under the budget minus
+              a safety margin, and checks each one against host RAM as well. <code>--budget</code> keeps room for other
+              apps.</p>
+          </div>
+          <div class="feature">
+            <h3>Applies, then checks</h3>
+            <p><code>build --apply</code> backs up <code>config.yaml</code>, splices in the block, waits for the
+              hot-reload and rolls back on any anomaly. <code>validate</code> loads the tightest declared combination and compares
+              what it occupies with the prediction.</p>
+          </div>
+          <div class="feature">
+            <h3>Made for scripts and agents</h3>
+            <p>Every command takes <code>--json</code>, and <code>llama-matrix --llm</code> prints the full guide,
+              every command plus the design, for a person or an AI agent.</p>
+          </div>
+        </div>
+      </section>
+
+      <section id="look">
+        <h2>A first look</h2>
+        <p class="section-lead">The example from the README: a roster where a couple of coders, a general model and
+          small aux services fit together, but a 122B model does not. Small services ride along in every set, each
+          pack is a group of models that may be resident together, and a heavy model runs alone.</p>
+<pre><code>matrix:
+  evict_costs:                               <span class="dim"># what to keep when something has to go</span>
+    gemma: 10                                <span class="dim">#   chat models outrank the image pool…</span>
+    z-image-turbo: 1                         <span class="dim">#   …which reloads in seconds</span>
+  sets:
+    aux:    "embed &amp; rerank &amp; whisper"       <span class="dim"># small services; ride along with every set</span>
+    <span class="ok">pack1</span>:  "gemma &amp; glm-flash &amp; +aux"       <span class="dim"># three models co-resident, under budget</span>
+    <span class="ok">pack2</span>:  "coder-30b &amp; gemma &amp; +aux"
+    <span class="warn">heavy_qwen122</span>: "qwen122 &amp; +aux"          <span class="dim"># too big to share - runs alone (+ aux)</span></code></pre>
+      </section>
+
+      <section id="install">
+        <h2>Install</h2>
+        <div class="install-step">
+          <h3>Homebrew, on macOS and Linux</h3>
+          <p>Installs a prebuilt binary, so no compiler is needed. The tap is trusted once first, as Homebrew 6 and later ask.</p>
+          <pre class="command"><code>brew trust --tap jakobhviid/tap</code><code>brew install jakobhviid/tap/llama-matrix</code></pre>
+        </div>
+        <div class="install-step">
+          <h3>Or one line, without Homebrew</h3>
+          <p>No compiler and no root: downloads the prebuilt binary to <code>~/.local/bin</code>.</p>
+          <pre class="command"><code>curl -fsSL https://raw.githubusercontent.com/jakobhviid/llama-matrix/main/install.sh | sh</code></pre>
+        </div>
+        <div class="install-step">
+          <h3>Or from source</h3>
+          <p>Needs a Rust toolchain. The binary lands in <code>target/release/llama-matrix</code>.</p>
+          <pre class="command"><code>cargo build --release</code></pre>
+        </div>
+        <div class="install-step">
+          <h3>Then point it at your llama-swap, once</h3>
+          <p>Finds your <code>config.yaml</code> and endpoint, detects the GPU budget and writes
+            <code>llama-matrix.toml</code>. It needs a running llama-swap with the matrix engine.</p>
+          <pre class="command"><code>llama-matrix setup</code></pre>
+        </div>
+      </section>
+
+      <section id="docs">
+        <h2>Documentation</h2>
+        <ul class="docs">
+          <li><a href="https://github.com/jakobhviid/llama-matrix#readme">README</a>: requirements, every command and
+            the known limitations</li>
+          <li><a href="https://github.com/jakobhviid/llama-matrix/blob/main/WORKFLOWS.md">WORKFLOWS.md</a>: the
+            operating loops, from setup to measure, build and apply</li>
+          <li><a href="https://github.com/jakobhviid/llama-matrix/blob/main/ARCHITECTURE.md">ARCHITECTURE.md</a>: the
+            memory model and how it is built</li>
+          <li><a href="https://github.com/jakobhviid/llama-matrix/blob/main/SPEC.md">SPEC.md</a>: the config, the
+            measurement store and the matrix format</li>
+          <li><a href="https://github.com/jakobhviid/llama-matrix/blob/main/PRINCIPLES.md">PRINCIPLES.md</a>: the
+            design rules</li>
+          <li><a href="https://github.com/jakobhviid/llama-matrix/blob/main/ROADMAP.md">ROADMAP.md</a>: what it does
+            not do yet</li>
+          <li><a href="https://github.com/jakobhviid/llama-matrix/releases">Releases</a></li>
+        </ul>
+      </section>
+    </main>
+
+    <footer>
+      <p>llama-matrix is open source under the MIT licence. <a href="https://github.com/mostlygeek/llama-swap">llama-swap</a>
+        is a separate project.</p>
+      <p><strong>AI disclosure.</strong> Parts of this project were written with the assistance of AI coding agents.
+        All changes are reviewed by the maintainer.</p>
+      <p>One of the <a href="https://jakob.hviid.phd/software/">software projects</a> by
+        <a href="https://jakob.hviid.phd/">Jakob Hviid</a>. All of them install from the
+        <a href="https://github.com/jakobhviid/homebrew-tap">jakobhviid/tap</a> Homebrew tap.</p>
+    </footer>
+  </div>
+
+  <script>
+    // A copy button on every command block; a block of several commands copies them all, one per line.
+    for (const block of document.querySelectorAll("pre.command")) {
+      const button = document.createElement("button");
+      button.className = "copy";
+      button.type = "button";
+      button.textContent = "Copy";
+      button.addEventListener("click", async () => {
+        const lines = [...block.querySelectorAll("code")].map((code) => code.textContent.trim());
+        await navigator.clipboard.writeText(lines.join("\n"));
+        button.textContent = "Copied";
+        setTimeout(() => (button.textContent = "Copy"), 1500);
+      });
+      block.appendChild(button);
+    }
+  </script>
+</body>
+</html>

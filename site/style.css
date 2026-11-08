@@ -1,0 +1,175 @@
+/* The project page's look, shared by every command-line tool at jakob.hviid.phd/<tool>. The canonical copy lives in
+   jakobhviid.github.io/_software-template/; change it there and copy it into each tool's site/ unchanged. The palette
+   is the academic site's (navy, sienna, cream), so the pages read as part of jakob.hviid.phd. Nothing is loaded from
+   elsewhere: no web fonts, analytics or third-party scripts. */
+
+:root {
+  --bg: #fffbf2;
+  --surface: #ffffff;
+  --text: #002642;
+  --muted: #4a5d70;
+  --accent: #a23e02;
+  --accent-hover: #7d3001;
+  --border: #e7e0cf;
+  --term-bg: #002642;
+  --term-text: #f3efe4;
+  --term-muted: #9fb3c8;
+  --term-prompt: #f0a46b;
+  --shadow: 0 1px 2px rgba(0, 38, 66, 0.06), 0 4px 16px rgba(0, 38, 66, 0.06);
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Red Hat Text", Cantarell, "Noto Sans", Ubuntu, sans-serif;
+  --serif: "Petrona", Georgia, "Times New Roman", serif;
+  --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Code", Menlo, Consolas, monospace;
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0e1a26;
+    --surface: #15263a;
+    --text: #f3efe4;
+    --muted: #b4c0cc;
+    --accent: #f0a46b;
+    --accent-hover: #f7c39b;
+    --border: #23384f;
+    --term-bg: #08121c;
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 4px 16px rgba(0, 0, 0, 0.25);
+  }
+}
+
+* { box-sizing: border-box; }
+
+html { scroll-behavior: smooth; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 17px/1.6 var(--sans);
+}
+
+a { color: var(--accent); text-underline-offset: 0.18em; text-decoration-thickness: 1px; }
+a:hover { color: var(--accent-hover); text-decoration: none; }
+
+code, pre { font-family: var(--mono); }
+:not(pre) > code { font-size: 0.9em; padding: 0.1em 0.35em; border-radius: 4px; background: var(--border); }
+
+.wrap { max-width: 920px; margin: 0 auto; padding: 0 1.5rem; }
+
+/* The bar: the way back to the academic site and the software list, then the tool's own links. */
+.bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1.5rem;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1.1rem 0;
+  font-size: 0.95rem;
+}
+.crumbs { color: var(--muted); }
+.crumbs a { color: var(--muted); text-decoration: none; }
+.crumbs a:hover { color: var(--accent); }
+.crumbs .sep { margin: 0 0.45rem; opacity: 0.6; }
+.crumbs strong { color: var(--text); font-family: var(--mono); font-weight: 600; }
+.bar .links { display: flex; gap: 1.25rem; }
+.bar .links a { text-decoration: none; text-transform: uppercase; letter-spacing: 0.08em; font-size: 0.82rem; font-weight: 600; }
+
+/* The hero: the name, one line on what it does, and the command that installs it. */
+.hero { padding: 3.5rem 0 2.5rem; }
+.hero h1 {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 3rem;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  line-height: 1.1;
+}
+.tagline { margin: 0.75rem 0 1.75rem; font-family: var(--serif); font-size: 1.45rem; line-height: 1.4; max-width: 40rem; }
+.platforms { margin: 1.25rem 0 0; color: var(--muted); font-size: 0.95rem; }
+
+.actions { display: flex; flex-wrap: wrap; gap: 0.75rem; margin-top: 1.5rem; }
+.button {
+  display: inline-block;
+  padding: 0.6rem 1.15rem;
+  border-radius: 6px;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: var(--bg);
+  font-weight: 600;
+  text-decoration: none;
+}
+.button:hover { background: var(--accent-hover); border-color: var(--accent-hover); color: var(--bg); }
+.button.ghost { background: transparent; color: var(--accent); }
+.button.ghost:hover { background: transparent; color: var(--accent-hover); }
+
+/* Commands and terminal output. */
+pre {
+  position: relative;
+  margin: 0 0 1rem;
+  padding: 1rem 1.2rem;
+  overflow-x: auto;
+  border-radius: 8px;
+  background: var(--term-bg);
+  color: var(--term-text);
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+pre.command { padding-right: 4.5rem; white-space: pre-wrap; overflow-wrap: anywhere; }
+pre.command code { display: block; }
+pre.command code::before { content: "$ "; color: var(--term-prompt); user-select: none; }
+pre .dim { color: var(--term-muted); }
+pre .ok { color: #7fd18b; }
+pre .warn { color: #f0c36b; }
+.copy {
+  position: absolute;
+  top: 0.55rem;
+  right: 0.55rem;
+  padding: 0.2rem 0.55rem;
+  border: 1px solid var(--term-muted);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--term-muted);
+  font: 0.75rem var(--sans);
+  cursor: pointer;
+}
+.copy:hover { color: var(--term-text); border-color: var(--term-text); }
+
+/* Sections. */
+main section { padding: 2rem 0; border-top: 1px solid var(--border); }
+h2 { margin: 0 0 0.5rem; font-family: var(--serif); font-size: 1.8rem; font-weight: 600; }
+h3 { margin: 0 0 0.35rem; font-size: 1.05rem; }
+.section-lead { margin: 0 0 1.5rem; color: var(--muted); max-width: 42rem; }
+
+.features { display: grid; grid-template-columns: repeat(2, 1fr); gap: 1rem; }
+.feature {
+  padding: 1.1rem 1.2rem;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+.feature p { margin: 0; color: var(--muted); font-size: 0.95rem; }
+
+.install-step { margin-bottom: 1.5rem; }
+.install-step h3 { margin-bottom: 0.5rem; }
+.install-step p { margin: 0 0 0.6rem; color: var(--muted); font-size: 0.95rem; }
+
+.docs { padding-left: 1.2rem; }
+.docs li { margin-bottom: 0.35rem; }
+
+footer {
+  margin-top: 2rem;
+  padding: 2rem 0 3rem;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+footer p { margin: 0 0 0.6rem; max-width: 46rem; }
+
+@media (max-width: 600px) {
+  body { font-size: 16px; }
+  .hero { padding-top: 2rem; }
+  .hero h1 { font-size: 2.3rem; }
+  .tagline { font-size: 1.2rem; }
+  .features { grid-template-columns: 1fr; }
+}
