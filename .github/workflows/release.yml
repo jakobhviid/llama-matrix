@@ -3,6 +3,10 @@ name: release
 on:
   push:
     branches: [main]
+    # The project page is not the software: a change to it alone cuts no release.
+    paths-ignore:
+      - "site/**"
+      - ".github/workflows/pages.yml"
   workflow_dispatch:
 
 # Releases must run ONE AT A TIME.
