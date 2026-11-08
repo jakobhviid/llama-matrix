@@ -1,3 +1,5 @@
+<img src="site/icon.svg" alt="" width="96" align="right">
+
 # llama-matrix
 
 Measure how much memory each of your [llama-swap](https://github.com/mostlygeek/llama-swap)
